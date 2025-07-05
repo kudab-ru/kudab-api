@@ -1,42 +1,43 @@
-# Dockerfile для Laravel 12 (PHP 8.2 + Alpine + Postgres)
 FROM php:8.2-fpm-alpine
 
-# Установить зависимости
-RUN apk add --no-cache --update \
+# Установка системных зависимостей
+RUN apk update && apk add --no-cache \
+    bash \
     postgresql-dev \
-    libpng-dev \
-    libjpeg-turbo-dev \
-    libzip-dev \
-    freetype-dev \
-    icu-dev \
-    zlib-dev \
-    oniguruma-dev \
-    libxml2-dev \
     git \
-    bash
+    unzip \
+    libzip-dev \
+    icu-dev \
+    oniguruma-dev \
+    libxml2-dev
 
-# Установить расширения PHP
-RUN docker-php-ext-configure gd --with-jpeg --with-freetype \
-    && docker-php-ext-install pdo pdo_pgsql gd zip intl opcache bcmath xml
+# PHP-расширения
+RUN docker-php-ext-install pdo pdo_pgsql zip intl bcmath
 
-# Установить Composer
+# Установка Composer
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /var/www/html
 
-# Копировать composer.json и composer.lock
+# Копируем только composer.json и composer.lock для кеширования установки зависимостей
 COPY composer.json composer.lock ./
 
-# Копировать остальной код
+RUN composer install --no-scripts --no-autoloader
+
+# Копируем остальной код
 COPY . .
 
-# Установить зависимости (без dev-зависимостей)
-RUN composer install --no-dev --optimize-autoloader
+# Устанавливаем зависимости с автозагрузчиком
+RUN composer install --optimize-autoloader --no-dev
 
-# Права доступа
-RUN chown -R www-data:www-data /var/www/html
+# Настраиваем права для storage и bootstrap/cache
+RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 USER www-data
 
-EXPOSE 9000
+ENTRYPOINT ["/entrypoint.sh"]
+
 CMD ["php-fpm"]
