@@ -27,11 +27,11 @@ WORKDIR /var/www/html
 # Копировать composer.json и composer.lock
 COPY composer.json composer.lock ./
 
-# Установить зависимости (без dev-зависимостей)
-RUN composer install --no-dev --optimize-autoloader
-
 # Копировать остальной код
 COPY . .
+
+# Установить зависимости (без dev-зависимостей)
+RUN composer install --no-dev --optimize-autoloader
 
 # Права доступа
 RUN chown -R www-data:www-data /var/www/html
