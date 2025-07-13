@@ -2,4 +2,4 @@
 
 use Illuminate\Support\Facades\Route;
 
-Route::apiResource('users', \App\Http\Controllers\Controller::class);
+Route::get('/api/', function () { return response()->json(['ok' => true]); });
