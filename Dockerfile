@@ -21,7 +21,6 @@ WORKDIR /var/www/html
 
 # Копируем только composer.json и composer.lock для кеширования установки зависимостей
 COPY composer.json composer.lock ./
-
 RUN composer install --no-scripts --no-autoloader
 
 # Копируем остальной код
@@ -33,11 +32,6 @@ RUN composer install --optimize-autoloader --no-dev
 # Настраиваем права для storage и bootstrap/cache
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
 
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
 USER www-data
-
-ENTRYPOINT ["/entrypoint.sh"]
 
 CMD ["php-fpm"]
