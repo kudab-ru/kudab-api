@@ -21,6 +21,9 @@ class User extends Authenticatable
         'name',
         'email',
         'password',
+        'avatar_url',
+        'bio',
+        'email_verified_at',
     ];
 
     /**
@@ -42,7 +45,35 @@ class User extends Authenticatable
     {
         return [
             'email_verified_at' => 'datetime',
+            'deleted_at' => 'datetime',
             'password' => 'hashed',
         ];
+    }
+
+    // Связь с Telegram
+    public function telegramUsers()
+    {
+        return $this->hasMany(TelegramUser::class);
+    }
+
+    // Интересы пользователя (M:N)
+    public function interests()
+    {
+        return $this->belongsToMany(Interest::class, 'interest_user')
+            ->withTimestamps();
+    }
+
+    // RSVP/Участие в событиях (M:N)
+    public function attendingEvents()
+    {
+        return $this->belongsToMany(Event::class, 'event_attendees')
+            ->withPivot('status', 'joined_at')
+            ->withTimestamps();
+    }
+
+    // Взаимодействия с контентом (лайки, комментарии и др.)
+    public function contextInteractions()
+    {
+        return $this->hasMany(ContextInteraction::class);
     }
 }
