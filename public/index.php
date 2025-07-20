@@ -1,5 +1,5 @@
 <?php
-exit(255);
+
 use Illuminate\Foundation\Application;
 use Illuminate\Http\Request;
 
