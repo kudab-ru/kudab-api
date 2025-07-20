@@ -2,7 +2,6 @@
 
 namespace App\Models;
 
-// use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
@@ -50,20 +49,32 @@ class User extends Authenticatable
         ];
     }
 
-    // Связь с Telegram
+    /**
+     * Связь с Telegram
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
     public function telegramUsers()
     {
         return $this->hasMany(TelegramUser::class);
     }
 
-    // Интересы пользователя (M:N)
+    /**
+     * Интересы пользователя (M:N)
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsToMany
+     */
     public function interests()
     {
         return $this->belongsToMany(Interest::class, 'interest_user')
             ->withTimestamps();
     }
 
-    // RSVP/Участие в событиях (M:N)
+    /**
+     * RSVP/Участие в событиях (M:N)
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsToMany
+     */
     public function attendingEvents()
     {
         return $this->belongsToMany(Event::class, 'event_attendees')
@@ -71,7 +82,11 @@ class User extends Authenticatable
             ->withTimestamps();
     }
 
-    // Взаимодействия с контентом (лайки, комментарии и др.)
+    /**
+     * Взаимодействия с контентом (лайки, комментарии и др.)
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
     public function contextInteractions()
     {
         return $this->hasMany(ContextInteraction::class);
