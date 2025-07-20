@@ -1,5 +1,5 @@
 <?php
-
+syntax_error
 use Illuminate\Foundation\Application;
 use Illuminate\Http\Request;
 
