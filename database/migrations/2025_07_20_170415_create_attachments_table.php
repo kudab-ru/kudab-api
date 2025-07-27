@@ -16,7 +16,7 @@ return new class extends Migration
             $table->string('parent_type')->comment('Тип родительского объекта: context_post, event и др.');
             $table->unsignedBigInteger('parent_id')->comment('ID родительского объекта');
             $table->string('type')->comment('Тип вложения: image, video, file и др.');
-            $table->string('url')->comment('Ссылка на файл');
+            $table->text('url')->comment('Ссылка на файл');
             $table->string('preview_url')->nullable()->comment('Ссылка на превью (если есть)');
             $table->integer('order')->default(0)->comment('Порядок вложения');
             $table->timestamps();

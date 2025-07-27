@@ -13,13 +13,14 @@ return new class extends Migration
     {
         Schema::create('social_networks', function (Blueprint $table) {
             $table->id();
-            $table->string('name')->comment('Название соцсети (VK, Telegram, Instagram, ...)');
-            $table->string('slug')->unique()->comment('Слаг: vk, telegram, instagram и др.');
+            $table->string('name', 64)->comment('Название соцсети (VK, Telegram, Instagram, ...)');
+            $table->string('slug', 32)->unique()->comment('Слаг: vk, telegram, instagram и др.');
             $table->string('icon')->nullable()->comment('Иконка/emoji или URL');
-            $table->string('url_mask')->nullable()->comment('Шаблон для генерации ссылок');
+            $table->string('url_mask', 255)->nullable()->comment('Шаблон для генерации ссылок');
             $table->timestamps();
 
             $table->index('name');
+            $table->index('slug');
         });
     }
 

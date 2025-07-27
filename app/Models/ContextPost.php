@@ -15,6 +15,7 @@ class ContextPost extends Model
         'author_id',
         'author_type',
         'community_id',
+        'social_link_id',
         'title',
         'text',
         'published_at',

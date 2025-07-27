@@ -15,13 +15,19 @@ return new class extends Migration
             $table->id();
             $table->string('name')->comment('Название сообщества');
             $table->text('description')->nullable()->comment('Описание сообщества');
-            $table->string('source')->nullable()->comment('Источник: vk, tg, site и др.');
+            $table->string('city')->nullable()->comment('Город (опционально)');
+            $table->string('street')->nullable()->comment('Улица');
+            $table->string('house')->nullable()->comment('Дом');
             $table->string('avatar_url')->nullable()->comment('Ссылка на аватар');
-            $table->string('external_id')->nullable()->comment('ID/slug в исходной соцсети');
+            $table->string('image_url')->nullable()->comment('Доп. изображение или постер');
+            $table->timestamp('last_checked_at')->nullable()->comment('Время последней проверки (парсинг/валидность)');
+            $table->string('verification_status')->nullable()->default('pending')->comment('Статус проверки/верификации (pending/approved/rejected)');
+            $table->boolean('is_verified')->default(false)->comment('Признак верификации');
             $table->timestamps();
 
-            $table->index('source');
-            $table->index('external_id');
+            $table->index('city');
+            $table->index('verification_status');
+            $table->index('is_verified');
         });
     }
 
