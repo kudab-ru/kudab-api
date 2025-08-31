@@ -2,3 +2,7 @@
 !private/
 !public/
 !.gitignore
+!interest_aliases.template.csv
+!full_interest_aliases.csv
+!interests.template.csv
+!full_interests.csv
