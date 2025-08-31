@@ -1,0 +1,120 @@
+slug,name,description,parent_slug,is_paid
+music,Музыка,"Музыкальные события, концерты и жанровые фестивали",,0
+stage,Сцена,"Театр, танец, перформанс и жанровые шоу",,0
+cinema,Кино,"Показы фильмов, фестивали и встречи с авторами",,0
+art,Искусство,"Выставки, галереи, арт-ивенты",,0
+sports,Спорт,"Соревнования, пробеги, активный отдых",,0
+food,Еда и напитки,"Гастрономия: маркеты, дегустации, фестивали",,0
+education,Образование и наука,"Лекции, мастер‑классы, конференции, технологии",,0
+family,Семья и дети,События для семей и детей,,0
+games,Игры и киберспорт,"Настолки, видеоигры, турниры",,0
+community,Сообщества и благотворительность,"Митапы, нетворкинг, волонтёрство",,0
+travel,Экскурсии и поездки,"Гиды, прогулки, выезды",,0
+wellness,Здоровье и отдых,"Йога, медитации, практики",,0
+hobbies,Хобби и DIY,"Творчество, ремёсла, клубы по интересам",,0
+nightlife,Ночная жизнь,"Клубы, вечеринки, DJ‑сеты",,0
+pop,Поп,Поп‑музыка и эстрада,music,0
+rock,Рок,Рок‑концерты и фестивали,music,0
+electronic,Электронная музыка,Electronic/EDM,music,0
+jazz,Джаз,Джаз и блюз,music,0
+classical,Классика,Классическая музыка,music,0
+hiphop,Хип‑хоп,Rap/Hip‑Hop,music,0
+indie,Инди,Инди‑сцена,music,0
+folk,Фолк,Народная и этника,music,0
+metal,Метал,Metal/Hard,music,0
+singer-songwriter,Авторская песня,"Акустика, барды",music,0
+techno,Техно,Techno,electronic,0
+house,Хаус,House / Deep,electronic,0
+trance,Транс,Trance / Psy,electronic,0
+dnb,Драм‑н‑бейс,Drum & Bass,electronic,0
+breaks,Брейкс,Breaks / Breakbeat,electronic,0
+electro,Электро,Electro / EBM,electronic,0
+punk,Панк,Punk / Hardcore,rock,0
+alt-rock,Альт‑рок,Alternative Rock,rock,0
+trap,Трэп,Trap,hiphop,0
+rnb,R&B,Rhythm & Blues,hiphop,0
+theatre,Театр,"Драма, современный театр",stage,0
+musical,Мюзикл,Мюзиклы и оперетты,stage,0
+dance,Танец,"Балет, contemporary, уличные танцы",stage,0
+circus,Цирк,Цирковые и варьете‑шоу,stage,0
+standup,Стендап,Stand‑up и комедия,stage,0
+improv,Импровизация,Импро‑шоу,stage,0
+opera,Опера,Оперные постановки,stage,0
+ballet,Балет,Классический балет,dance,0
+contemporary,Современный танец,Contemporary,dance,0
+screening,Кинопоказ,Разовые показы,cinema,0
+film-festival,Кинофестиваль,Фестивали кино,cinema,0
+author-talk,Встреча с автором,"Q&A, обсуждения после показов",cinema,0
+exhibition,Выставка,Музеи и галереи,art,0
+installation,Инсталляция,"Медиа‑арт, site‑specific",art,0
+photo,Фотография,Фото‑выставки,art,0
+street-art,Стрит‑арт,Уличное искусство,art,0
+biennale,Биеннале,Большие арт‑форумы,art,0
+run,Забег,Беговые события,sports,0
+fitness,Фитнес,Групповые тренировки,sports,0
+yoga-sport,Йога (спорт),Йога‑тренировки,sports,0
+cycling,Велоспорт,Покатушки и гонки,sports,0
+triathlon,Триатлон,Старты и тренировки,sports,0
+football,Футбол,"Матчи, любительские лиги",sports,0
+basketball,Баскетбол,"Матчи, стритбол",sports,0
+martial,Единоборства,"Бокс, ММА и пр.",sports,0
+outdoor,Аутдор,"Треккинг, хайкинг, sup",sports,0
+ski,Лыжи/сноуборд,Зимние виды,sports,0
+market,Маркет/ярмарка,"Фуд‑маркеты, ярмарки",food,0
+festival-food,Гастро‑фестиваль,Фестивали еды/напитков,food,0
+tasting,Дегустация,"Вино, крафт, кофе",food,0
+workshop-cooking,Кулинарный МК,Готовка и обучение,food,0
+restaurant-week,Ресторанные недели,"Спец‑меню, сет‑ужины",food,0
+lecture,Лекция,Публичные лекции,education,0
+workshop,Мастер‑класс,Практикумы и лаборатории,education,0
+seminar,Семинар,Углублённые занятия,education,0
+conference,Конференция,Проф. конференции и саммиты,education,0
+talk,Публичная беседа,"Интервью, fireside",education,0
+tech,Технологии,IT/инноватика/инженерия,education,0
+science,Наука,"Поп‑наука, фестивали науки",education,0
+business,Бизнес и карьера,"Менеджмент, маркетинг",education,0
+ai,Искусственный интеллект,ML/AI,tech,0
+data,Данные и аналитика,Data Science/BI,tech,0
+dev,Разработка,Web/Mobile/Backend,tech,0
+security,Безопасность,InfoSec,tech,0
+vr-ar,VR/AR,Immsersive tech,tech,0
+product,Продукт,PM/UX/Research,tech,0
+startup,Стартапы,VC/предпринимательство,tech,0
+hackathon,Хакатон,Соревнования разработчиков,tech,0
+kids,Детям,Детские события,family,0
+family-fest,Семейный фестиваль,Для всей семьи,family,0
+edu-kids,Образование для детей,"Кружки, курсы",family,0
+show-kids,Шоу для детей,"Спектакли, представления",family,0
+boardgames,Настолки,Игровые вечера,games,0
+tcg,Коллекционные карты,MTG/Pokemon/и т.п.,games,0
+videogames,Видеоигры,"LAN‑party, релизы",games,0
+esports,Киберспорт,"Турниры, лиги",games,0
+tournament,Турнир,Соревновательные события,esports,0
+meetup,Митап,Встречи сообществ,community,0
+networking,Нетворкинг,Бизнес/проф. встречи,community,0
+volunteer,Волонтёрство,Благотворительность,community,0
+charity,Благотворительность,"Сборы, аукционы",community,0
+openday,День открытых дверей,Презентации площадок/курсов,community,0
+excursion,Экскурсия,Гид‑прогулки по городу,travel,0
+tour,Тур/поездка,Однодневные/многодневные выезды,travel,0
+hike,Поход,Непродолжительные походы,travel,0
+boat,Прогулка на воде,Речные/морские прогулки,travel,0
+yoga,Йога,Практики и занятия,wellness,0
+meditation,Медитация,Mindfulness,wellness,0
+retreat,Ретрит,Выездные практики,wellness,0
+biohacking,Биохакинг,Здоровые привычки,wellness,0
+crafts,Рукоделие,Хендмейд и ремёсла,hobbies,0
+photography-hobby,Фотография (хобби),Клубы и выезды,hobbies,0
+painting,Живопись,"Акварель, масло и т.п.",hobbies,0
+ceramics,Керамика,Гончарка,hobbies,0
+woodworking,Столярка,Деревообработка,hobbies,0
+gardening,Сад/ботаника,Комнатные растения,hobbies,0
+party,Вечеринка,Клубные ивенты,nightlife,0
+dj,DJ‑сет,Выступления диджеев,nightlife,0
+bar-event,Бар‑ивент,"Пабы, бары, квизы",nightlife,0
+openair,Опенэйр,Под открытым небом,party,0
+festival,Фестиваль,Масштабное многодневное событие,community,0
+fair,Ярмарка,Торговые и промо‑площадки,food,0
+market-craft,Хендмейд‑маркет,Ремесленные маркеты,hobbies,0
+quiz,Квиз,Викторины в барах,nightlife,0
+reading,Книжные чтения,"Презентации книг, поэтические вечера",education,0

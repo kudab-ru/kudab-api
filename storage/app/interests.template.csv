@@ -1,0 +1,66 @@
+slug,name,description,parent_slug,is_paid
+music,Музыка,Музыкальные события,,0
+stage,Сцена,"Театр, танец, перформанс",,0
+cinema,Кино,Кинопоказы и фестивали кино,,0
+art,Искусство,Выставки и арт-события,,0
+sports,Спорт,Спортивные события и активный отдых,,0
+food,Еда и напитки,"Фудмаркеты, дегустации, гастро",,0
+education,Образование и наука,"Лекции, курсы, конференции, наука/тех",,0
+family,Семья и дети,Семейные и детские события,,0
+games,Игры и киберспорт,"Настолки, видеоигры, турниры",,0
+community,Сообщество и благотворительность,"Митапы, волонтёрство, тусовки по интересам",,0
+travel,Поездки и экскурсии,"Туры, выезды, прогулки",,0
+wellness,Отдых и релакс,"Йога, здоровье, спа",,0
+hobbies,Хобби и DIY,"Мастер-классы, рукоделие, ремёсла",,0
+nightlife,Ночная жизнь,"Клубы, вечеринки, DJ-сеты",,0
+pop,Поп,Поп-музыка,music,0
+rock,Рок,Рок,music,0
+electronic,Электроника,Электронная музыка,music,0
+classical,Классика,Классическая музыка,music,0
+jazz,Джаз,Джаз и блюз,music,0
+hiphop,Хип-хоп,Rap/Hip-hop,music,0
+indie,Инди,Инди,music,0
+folk,Фолк,Народная/фолк музыка,music,0
+techno,Техно,Techno,electronic,0
+house,Хаус,House,electronic,0
+dnb,Драм-н-бейс,Drum & Bass,electronic,0
+theatre,Театр,"Драма, современный театр",stage,0
+musical,Мюзикл,Мюзиклы,stage,0
+dance,Танец,"Балет, contemporary, танцы",stage,0
+circus,Цирк/варьете,Цирковые шоу,stage,0
+improv,Импровизация,Импро-шоу,stage,0
+screening,Кинопоказ,Разовые показы,cinema,0
+film-festival,Кинофестиваль,Кинофестивали,cinema,0
+exhibition,Выставка,"Галереи, музеи",art,0
+street-art,Стрит-арт,Уличное искусство,art,0
+photo,Фото,Фотография,art,0
+run,Забег,Беговые события,sports,0
+fitness,Фитнес,Групповые тренировки,sports,0
+football,Футбол,Матчи/турниры,sports,0
+basketball,Баскетбол,Матчи/турниры,sports,0
+cycling,Велоспорт,Поездки/гонки,sports,0
+outdoor,Аутдор,"Походы, sup, треккинг",sports,0
+market,Маркет/ярмарка,"Фудмаркеты, ярмарки",food,0
+tasting,Дегустация,Вино/крафт/кофе,food,0
+workshop-cooking,Кулинарный МК,Готовка,food,0
+lecture,Лекция,Публичные лекции,education,0
+workshop,Мастер-класс,Практические занятия,education,0
+conference,Конференция,"Конференции, митапы",education,0
+tech,Технологии,IT/AI/VR,education,0
+science,Наука,"Поп-наука, фестивали науки",education,0
+kids,Детям,Детские события,family,0
+family-fest,Семейный фестиваль,Фестивали для семей,family,0
+boardgames,Настолки,Игровые вечера,games,0
+esports,Киберспорт,Турниры и LAN,games,0
+meetup,Митап,Встречи сообществ,community,0
+volunteer,Волонтёрство,Благотворительность,community,0
+excursion,Экскурсия,Гид-прогулки,travel,0
+tour,Тур/поездка,Однодневные/многодневные,travel,0
+yoga,Йога,Практики йоги,wellness,0
+meditation,Медитация,Mindfulness,wellness,0
+crafts,Рукоделие,Хендмейд,hobbies,0
+photography,Фотография (хобби),"Клубы, выезды",hobbies,0
+party,Вечеринка,"Клубы, вечеринки",nightlife,0
+dj,DJ-сет,Диджей-сеты,nightlife,0
+format-festival,Фестиваль (формат),Кросс-категорийный формат,education,0
+openair,Опенэйр (формат),Под открытым небом,music,0
