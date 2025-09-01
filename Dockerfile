@@ -1,33 +1,37 @@
 FROM php:8.2-fpm-alpine
 
-# Установка системных зависимостей
+# зеркало можно оставить — так сборка быстрее
+RUN sed -i 's|dl-cdn.alpinelinux.org/alpine|mirrors.aliyun.com/alpine|g' /etc/apk/repositories
+
+# --- runtime пакеты + dev-пакеты (во временном слое .build-deps)
 RUN apk update && apk add --no-cache \
-    bash postgresql-dev git unzip \
-    libzip-dev icu-dev oniguruma-dev libxml2-dev \
-    $PHPIZE_DEPS
+    bash git unzip icu-libs libzip libpq \
+ && apk add --no-cache --virtual .build-deps \
+    $PHPIZE_DEPS postgresql-dev libzip-dev icu-dev oniguruma-dev libxml2-dev \
+ # --- phpredis (именно PECL)
+ && pecl install -o -f redis \
+ && docker-php-ext-enable redis \
+ # --- остальные расширения
+ && docker-php-ext-install pdo pdo_pgsql zip intl bcmath pcntl \
+ # --- чистим dev-пакеты
+ && apk del .build-deps
 
-# PHP-расширения
-RUN docker-php-ext-install pdo pdo_pgsql zip intl bcmath pcntl
-
-# Установка Composer
+# composer
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /var/www/html
 
-# Копируем только composer.json и composer.lock для кеширования установки зависимостей
+# сначала зависимости, чтобы слои кешировались лучше
 COPY composer.json composer.lock ./
-RUN composer install --no-scripts --no-autoloader --no-interaction --prefer-dist
+RUN composer install --no-dev --no-scripts --prefer-dist --no-interaction
 
-# Копируем остальной код
+# затем весь код
 COPY . .
+RUN composer install --no-dev --optimize-autoloader --no-interaction
 
-# Устанавливаем зависимости с автозагрузчиком
-RUN composer install --optimize-autoloader --no-dev --no-interaction --prefer-dist \
-    && php -v && php -m | grep -i pcntl
+# права в контейнере (на случай, если томов нет)
+RUN mkdir -p storage bootstrap/cache \
+ && chmod -R ug+rwX storage bootstrap/cache
 
-# Настраиваем права для storage и bootstrap/cache
-RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
-
-USER www-data
-
+# НЕ задаём USER тут — в compose вы зададите user: "${UID}:${GID}"
 CMD ["php-fpm"]
