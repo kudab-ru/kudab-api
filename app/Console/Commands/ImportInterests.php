@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\Interest;
 use App\Models\InterestAlias;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Schema;
 use League\Csv\Reader;
 
 class ImportInterests extends Command
@@ -14,58 +15,91 @@ class ImportInterests extends Command
 
     public function handle(): int
     {
-        $path = base_path($this->argument('path'));
-        if (!file_exists($path)) { $this->error("File not found: {$path}"); return 1; }
+        $pathArg = $this->argument('path');
+        $path = base_path($pathArg);
+        if (!is_file($path)) {
+            $this->error("File not found: {$path}");
+            return 1;
+        }
 
-        $csv = Reader::createFromPath($path); $csv->setHeaderOffset(0);
+        $csv = Reader::createFromPath($path, 'r');
+        $csv->setHeaderOffset(0);
         $rows = iterator_to_array($csv->getRecords(), false);
+
+        // проверим, какие колонки реально есть в БД
+        $hasDescription = Schema::hasColumn('interests', 'description');
+        $hasIsPaid      = Schema::hasColumn('interests', 'is_paid');
 
         // 1) создать/обновить интересы без parent_id
         $bySlug = [];
         foreach ($rows as $row) {
             $slug = mb_strtolower(trim($row['slug'] ?? ''));
             $name = trim($row['name'] ?? '');
-            if (!$slug || !$name) continue;
+            if ($slug === '' || $name === '') continue;
 
-            $i = Interest::firstOrNew(['slug'=>$slug]);
-            $i->name = $name;
-            $i->save();
-            $bySlug[$slug] = $i->id;
+            $interest = Interest::firstOrNew(['slug' => $slug]);
+            $interest->slug = $slug; // важно: явно проставить
+            $interest->name = $name;
+
+            if ($hasDescription) {
+                $interest->description = trim((string)($row['description'] ?? '')) ?: null;
+            }
+            if ($hasIsPaid) {
+                $paidRaw = strtolower(trim((string)($row['is_paid'] ?? '0')));
+                $interest->is_paid = in_array($paidRaw, ['1','true','yes','y','да'], true) ? 1 : 0;
+            }
+
+            $interest->save();
+            $bySlug[$slug] = (int)$interest->id;
         }
 
         // 2) второй проход — расставить parent_id
         $updatedParents = 0; $misses = 0;
         foreach ($rows as $row) {
             $slug = mb_strtolower(trim($row['slug'] ?? ''));
-            $p    = mb_strtolower(trim($row['parent_slug'] ?? ''));
-            if (!$slug) continue;
+            if ($slug === '') continue;
 
-            if ($p === '' || !isset($bySlug[$p])) {
-                // корень или неизвестный родитель
-                Interest::where('slug',$slug)->update(['parent_id'=>null]);
-                if ($p && !isset($bySlug[$p])) $misses++;
+            $parentSlug = mb_strtolower(trim($row['parent_slug'] ?? ''));
+            if ($parentSlug === '') {
+                $updatedParents += Interest::where('slug', $slug)->update(['parent_id' => null]);
                 continue;
             }
-            $updatedParents += Interest::where('slug',$slug)->update(['parent_id'=>$bySlug[$p]]);
+
+            if (!isset($bySlug[$parentSlug])) {
+                $misses++;
+                $updatedParents += Interest::where('slug', $slug)->update(['parent_id' => null]);
+                continue;
+            }
+
+            $updatedParents += Interest::where('slug', $slug)->update(['parent_id' => $bySlug[$parentSlug]]);
         }
 
-        // 3) алиасы (если есть)
-        $apath = base_path($this->option('aliases'));
-        if (file_exists($apath)) {
-            $acsv = Reader::createFromPath($apath); $acsv->setHeaderOffset(0);
+        // 3) алиасы (если файл есть)
+        $aliasesPathArg = $this->option('aliases');
+        $aliasesPath = base_path($aliasesPathArg);
+        if (is_file($aliasesPath)) {
+            $acsv = Reader::createFromPath($aliasesPath, 'r');
+            $acsv->setHeaderOffset(0);
             $added = 0;
+
             foreach ($acsv->getRecords() as $row) {
                 $alias = mb_strtolower(trim($row['alias'] ?? ''));
-                $slug  = mb_strtolower(trim($row['interest_slug'] ?? ''));
-                $loc   = trim($row['locale'] ?? '') ?: null;
-                if (!$alias || !$slug || !isset($bySlug[$slug])) continue;
+                $interestSlug = mb_strtolower(trim($row['interest_slug'] ?? ''));
+                $locale = trim((string)($row['locale'] ?? '')) ?: null;
 
-                InterestAlias::firstOrCreate(
-                    ['alias'=>$alias],
-                    ['interest_id'=>$bySlug[$slug], 'locale'=>$loc]
-                ) && $added++;
+                if ($alias === '' || $interestSlug === '' || !isset($bySlug[$interestSlug])) continue;
+
+                $created = InterestAlias::firstOrCreate(
+                    ['alias' => $alias],
+                    ['interest_id' => $bySlug[$interestSlug], 'locale' => $locale]
+                );
+
+                if ($created->wasRecentlyCreated) $added++;
             }
+
             $this->info("Aliases imported: +{$added}");
+        } else {
+            $this->line("Aliases file not found, skipping: {$aliasesPath}");
         }
 
         $this->info("Interests imported: ".count($bySlug).", parents updated: {$updatedParents}".($misses? ", misses: {$misses}":""));
