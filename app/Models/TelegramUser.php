@@ -9,17 +9,11 @@ class TelegramUser extends Model
 {
     use HasFactory;
 
+    protected $table = 'telegram.users';
+
     protected $fillable = [
-        'user_id',
-        'telegram_id',
-        'telegram_username',
-        'first_name',
-        'last_name',
-        'language_code',
-        'chat_id',
-        'is_bot',
-        'registered_at',
-        'last_active',
+        'user_id','telegram_id','telegram_username','first_name','last_name',
+        'language_code','chat_id','is_bot','registered_at','last_active',
     ];
 
     protected $casts = [

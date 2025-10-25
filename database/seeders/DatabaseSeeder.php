@@ -17,6 +17,7 @@ class DatabaseSeeder extends Seeder
         $seeders = [
             SocialNetworksTableSeeder::class,
             CommunitiesTableSeeder::class,
+            RolesSeeder::class,
             //            InterestsTableSeeder::class,
             //            InterestsCsvSeeder::class,
             //            AdditionCommunitiesTableSeeder::class,
