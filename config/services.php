@@ -35,4 +35,7 @@ return [
         ],
     ],
 
+    'bot' => [
+        'shared_token' => env('BOT_SHARED_TOKEN'),
+    ],
 ];

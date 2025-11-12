@@ -17,7 +17,7 @@ class EventRepository
      * - city: string
      * - date_from: Y-m-d или RFC3339
      * - date_to:   Y-m-d или RFC3339
-     * - q: поиск по названию (ILIKE)
+     * - q: поиск по названию/описанию события и названию/описанию сообщества (ILIKE)
      * - community_id: int
      * - interests: int[] — список ID интересов
      */
@@ -25,16 +25,15 @@ class EventRepository
     {
         $q = Event::query()
             ->whereNull('deleted_at')
-            ->where('start_time', '>=', now()->subDay()) // чуть-чуть толерантности к времени
+            ->where('start_time', '>=', now()->subDay()) // небольшая толерантность ко времени
             ->with([
-                // Никаких slug — только то, что есть в схеме
                 'community:id,name,city,avatar_url',
                 'interests:id,name',
             ])
             ->orderBy('start_time');
 
         if (!empty($filters['city'])) {
-            // Для Postgres регистр-независимый поиск: ILIKE
+            // Для Postgres регистронезависимый поиск: ILIKE
             $q->where('city', 'ILIKE', $filters['city']);
         }
 
@@ -47,11 +46,19 @@ class EventRepository
         }
 
         if (!empty($filters['community_id'])) {
-            $q->where('community_id', (int)$filters['community_id']);
+            $q->where('community_id', (int) $filters['community_id']);
         }
 
         if (!empty($filters['q'])) {
-            $q->where('title', 'ILIKE', '%'.trim($filters['q']).'%');
+            $term = '%'.trim((string) $filters['q']).'%';
+            $q->where(function ($w) use ($term) {
+                $w->where('title', 'ILIKE', $term)
+                    ->orWhere('description', 'ILIKE', $term)
+                    ->orWhereHas('community', function ($c) use ($term) {
+                        $c->where('name', 'ILIKE', $term)
+                            ->orWhere('description', 'ILIKE', $term);
+                    });
+            });
         }
 
         if (!empty($filters['interests']) && is_array($filters['interests'])) {
@@ -92,7 +99,7 @@ class EventRepository
     /**
      * Подмешивает к моделям $event->images — массив URL (стабильный порядок).
      * Приоритет:
-     *   1) event_sources.images (объединяем все источники события)
+     *   1) event_sources.images (агрегация всех источников события)
      *   2) attachments(parent=context_post, type in [image,photo])
      *   3) attachments(parent=event,       type in [image,photo])
      */
