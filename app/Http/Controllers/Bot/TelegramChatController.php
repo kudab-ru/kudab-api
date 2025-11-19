@@ -25,9 +25,14 @@ class TelegramChatController extends Controller
 
         return response()->json([
             'telegram_id' => $telegramId,
-            'chats'       => $chats
-                ->map(fn (TelegramChat $chat) => $this->serializeChat($chat))
-                ->values(),
+            'chats' => $chats->map(fn (TelegramChat $chat) => [
+                'id'               => $chat->id,
+                'telegram_chat_id' => $chat->telegram_chat_id,
+                'chat_type'        => $chat->chat_type,
+                'title'            => $chat->title,
+                'username'         => $chat->username,
+                // can_post / status как было
+            ]),
         ]);
     }
 

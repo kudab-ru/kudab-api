@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\CityController;
 use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Bot\RoleController;
+use App\Http\Controllers\Bot\TelegramChatBroadcastController;
 use App\Http\Controllers\Bot\TelegramChatController;
 use Illuminate\Support\Facades\Route;
 
@@ -28,4 +29,7 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     Route::get('/telegram-chats/by-telegram/{telegram_id}', [TelegramChatController::class, 'listByTelegram']);
     Route::post('/telegram-chats/link',   [TelegramChatController::class, 'link']);
     Route::post('/telegram-chats/unlink', [TelegramChatController::class, 'unlink']);
+
+    Route::post('/broadcast/get', [TelegramChatBroadcastController::class, 'getBroadcast']);
+    Route::post('/broadcast/update', [TelegramChatBroadcastController::class, 'updateBroadcast']);
 });
