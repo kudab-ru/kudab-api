@@ -208,8 +208,13 @@ class EventRepository
             if (empty($images)) {
                 $images = $evRows->get($e->id, []);
             }
-            // просто добавляем как атрибут — попадёт в JSON
-            $e->setAttribute('images', array_values($images));
+
+            // Чистый массив строк в стабильном порядке
+            $images = array_values($images);
+
+            // Массив картинок + отдельная обложка
+            $e->setAttribute('images', $images);
+            $e->setAttribute('poster', $images[0] ?? null);
         });
     }
 }

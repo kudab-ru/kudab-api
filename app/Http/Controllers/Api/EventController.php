@@ -70,7 +70,8 @@ class EventController extends Controller
      *             @OA\Property(property="id", type="integer"),
      *             @OA\Property(property="name", type="string")
      *           )),
-     *           @OA\Property(property="images", type="array", @OA\Items(type="string"))
+     *           @OA\Property(property="images", type="array", @OA\Items(type="string")),
+     *           @OA\Property(property="poster", type="string", nullable=true)
      *         )
      *       )
      *     )
@@ -140,7 +141,8 @@ class EventController extends Controller
      *         @OA\Property(property="id", type="integer"),
      *         @OA\Property(property="name", type="string")
      *       )),
-     *       @OA\Property(property="images", type="array", @OA\Items(type="string"))
+     *       @OA\Property(property="images", type="array", @OA\Items(type="string")),
+     *       @OA\Property(property="poster", type="string", nullable=true)
      *     )
      *   ),
      *   @OA\Response(response=404, description="Not found")

@@ -176,6 +176,7 @@ class TelegramChatBroadcastController extends Controller
                     'locale'      => $tpl->locale,
                     'show_images' => (bool) $tpl->show_images,
                     'max_images'  => (int) $tpl->max_images,
+                    'body'        => $tpl->body,
                 ];
             })
             ->values();
