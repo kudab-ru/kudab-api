@@ -3,7 +3,9 @@
 namespace App\Http\Controllers\Bot;
 
 use App\Http\Controllers\Controller;
+use App\Models\TelegramMessageTemplate;
 use App\Services\Telegram\TelegramChatBroadcastService;
+use App\Services\Telegram\TelegramMessageTemplateService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use RuntimeException;
@@ -13,6 +15,7 @@ class TelegramChatBroadcastController extends Controller
 {
     public function __construct(
         private readonly TelegramChatBroadcastService $broadcastService,
+        private readonly TelegramMessageTemplateService $templateService,
     ) {}
 
     /**
@@ -136,4 +139,52 @@ class TelegramChatBroadcastController extends Controller
             ]);
         }
     }
+
+    /**
+     * Список доступных шаблонов для рассылки 1 события.
+     *
+     * GET /api/bot/broadcast/templates?locale=ru
+     *
+     * Ответ:
+     * {
+     *   "ok": true,
+     *   "locale": "ru",
+     *   "type": "single",
+     *   "templates": [
+     *     {
+     *       "code": "single_basic",
+     *       "name": "Полная карточка",
+     *       "description": "Заголовок, дата, город, описание, ссылка.",
+     *       "show_images": true,
+     *       "max_images": 3
+     *     },
+     *     ...
+     *   ]
+     * }
+     */
+    public function listTemplates(Request $request): JsonResponse
+    {
+        $locale = (string) $request->input('locale', 'ru');
+
+        $templates = $this->templateService
+            ->listSingleTemplates($locale)
+            ->map(function (TelegramMessageTemplate $tpl) {
+                return [
+                    'code'        => $tpl->code,
+                    'name'        => $tpl->name,
+                    'description' => $tpl->description,
+                    'locale'      => $tpl->locale,
+                    'show_images' => (bool) $tpl->show_images,
+                    'max_images'  => (int) $tpl->max_images,
+                ];
+            })
+            ->values();
+
+        return response()->json([
+            'ok'        => true,
+            'locale'    => $locale,
+            'templates' => $templates,
+        ]);
+    }
+
 }

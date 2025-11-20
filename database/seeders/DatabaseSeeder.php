@@ -18,6 +18,7 @@ class DatabaseSeeder extends Seeder
             SocialNetworksTableSeeder::class,
             CommunitiesTableSeeder::class,
             RolesSeeder::class,
+            TelegramMessageTemplatesSeeder::class,
             //            InterestsTableSeeder::class,
             //            InterestsCsvSeeder::class,
             //            AdditionCommunitiesTableSeeder::class,

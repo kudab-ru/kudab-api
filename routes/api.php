@@ -32,4 +32,6 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
 
     Route::post('/broadcast/get', [TelegramChatBroadcastController::class, 'getBroadcast']);
     Route::post('/broadcast/update', [TelegramChatBroadcastController::class, 'updateBroadcast']);
+
+    Route::get('/broadcast/templates', [TelegramChatBroadcastController::class, 'listTemplates']);
 });
