@@ -14,34 +14,47 @@ class TelegramMessageTemplatesSeeder extends Seeder
 
         // --- Тела шаблонов ---------------------------------------------------
 
-        // Полная карточка: заголовок, дата, город/площадка, короткое описание, ссылка
+        // Базовый: заголовок, адрес/дата/цена, описание, теги, ссылка.
         $basicBody = implode("\n", [
-            '<b>{title}</b>',
+            '🎟 <b>{title}</b>',
+            '',
+            '📍 {address}',
             '🗓 {start_time|human}',
-            '📍 {city}{place|prepend:", "}',
+            '💸 {price_label}',
             '',
             '{description|slice:0..400|escape_html}',
             '',
-            '<a href="{url}">Подробнее →</a>',
-        ]);
-
-        // Компактный вариант: без описания, только факт + ссылка
-        $shortBody = implode("\n", [
-            '<b>{title}</b>',
-            '🗓 {start_time|human} · {city}{place|prepend:", "}',
+            '{tags|prepend:"🏷 "}',
             '',
-            '{url}',
+            '<a href="{url}">Подробнее на kudasobrat.ru →</a>',
         ]);
 
-        // Более «промо»-вариант: крючок + укороченное описание + брендовая подпись
-        $promoBody = implode("\n", [
-            '🔥 <b>{title}</b>',
+        // Краткий: заголовок, адрес/дата/цена, теги, ссылка (без описания).
+        $shortBody = implode("\n", [
+            '🎟 <b>{title}</b>',
+            '',
+            '📍 {address}',
             '🗓 {start_time|human}',
-            '📍 {city}{place|prepend:", "}',
+            '💸 {price_label}',
+            '',
+            '{tags|prepend:"🏷 "}',
+            '',
+            '<a href="{url}">Подробнее на kudasobrat.ru →</a>',
+        ]);
+
+        // Промо: заголовок, адрес/дата/цена, короткое описание, теги, ссылка.
+        $promoBody = implode("\n", [
+            '🎟 <b>{title}</b>',
+            '',
+            '📍 {address}',
+            '🗓 {start_time|human}',
+            '💸 {price_label}',
             '',
             '{description|slice:0..280|escape_html}',
             '',
-            '<a href="{url}">Смотреть на kudasobrat.ru →</a>',
+            '{tags|prepend:"🏷 "}',
+            '',
+            '<a href="{url}">Подробнее на kudasobrat.ru →</a>',
         ]);
 
         // --- Набор строк для upsert -----------------------------------------
@@ -51,7 +64,7 @@ class TelegramMessageTemplatesSeeder extends Seeder
                 'code'        => 'basic',
                 'locale'      => 'ru',
                 'name'        => 'Базовый анонс',
-                'description' => 'Полная карточка события: заголовок, дата/город, короткое описание и ссылка.',
+                'description' => 'Полная карточка события: заголовок, адрес, дата/время, цена, теги, описание и ссылка.',
                 'body'        => $basicBody,
                 'show_images' => true,
                 'max_images'  => 3,
@@ -63,7 +76,7 @@ class TelegramMessageTemplatesSeeder extends Seeder
                 'code'        => 'short',
                 'locale'      => 'ru',
                 'name'        => 'Краткий анонс',
-                'description' => 'Компактный формат: заголовок, дата/город и ссылка без описания.',
+                'description' => 'Компактный формат: заголовок, адрес, дата/время, цена, теги и ссылка без описания.',
                 'body'        => $shortBody,
                 'show_images' => true,
                 'max_images'  => 1,
@@ -75,7 +88,7 @@ class TelegramMessageTemplatesSeeder extends Seeder
                 'code'        => 'promo',
                 'locale'      => 'ru',
                 'name'        => 'Промо-анонс',
-                'description' => 'Чуть более “рекламный” формат: акцент, короткое описание и ссылка с брендом.',
+                'description' => 'Промо-формат: заголовок, адрес, дата/время, цена, короткое описание, теги и ссылка с брендом.',
                 'body'        => $promoBody,
                 'show_images' => true,
                 'max_images'  => 3,
