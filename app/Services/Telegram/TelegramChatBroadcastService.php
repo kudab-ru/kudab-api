@@ -6,6 +6,7 @@ use App\Contracts\Telegram\TelegramChatBroadcastRepositoryInterface;
 use App\Contracts\Telegram\TelegramChatRepositoryInterface;
 use App\Contracts\Telegram\TelegramUserRepositoryInterface;
 use App\Contracts\Telegram\BotRoleServiceInterface;
+use App\Models\Event;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use DateTimeInterface;
@@ -122,5 +123,60 @@ class TelegramChatBroadcastService
         }
 
         return [$telegramChat, $role];
+    }
+
+    /**
+     * Выбрать одно событие для предпросмотра/рассылки для заданного чата.
+     *
+     * Логика v1:
+     *  - только активные события (scopeActive),
+     *  - только будущие (scopeUpcoming),
+     *  - самое ближайшее по start_time,
+     *  - если у чата есть city_id — берём события, где community.city_id = city_id чата.
+     *
+     * @param int    $telegramId      Telegram ID пользователя (из лички)
+     * @param int    $telegramChatId  telegram_chat_id канала/чата
+     * @param string $mode            'preview' | 'run' и т.п. (на будущее, пока не используется)
+     */
+    public function pickSingleEventId(
+        int $telegramId,
+        int $telegramChatId,
+        string $mode = 'preview',
+    ): ?int {
+        $chat = $this->getChatByTelegram($telegramId, $telegramChatId);
+
+        // Предполагаем, что у TelegramChat есть city_id (ссылка на справочник городов).
+        // Если поля нет или оно null — фильтра по городу не будет.
+        $cityId = $chat->city_id ?? null;
+
+        $query = Event::query()
+            ->active()
+            ->upcoming()
+            ->orderBy('start_time');
+
+        if ($cityId) {
+            // city_id у события берём через связанное сообщество (community.city_id)
+            $query->whereHas('community', function ($q) use ($cityId) {
+                $q->where('city_id', $cityId);
+            });
+        }
+
+        $event = $query->first();
+
+        return $event?->id;
+    }
+
+    /**
+     * Вытянуть TelegramChat с проверкой прав.
+     *
+     * Тонкая обёртка над resolveManagedChat, чтобы не дублировать проверки.
+     */
+    private function getChatByTelegram(
+        int $telegramId,
+        int $telegramChatId,
+    ): TelegramChat {
+        [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
+
+        return $chat;
     }
 }

@@ -188,4 +188,68 @@ class TelegramChatBroadcastController extends Controller
         ]);
     }
 
+
+    /**
+     * Подбор одного события для предпросмотра / ручной отправки.
+     *
+     * POST /api/bot/broadcast/pick-single
+     *
+     * Body:
+     * {
+     *   "telegram_id": 123456789,
+     *   "telegram_chat_id": -1001234567890,
+     *   "mode": "preview" | "publish"
+     * }
+     *
+     * Ответ:
+     * { "ok": true, "event_id": "12345" }
+     * или
+     * { "ok": false, "error": "..." }
+     */
+    public function pickSingle(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'telegram_id'      => ['required', 'integer'],
+            'telegram_chat_id' => ['required', 'integer'],
+            'mode'             => ['nullable', 'string', 'in:preview,publish'],
+        ]);
+
+        $telegramId     = (int) $validated['telegram_id'];
+        $telegramChatId = (int) $validated['telegram_chat_id'];
+        $mode           = (string) ($validated['mode'] ?? 'preview');
+
+        try {
+            // 👉 вся бизнес-логика — в сервисе
+            $eventId = $this->broadcastService->pickSingleEventId(
+                telegramId: $telegramId,
+                telegramChatId: $telegramChatId,
+                mode: $mode,
+            );
+
+            if (!$eventId) {
+                return response()->json([
+                    'ok'    => false,
+                    'error' => 'Подходящих событий пока нет.',
+                ]);
+            }
+
+            return response()->json([
+                'ok'       => true,
+                'event_id' => (string) $eventId,
+            ]);
+        } catch (RuntimeException $e) {
+            return response()->json([
+                'ok'    => false,
+                'error' => $e->getMessage(),
+            ]);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json([
+                'ok'    => false,
+                'error' => 'Не удалось подобрать событие для рассылки.',
+            ]);
+        }
+    }
+
 }
