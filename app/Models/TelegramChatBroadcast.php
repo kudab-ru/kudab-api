@@ -61,4 +61,9 @@ class TelegramChatBroadcast extends Model
         $settings['template_code'] = $templateCode;
         $this->settings = $settings;
     }
+
+    public function items()
+    {
+        return $this->hasMany(TelegramChatBroadcastItem::class, 'broadcast_id');
+    }
 }

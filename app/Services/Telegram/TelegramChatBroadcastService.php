@@ -2,6 +2,7 @@
 
 namespace App\Services\Telegram;
 
+use App\Contracts\Telegram\TelegramChatBroadcastItemRepositoryInterface;
 use App\Contracts\Telegram\TelegramChatBroadcastRepositoryInterface;
 use App\Contracts\Telegram\TelegramChatRepositoryInterface;
 use App\Contracts\Telegram\TelegramUserRepositoryInterface;
@@ -9,16 +10,18 @@ use App\Contracts\Telegram\BotRoleServiceInterface;
 use App\Models\Event;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
+use App\Models\TelegramChatBroadcastItem;
 use DateTimeInterface;
 use RuntimeException;
 
 class TelegramChatBroadcastService
 {
     public function __construct(
-        private readonly TelegramUserRepositoryInterface          $telegramUserRepository,
-        private readonly TelegramChatRepositoryInterface          $chatRepository,
-        private readonly TelegramChatBroadcastRepositoryInterface $broadcastRepository,
-        private readonly BotRoleServiceInterface                   $botRoleService,
+        private readonly TelegramUserRepositoryInterface              $telegramUserRepository,
+        private readonly TelegramChatRepositoryInterface              $chatRepository,
+        private readonly TelegramChatBroadcastRepositoryInterface     $broadcastRepository,
+        private readonly TelegramChatBroadcastItemRepositoryInterface $broadcastItemRepository,
+        private readonly BotRoleServiceInterface                      $botRoleService,
     ) {}
 
     /**
@@ -28,7 +31,7 @@ class TelegramChatBroadcastService
      *  - что TelegramUser существует,
      *  - что чат существует,
      *  - что у пользователя есть права управлять чатами,
-     *  - что этот пользователь действительно владелец чата (или хотя бы админ, если так решишь).
+     *  - что этот пользователь действительно владелец чата (или хотя бы админ).
      */
     public function getSettingsByTelegram(
         int $telegramId,
@@ -83,46 +86,57 @@ class TelegramChatBroadcastService
         $this->broadcastRepository->touchLastPreviewAt($chatId, $moment);
     }
 
-    // ---------------------------------------------------------------------
-    // Внутренние помощники
-    // ---------------------------------------------------------------------
-
     /**
-     * Проверка прав + поиск чата, которым можно управлять.
+     * Поставить одно событие в очередь для данного Telegram-чата.
      *
-     * Возвращает кортеж [TelegramChat, роль].
+     * Работает через те же проверки прав, что и getSettingsByTelegram().
      */
-    private function resolveManagedChat(
+    public function enqueueSingleEventForChat(
         int $telegramId,
         int $telegramChatId,
-    ): array {
-        $role = $this->botRoleService->getRoleByTelegramId($telegramId);
+        int $eventId,
+        ?DateTimeInterface $plannedAt = null,
+    ): TelegramChatBroadcastItem {
+        [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
 
-        // Логика как в TelegramChatService: кто вообще может управлять чатами
-        if (!in_array($role, ['user', 'moderator', 'admin', 'superadmin'], true)) {
-            throw new RuntimeException('Недостаточно прав для управления связанными чатами');
+        $broadcast = $this->broadcastRepository->getOrCreateByChatId($chat->id);
+
+        return $this->broadcastItemRepository->enqueue(
+            $broadcast->id,
+            $eventId,
+            $plannedAt,
+        );
+    }
+
+    /**
+     * Пометить событие как успешно опубликованное в этом чате.
+     *
+     * Если элемента очереди для (broadcast_id, event_id) ещё нет —
+     * создаём его на лету и сразу помечаем как опубликованный.
+     */
+    public function markSingleEventPostedForChat(
+        int $telegramId,
+        int $telegramChatId,
+        int $eventId,
+        ?DateTimeInterface $moment = null,
+    ): void {
+        [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
+
+        $broadcast = $this->broadcastRepository->getOrCreateByChatId($chat->id);
+
+        $item = $this->broadcastItemRepository
+            ->findByBroadcastAndEvent($broadcast->id, $eventId);
+
+        if (!$item) {
+            $item = $this->broadcastItemRepository->enqueue(
+                $broadcast->id,
+                $eventId,
+                $moment,
+            );
         }
 
-        $telegramUser = $this->telegramUserRepository->findByTelegramId($telegramId);
-        if (!$telegramUser) {
-            throw new RuntimeException('Telegram-пользователь не найден в БД');
-        }
-
-        $telegramChat = $this->chatRepository->findByTelegramChatId($telegramChatId);
-        if (!$telegramChat) {
-            throw new RuntimeException('Чат не найден в БД: ' . $telegramChatId);
-        }
-
-        // Базовое ограничение: чат должен принадлежать этому пользователю.
-        // Если захочешь дать супер/админу управлять любым чатам — можно ослабить эту проверку.
-        if ($telegramChat->telegram_user_id !== $telegramUser->id) {
-            // Разрешаем superadmin/admin управлять любыми чатами (опционально — можно убрать).
-            if (!in_array($role, ['admin', 'superadmin'], true)) {
-                throw new RuntimeException('Этот чат не привязан к текущему пользователю');
-            }
-        }
-
-        return [$telegramChat, $role];
+        $this->broadcastItemRepository->markPosted($item, $moment);
+        $this->broadcastRepository->touchLastRunAt($chat->id, $moment);
     }
 
     /**
@@ -166,6 +180,47 @@ class TelegramChatBroadcastService
         return $event?->id;
     }
 
+    // ---------------------------------------------------------------------
+    // Внутренние помощники
+    // ---------------------------------------------------------------------
+
+    /**
+     * Проверка прав + поиск чата, которым можно управлять.
+     *
+     * Возвращает кортеж [TelegramChat, роль].
+     */
+    private function resolveManagedChat(
+        int $telegramId,
+        int $telegramChatId,
+    ): array {
+        $role = $this->botRoleService->getRoleByTelegramId($telegramId);
+
+        // Логика как в TelegramChatService: кто вообще может управлять чатами
+        if (!in_array($role, ['user', 'moderator', 'admin', 'superadmin'], true)) {
+            throw new RuntimeException('Недостаточно прав для управления связанными чатами');
+        }
+
+        $telegramUser = $this->telegramUserRepository->findByTelegramId($telegramId);
+        if (!$telegramUser) {
+            throw new RuntimeException('Telegram-пользователь не найден в БД');
+        }
+
+        $telegramChat = $this->chatRepository->findByTelegramChatId($telegramChatId);
+        if (!$telegramChat) {
+            throw new RuntimeException('Чат не найден в БД: ' . $telegramChatId);
+        }
+
+        // Базовое ограничение: чат должен принадлежать этому пользователю.
+        if ($telegramChat->telegram_user_id !== $telegramUser->id) {
+            // Разрешаем superadmin/admin управлять любыми чатами (опционально).
+            if (!in_array($role, ['admin', 'superadmin'], true)) {
+                throw new RuntimeException('Этот чат не привязан к текущему пользователю');
+            }
+        }
+
+        return [$telegramChat, $role];
+    }
+
     /**
      * Вытянуть TelegramChat с проверкой прав.
      *
@@ -179,4 +234,6 @@ class TelegramChatBroadcastService
 
         return $chat;
     }
+
+
 }

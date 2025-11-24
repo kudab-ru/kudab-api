@@ -252,4 +252,69 @@ class TelegramChatBroadcastController extends Controller
         }
     }
 
+    /**
+     * Отметить одно событие как опубликованное в канале.
+     *
+     * POST /api/bot/broadcast/mark-single-posted
+     *
+     * Body:
+     * {
+     *   "telegram_id": 123456789,
+     *   "telegram_chat_id": -1001234567890,
+     *   "event_id": 174,
+     *   "posted_at": "2025-11-21T16:30:00+03:00" // опционально
+     * }
+     *
+     * Ответ:
+     * { "ok": true } или { "ok": false, "error": "..." }
+     */
+    public function markSinglePosted(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'telegram_id'      => ['required', 'integer'],
+            'telegram_chat_id' => ['required', 'integer'],
+            'event_id'         => ['required', 'integer'],
+            'posted_at'        => ['nullable', 'string'], // парсим сами
+        ]);
+
+        $telegramId     = (int) $validated['telegram_id'];
+        $telegramChatId = (int) $validated['telegram_chat_id'];
+        $eventId        = (int) $validated['event_id'];
+        $postedAtRaw    = $validated['posted_at'] ?? null;
+
+        $moment = null;
+        if ($postedAtRaw) {
+            try {
+                $moment = new \DateTimeImmutable($postedAtRaw);
+            } catch (\Exception $e) {
+                // если формат кривой — просто игнорируем и считаем now()
+                $moment = null;
+            }
+        }
+
+        try {
+            $this->broadcastService->markSingleEventPostedForChat(
+                $telegramId,
+                $telegramChatId,
+                $eventId,
+                $moment,
+            );
+
+            return response()->json([
+                'ok' => true,
+            ]);
+        } catch (RuntimeException $e) {
+            return response()->json([
+                'ok'    => false,
+                'error' => $e->getMessage(),
+            ]);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json([
+                'ok'    => false,
+                'error' => 'Не удалось отметить событие как опубликованное.',
+            ]);
+        }
+    }
 }
