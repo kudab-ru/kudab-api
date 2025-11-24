@@ -114,7 +114,7 @@ class TelegramChatBroadcastService
      * Если элемента очереди для (broadcast_id, event_id) ещё нет —
      * создаём его на лету и сразу помечаем как опубликованный.
      */
-    public function markSingleEventPostedForChat(
+    public function markSingleEventSentForChat(
         int $telegramId,
         int $telegramChatId,
         int $eventId,
@@ -159,8 +159,6 @@ class TelegramChatBroadcastService
     ): ?int {
         $chat = $this->getChatByTelegram($telegramId, $telegramChatId);
 
-        // Предполагаем, что у TelegramChat есть city_id (ссылка на справочник городов).
-        // Если поля нет или оно null — фильтра по городу не будет.
         $cityId = $chat->city_id ?? null;
 
         $query = Event::query()
@@ -169,7 +167,6 @@ class TelegramChatBroadcastService
             ->orderBy('start_time');
 
         if ($cityId) {
-            // city_id у события берём через связанное сообщество (community.city_id)
             $query->whereHas('community', function ($q) use ($cityId) {
                 $q->where('city_id', $cityId);
             });
@@ -177,8 +174,13 @@ class TelegramChatBroadcastService
 
         $event = $query->first();
 
+        if ($event && $mode === 'preview') {
+            $this->markPreviewExecutedForChatId($chat->id, now());
+        }
+
         return $event?->id;
     }
+
 
     // ---------------------------------------------------------------------
     // Внутренние помощники

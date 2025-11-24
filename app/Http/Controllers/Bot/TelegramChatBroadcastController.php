@@ -268,7 +268,7 @@ class TelegramChatBroadcastController extends Controller
      * Ответ:
      * { "ok": true } или { "ok": false, "error": "..." }
      */
-    public function markSinglePosted(Request $request): JsonResponse
+    public function markSingleSent(Request $request): JsonResponse
     {
         $validated = $request->validate([
             'telegram_id'      => ['required', 'integer'],
@@ -293,7 +293,7 @@ class TelegramChatBroadcastController extends Controller
         }
 
         try {
-            $this->broadcastService->markSingleEventPostedForChat(
+            $this->broadcastService->markSingleEventSentForChat(
                 $telegramId,
                 $telegramChatId,
                 $eventId,
