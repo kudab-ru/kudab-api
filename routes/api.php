@@ -33,9 +33,11 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     Route::post('/broadcast/get', [TelegramChatBroadcastController::class, 'getBroadcast']);
     Route::post('/broadcast/update', [TelegramChatBroadcastController::class, 'updateBroadcast']);
 
-    Route::post('/broadcast/pick-single', [TelegramChatBroadcastController::class, 'pickSingle']);
-    Route::post('/broadcast/mark-single-posted', [TelegramChatBroadcastController::class, 'markSinglePosted']);
-    Route::post('/broadcast/log-manual-send', [TelegramChatBroadcastController::class, 'logManualSend']);
+    // Подбор одного события
+    Route::post('/broadcast/single/pick', [TelegramChatBroadcastController::class, 'pickSingle']);
+    // Отметить одно событие как отправленное
+    Route::post('/broadcast/single/mark-sent', [TelegramChatBroadcastController::class, 'markSingleSent']);
+
 
     Route::get('/broadcast/templates', [TelegramChatBroadcastController::class, 'listTemplates']);
 });
