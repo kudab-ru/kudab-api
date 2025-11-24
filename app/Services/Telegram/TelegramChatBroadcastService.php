@@ -237,5 +237,77 @@ class TelegramChatBroadcastService
         return $chat;
     }
 
+    /**
+     * Список элементов очереди для заданного Telegram-чата.
+     *
+     * По умолчанию берём только pending/planned и ограничиваем limit.
+     *
+     * Возвращает массив:
+     * [
+     *   'items' => Collection<TelegramChatBroadcastItem>,
+     *   'total' => int,
+     * ]
+     */
+    public function listQueueForChat(
+        int $telegramId,
+        int $telegramChatId,
+        int $limit = 5,
+        array $statuses = [
+            TelegramChatBroadcastItem::STATUS_PENDING,
+            TelegramChatBroadcastItem::STATUS_PLANNED,
+        ],
+    ): array {
+        [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
 
+        $broadcast = $this->broadcastRepository->getOrCreateByChatId($chat->id);
+
+        // Защита от странных лимитов
+        $limit = max(1, min($limit, 50));
+
+        $items = $this->broadcastItemRepository->listForBroadcast(
+            $broadcast->id,
+            $statuses,
+            $limit,
+        );
+
+        $total = $this->broadcastItemRepository->countForBroadcast(
+            $broadcast->id,
+            $statuses,
+        );
+
+        return [
+            'items' => $items,
+            'total' => $total,
+        ];
+    }
+
+    /**
+     * Пометить событие как убранное из очереди (status = skipped)
+     * для заданного Telegram-чата.
+     */
+    public function skipSingleEventForChat(
+        int $telegramId,
+        int $telegramChatId,
+        int $eventId,
+        ?string $reason = null,
+    ): void {
+        [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
+
+        $broadcast = $this->broadcastRepository->getOrCreateByChatId($chat->id);
+
+        $item = $this->broadcastItemRepository->findByBroadcastAndEvent(
+            $broadcast->id,
+            $eventId,
+        );
+
+        if (!$item) {
+            // Можно тихо выйти, можно бросить исключение — выберем тихий вариант.
+            return;
+        }
+
+        $this->broadcastItemRepository->markSkipped(
+            $item,
+            $reason ?: 'cancelled_by_user',
+        );
+    }
 }

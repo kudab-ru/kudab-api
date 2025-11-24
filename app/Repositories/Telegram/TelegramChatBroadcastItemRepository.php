@@ -5,6 +5,7 @@ namespace App\Repositories\Telegram;
 use App\Contracts\Telegram\TelegramChatBroadcastItemRepositoryInterface;
 use App\Models\TelegramChatBroadcastItem;
 use DateTimeInterface;
+use Illuminate\Support\Collection;
 
 class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRepositoryInterface
 {
@@ -138,5 +139,43 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
             ->first();
 
         return $item?->event_id;
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function listForBroadcast(
+        int $broadcastId,
+        array $statuses,
+        int $limit,
+    ): Collection {
+        $query = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId);
+
+        if (!empty($statuses)) {
+            $query->whereIn('status', $statuses);
+        }
+
+        return $query
+            ->orderBy('id')
+            ->limit($limit)
+            ->get();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function countForBroadcast(
+        int $broadcastId,
+        array $statuses,
+    ): int {
+        $query = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId);
+
+        if (!empty($statuses)) {
+            $query->whereIn('status', $statuses);
+        }
+
+        return (int) $query->count();
     }
 }

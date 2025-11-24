@@ -4,6 +4,7 @@ namespace App\Contracts\Telegram;
 
 use App\Models\TelegramChatBroadcastItem;
 use DateTimeInterface;
+use Illuminate\Support\Collection;
 
 /**
  * Репозиторий очереди публикаций в Telegram-чаты.
@@ -91,4 +92,30 @@ interface TelegramChatBroadcastItemRepositoryInterface
      * если такой есть (status = posted, по posted_at).
      */
     public function getLastPostedEventIdForBroadcast(int $broadcastId): ?int;
+
+    /**
+     * Список элементов очереди для одного broadcast'а
+     * по заданным статусам (обычно pending/planned).
+     *
+     * @param int   $broadcastId
+     * @param array $statuses  Список строк-статусов
+     * @param int   $limit     Максимальное количество элементов
+     *
+     * @return Collection<int, TelegramChatBroadcastItem>
+     */
+    public function listForBroadcast(
+        int $broadcastId,
+        array $statuses,
+        int $limit,
+    ): Collection;
+
+    /**
+     * Количество элементов очереди для одного broadcast'а
+     * по заданным статусам.
+     */
+    public function countForBroadcast(
+        int $broadcastId,
+        array $statuses,
+    ): int;
+
 }

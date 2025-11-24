@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\TelegramMessageTemplate;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Services\Telegram\TelegramMessageTemplateService;
+use App\Models\TelegramChatBroadcastItem;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use RuntimeException;
@@ -317,4 +318,220 @@ class TelegramChatBroadcastController extends Controller
             ]);
         }
     }
+
+    /**
+     * Поставить одно событие в очередь для канала.
+     *
+     * POST /api/bot/broadcast/single/enqueue
+     *
+     * Body:
+     * {
+     *   "telegram_id": 123456789,
+     *   "telegram_chat_id": -1001234567890,
+     *   "event_id": 174,
+     *   "planned_at": "2025-11-30T12:00:00+03:00" // опционально
+     * }
+     *
+     * Ответ (успех):
+     * {
+     *   "ok": true,
+     *   "queue_item": {
+     *     "id": 987,
+     *     "status": "pending",
+     *     "event_id": 174,
+     *     "planned_at": "...",
+     *     "created_at": "..."
+     *   }
+     * }
+     */
+    public function enqueueSingle(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'telegram_id'      => ['required', 'integer'],
+            'telegram_chat_id' => ['required', 'integer'],
+            'event_id'         => ['required', 'integer'],
+            'planned_at'       => ['nullable', 'string'],
+        ]);
+
+        $telegramId     = (int) $validated['telegram_id'];
+        $telegramChatId = (int) $validated['telegram_chat_id'];
+        $eventId        = (int) $validated['event_id'];
+        $plannedAtRaw   = $validated['planned_at'] ?? null;
+
+        $plannedAt = null;
+        if ($plannedAtRaw) {
+            try {
+                $plannedAt = new \DateTimeImmutable($plannedAtRaw);
+            } catch (\Exception $e) {
+                // Кривой формат — считаем, что без плановой даты
+                $plannedAt = null;
+            }
+        }
+
+        try {
+            $item = $this->broadcastService->enqueueSingleEventForChat(
+                $telegramId,
+                $telegramChatId,
+                $eventId,
+                $plannedAt,
+            );
+
+            return response()->json([
+                'ok'         => true,
+                'queue_item' => [
+                    'id'         => $item->id,
+                    'status'     => $item->status,
+                    'event_id'   => $item->event_id,
+                    'planned_at' => optional($item->planned_at)?->toIso8601String(),
+                    'created_at' => optional($item->created_at)?->toIso8601String(),
+                ],
+            ]);
+        } catch (RuntimeException $e) {
+            return response()->json([
+                'ok'    => false,
+                'error' => $e->getMessage(),
+            ]);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json([
+                'ok'    => false,
+                'error' => 'Не удалось поставить событие в очередь.',
+            ]);
+        }
+    }
+
+    /**
+     * Список элементов очереди для канала.
+     *
+     * POST /api/bot/broadcast/single/queue
+     *
+     * Body:
+     * {
+     *   "telegram_id": 123456789,
+     *   "telegram_chat_id": -1001234567890,
+     *   "limit": 5 // опционально, по умолчанию 5
+     * }
+     *
+     * Ответ:
+     * {
+     *   "ok": true,
+     *   "items": [
+     *     {
+     *       "id": 987,
+     *       "status": "pending",
+     *       "event_id": 174,
+     *       "planned_at": "...",
+     *       "created_at": "..."
+     *     },
+     *     ...
+     *   ],
+     *   "total": 7
+     * }
+     */
+    public function listQueue(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'telegram_id'      => ['required', 'integer'],
+            'telegram_chat_id' => ['required', 'integer'],
+            'limit'            => ['nullable', 'integer', 'min:1', 'max:50'],
+        ]);
+
+        $telegramId     = (int) $validated['telegram_id'];
+        $telegramChatId = (int) $validated['telegram_chat_id'];
+        $limit          = isset($validated['limit'])
+            ? (int) $validated['limit']
+            : 5;
+
+        try {
+            $result = $this->broadcastService->listQueueForChat(
+                $telegramId,
+                $telegramChatId,
+                $limit,
+            );
+
+            $items = $result['items']; // Collection<TelegramChatBroadcastItem>
+            $total = (int) $result['total'];
+
+            $itemsPayload = $items->map(function (TelegramChatBroadcastItem $item) {
+                return [
+                    'id'         => $item->id,
+                    'status'     => $item->status,
+                    'event_id'   => $item->event_id,
+                    'planned_at' => optional($item->planned_at)?->toIso8601String(),
+                    'created_at' => optional($item->created_at)?->toIso8601String(),
+                ];
+            })->values()->all();
+
+            return response()->json([
+                'ok'    => true,
+                'items' => $itemsPayload,
+                'total' => $total,
+            ]);
+        } catch (RuntimeException $e) {
+            return response()->json([
+                'ok'    => false,
+                'error' => $e->getMessage(),
+            ]);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json([
+                'ok'    => false,
+                'error' => 'Не удалось получить очередь для канала.',
+            ]);
+        }
+    }
+
+    /**
+     * Убрать одно событие из очереди для канала (пометить как skipped).
+     *
+     * POST /api/bot/broadcast/single/queue/skip
+     *
+     * Body:
+     * {
+     *   "telegram_id": 123456789,
+     *   "telegram_chat_id": -1001234567890,
+     *   "event_id": 174,
+     *   "reason": "cancelled_by_user" // опционально
+     * }
+     */
+    public function skipSingleFromQueue(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'telegram_id'      => ['required', 'integer'],
+            'telegram_chat_id' => ['required', 'integer'],
+            'event_id'         => ['required', 'integer'],
+            'reason'           => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $telegramId     = (int) $validated['telegram_id'];
+        $telegramChatId = (int) $validated['telegram_chat_id'];
+        $eventId        = (int) $validated['event_id'];
+        $reason         = $validated['reason'] ?? null;
+
+        try {
+            $this->broadcastService->skipSingleEventForChat(
+                $telegramId,
+                $telegramChatId,
+                $eventId,
+                $reason,
+            );
+
+            return response()->json(['ok' => true]);
+        } catch (RuntimeException $e) {
+            return response()->json([
+                'ok'    => false,
+                'error' => $e->getMessage(),
+            ]);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json([
+                'ok'    => false,
+                'error' => 'Не удалось убрать событие из очереди.',
+            ]);
+        }
+    }
+
 }
