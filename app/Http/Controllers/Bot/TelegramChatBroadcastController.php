@@ -200,7 +200,8 @@ class TelegramChatBroadcastController extends Controller
      * {
      *   "telegram_id": 123456789,
      *   "telegram_chat_id": -1001234567890,
-     *   "mode": "preview" | "publish"
+     *   "mode": "preview" | "publish",
+     *   "exclude_event_ids": [1, 2, 3] // опционально
      * }
      *
      * Ответ:
@@ -211,14 +212,22 @@ class TelegramChatBroadcastController extends Controller
     public function pickSingle(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'telegram_id'      => ['required', 'integer'],
-            'telegram_chat_id' => ['required', 'integer'],
-            'mode'             => ['nullable', 'string', 'in:preview,publish'],
+            'telegram_id'       => ['required', 'integer'],
+            'telegram_chat_id'  => ['required', 'integer'],
+            'mode'              => ['nullable', 'string', 'in:preview,publish'],
+            'exclude_event_ids' => ['sometimes', 'array'],
+            'exclude_event_ids.*' => ['integer'],
         ]);
 
         $telegramId     = (int) $validated['telegram_id'];
         $telegramChatId = (int) $validated['telegram_chat_id'];
         $mode           = (string) ($validated['mode'] ?? 'preview');
+
+        $excludeIds = [];
+        if (!empty($validated['exclude_event_ids']) && is_array($validated['exclude_event_ids'])) {
+            // нормализуем: int + uniq
+            $excludeIds = array_values(array_unique(array_map('intval', $validated['exclude_event_ids'])));
+        }
 
         try {
             // 👉 вся бизнес-логика — в сервисе
@@ -226,6 +235,7 @@ class TelegramChatBroadcastController extends Controller
                 telegramId: $telegramId,
                 telegramChatId: $telegramChatId,
                 mode: $mode,
+                excludeEventIds: $excludeIds,
             );
 
             if (!$eventId) {

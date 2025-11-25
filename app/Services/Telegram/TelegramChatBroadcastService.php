@@ -166,16 +166,19 @@ class TelegramChatBroadcastService
      *  - только активные события (scopeActive),
      *  - только будущие (scopeUpcoming),
      *  - самое ближайшее по start_time,
-     *  - если у чата есть city_id — берём события, где community.city_id = city_id чата.
+     *  - если у чата есть city_id — берём события, где events.city совпадает по имени,
+     *  - можно дополнительно исключить конкретные event_id (excludeEventIds).
      *
-     * @param int    $telegramId      Telegram ID пользователя (из лички)
-     * @param int    $telegramChatId  telegram_chat_id канала/чата
-     * @param string $mode            'preview' | 'run' и т.п. (на будущее, пока не используется)
+     * @param int    $telegramId       Telegram ID пользователя (из лички)
+     * @param int    $telegramChatId   telegram_chat_id канала/чата
+     * @param string $mode             'preview' | 'run' и т.п. (на будущее, пока не используется)
+     * @param array  $excludeEventIds  Список event_id, которые нельзя предлагать
      */
     public function pickSingleEventId(
         int $telegramId,
         int $telegramChatId,
         string $mode = 'preview',
+        array $excludeEventIds = [],
     ): ?int {
         $chat = $this->getChatByTelegram($telegramId, $telegramChatId);
 
@@ -184,6 +187,9 @@ class TelegramChatBroadcastService
 
         // Город канала (через belongsTo City)
         $cityName = optional($chat->city)->name;
+
+        // Нормализуем список исключаемых id
+        $excludeEventIds = array_values(array_unique(array_map('intval', $excludeEventIds)));
 
         // Какие статусы считаем "уже использованными" для этого канала
         $usedStatuses = [
@@ -200,17 +206,23 @@ class TelegramChatBroadcastService
             ->whereDoesntHave('broadcastItems', function ($q) use ($broadcast, $usedStatuses) {
                 $q->where('broadcast_id', $broadcast->id)
                     ->whereIn('status', $usedStatuses);
-            })
-            ->orderBy('start_time');
+            });
+
+        // Исключить конкретные id (для кнопки "следующее")
+        if (!empty($excludeEventIds)) {
+            $query->whereNotIn('id', $excludeEventIds);
+        }
 
         // 🔍 Фильтр по городу: через поле events.city
         if ($cityName) {
             $query->whereRaw('LOWER(city) = LOWER(?)', [$cityName]);
-            // если хочешь попроще — можно просто:
+            // либо попроще:
             // $query->where('city', $cityName);
         }
 
-        $event = $query->first();
+        $event = $query
+            ->orderBy('start_time')
+            ->first();
 
         if ($event && $mode === 'preview') {
             $this->markPreviewExecutedForChatId($chat->id, now());
