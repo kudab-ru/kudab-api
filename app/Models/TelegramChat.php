@@ -35,4 +35,9 @@ class TelegramChat extends Model
     {
         return $this->belongsTo(TelegramUser::class, 'telegram_user_id');
     }
+
+    public function city()
+    {
+        return $this->belongsTo(\App\Models\City::class);
+    }
 }

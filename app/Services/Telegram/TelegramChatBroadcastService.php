@@ -106,6 +106,21 @@ class TelegramChatBroadcastService
 
         $broadcast = $this->broadcastRepository->getOrCreateByChatId($chat->id);
 
+        $event = Event::query()
+            ->with('community')
+            ->find($eventId);
+
+        if (!$event) {
+            throw new RuntimeException('Событие не найдено.');
+        }
+
+        $eventCityId = $event->community?->city_id;
+        $chatCityId  = $chat->city_id;
+
+        if ($chatCityId && $eventCityId && $chatCityId !== $eventCityId) {
+            throw new RuntimeException('Это событие относится к другому городу.');
+        }
+
         return $this->broadcastItemRepository->enqueue(
             $broadcast->id,
             $eventId,
@@ -167,7 +182,8 @@ class TelegramChatBroadcastService
         // Берём/создаём broadcast для этого чата
         $broadcast = $this->broadcastRepository->getOrCreateByChatId($chat->id);
 
-        $cityId = $chat->city_id ?? null;
+        // Город канала (через belongsTo City)
+        $cityName = optional($chat->city)->name;
 
         // Какие статусы считаем "уже использованными" для этого канала
         $usedStatuses = [
@@ -187,10 +203,11 @@ class TelegramChatBroadcastService
             })
             ->orderBy('start_time');
 
-        if ($cityId) {
-            $query->whereHas('community', function ($q) use ($cityId) {
-                $q->where('city_id', $cityId);
-            });
+        // 🔍 Фильтр по городу: через поле events.city
+        if ($cityName) {
+            $query->whereRaw('LOWER(city) = LOWER(?)', [$cityName]);
+            // если хочешь попроще — можно просто:
+            // $query->where('city', $cityName);
         }
 
         $event = $query->first();

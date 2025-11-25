@@ -31,7 +31,9 @@ class TelegramChatController extends Controller
                 'chat_type'        => $chat->chat_type,
                 'title'            => $chat->title,
                 'username'         => $chat->username,
-                // can_post / status как было
+                'city_id'          => $chat->city_id,
+                'city_name'        => optional($chat->city)->name,
+                'city_country'     => optional($chat->city)->country_code,
             ]),
         ]);
     }
