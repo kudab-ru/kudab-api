@@ -4,6 +4,7 @@ namespace App\Repositories\Telegram;
 
 use App\Contracts\Telegram\TelegramChatBroadcastItemRepositoryInterface;
 use App\Models\TelegramChatBroadcastItem;
+use Carbon\Carbon;
 use DateTimeInterface;
 use Illuminate\Support\Collection;
 
@@ -177,5 +178,21 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         }
 
         return (int) $query->count();
+    }
+
+    public function findNextDueForBroadcast(int $broadcastId, Carbon|DateTimeInterface $now): ?TelegramChatBroadcastItem
+    {
+        return TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+            ])
+            ->where(function ($q) use ($now) {
+                $q->whereNull('planned_at')
+                    ->orWhere('planned_at', '<=', $now);
+            })
+            ->orderByRaw('COALESCE(planned_at, created_at) ASC')
+            ->first();
     }
 }

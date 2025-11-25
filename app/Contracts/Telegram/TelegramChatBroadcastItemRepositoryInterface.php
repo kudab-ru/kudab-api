@@ -118,4 +118,8 @@ interface TelegramChatBroadcastItemRepositoryInterface
         array $statuses,
     ): int;
 
+    public function findNextDueForBroadcast(
+        int $broadcastId,
+        DateTimeInterface $now,
+    ): ?TelegramChatBroadcastItem;
 }

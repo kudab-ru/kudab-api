@@ -11,6 +11,7 @@ use App\Models\Event;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
+use Carbon\Carbon;
 use DateTimeInterface;
 use RuntimeException;
 
@@ -23,6 +24,10 @@ class TelegramChatBroadcastService
         private readonly TelegramChatBroadcastItemRepositoryInterface $broadcastItemRepository,
         private readonly BotRoleServiceInterface                      $botRoleService,
     ) {}
+
+    // ---------------------------------------------------------------------
+    // Публичные методы, которые дергает API
+    // ---------------------------------------------------------------------
 
     /**
      * Получить (или создать) настройки рассылки по telegram_id и telegram_chat_id.
@@ -181,62 +186,6 @@ class TelegramChatBroadcastService
         return $event?->id;
     }
 
-
-    // ---------------------------------------------------------------------
-    // Внутренние помощники
-    // ---------------------------------------------------------------------
-
-    /**
-     * Проверка прав + поиск чата, которым можно управлять.
-     *
-     * Возвращает кортеж [TelegramChat, роль].
-     */
-    private function resolveManagedChat(
-        int $telegramId,
-        int $telegramChatId,
-    ): array {
-        $role = $this->botRoleService->getRoleByTelegramId($telegramId);
-
-        // Логика как в TelegramChatService: кто вообще может управлять чатами
-        if (!in_array($role, ['user', 'moderator', 'admin', 'superadmin'], true)) {
-            throw new RuntimeException('Недостаточно прав для управления связанными чатами');
-        }
-
-        $telegramUser = $this->telegramUserRepository->findByTelegramId($telegramId);
-        if (!$telegramUser) {
-            throw new RuntimeException('Telegram-пользователь не найден в БД');
-        }
-
-        $telegramChat = $this->chatRepository->findByTelegramChatId($telegramChatId);
-        if (!$telegramChat) {
-            throw new RuntimeException('Чат не найден в БД: ' . $telegramChatId);
-        }
-
-        // Базовое ограничение: чат должен принадлежать этому пользователю.
-        if ($telegramChat->telegram_user_id !== $telegramUser->id) {
-            // Разрешаем superadmin/admin управлять любыми чатами (опционально).
-            if (!in_array($role, ['admin', 'superadmin'], true)) {
-                throw new RuntimeException('Этот чат не привязан к текущему пользователю');
-            }
-        }
-
-        return [$telegramChat, $role];
-    }
-
-    /**
-     * Вытянуть TelegramChat с проверкой прав.
-     *
-     * Тонкая обёртка над resolveManagedChat, чтобы не дублировать проверки.
-     */
-    private function getChatByTelegram(
-        int $telegramId,
-        int $telegramChatId,
-    ): TelegramChat {
-        [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
-
-        return $chat;
-    }
-
     /**
      * Список элементов очереди для заданного Telegram-чата.
      *
@@ -301,7 +250,7 @@ class TelegramChatBroadcastService
         );
 
         if (!$item) {
-            // Можно тихо выйти, можно бросить исключение — выберем тихий вариант.
+            // Тихо выходим — ничего в очереди не было
             return;
         }
 
@@ -309,5 +258,196 @@ class TelegramChatBroadcastService
             $item,
             $reason ?: 'cancelled_by_user',
         );
+    }
+
+    /**
+     * Собрать список «запланированных запусков» одиночной рассылки
+     * на текущий момент.
+     *
+     * Каждый элемент = [
+     *   'telegram_id'      => int,  // владелец/админ, от имени которого считаем права
+     *   'telegram_chat_id' => int,  // сам канал/чат
+     *   'event_id'         => int,
+     *   'template_code'    => string,
+     * ]
+     */
+    public function collectDueSingleRuns(
+        Carbon $now,
+        int $limit = 50,
+    ): array {
+        // Важно: listEnabledWithSchedule() должен подгружать chat и owner:
+        // with(['chat.owner'])
+        $broadcasts = $this->broadcastRepository
+            ->listEnabledWithSchedule();
+
+        $tasks = [];
+
+        foreach ($broadcasts as $broadcast) {
+            if (!$this->isSingleRunDue($broadcast, $now)) {
+                continue;
+            }
+
+            // Ищем следующий элемент очереди для этого канала
+            $item = $this->broadcastItemRepository
+                ->findNextDueForBroadcast($broadcast->id, $now);
+
+            if (!$item) {
+                // очередь пустая или всё ещё рано по planned_at
+                continue;
+            }
+
+            $chat = $broadcast->chat;
+            if (!$chat instanceof TelegramChat || !$chat->telegram_chat_id) {
+                continue;
+            }
+
+            // Владелец канала (telegram_id пользователя, который привязал чат)
+            $ownerTelegramId = $chat->owner?->telegram_id ?? null;
+            if (!$ownerTelegramId) {
+                // Если владельца не знаем — безопаснее пропустить
+                continue;
+            }
+
+            $tasks[] = [
+                'telegram_id'      => (int) $ownerTelegramId,
+                'telegram_chat_id' => (int) $chat->telegram_chat_id,
+                'event_id'         => (int) $item->event_id,
+                'template_code'    => (string) $broadcast->template_code,
+            ];
+
+            if (\count($tasks) >= $limit) {
+                break;
+            }
+        }
+
+        return $tasks;
+    }
+
+    // ---------------------------------------------------------------------
+    // Внутренние помощники
+    // ---------------------------------------------------------------------
+
+    /**
+     * Проверка прав + поиск чата, которым можно управлять.
+     *
+     * Возвращает кортеж [TelegramChat, роль].
+     */
+    private function resolveManagedChat(
+        int $telegramId,
+        int $telegramChatId,
+    ): array {
+        $role = $this->botRoleService->getRoleByTelegramId($telegramId);
+
+        // Кто вообще может управлять чатами
+        if (!in_array($role, ['user', 'moderator', 'admin', 'superadmin'], true)) {
+            throw new RuntimeException('Недостаточно прав для управления связанными чатами');
+        }
+
+        $telegramUser = $this->telegramUserRepository->findByTelegramId($telegramId);
+        if (!$telegramUser) {
+            throw new RuntimeException('Telegram-пользователь не найден в БД');
+        }
+
+        $telegramChat = $this->chatRepository->findByTelegramChatId($telegramChatId);
+        if (!$telegramChat) {
+            throw new RuntimeException('Чат не найден в БД: '.$telegramChatId);
+        }
+
+        // Базовое ограничение: чат должен принадлежать этому пользователю.
+        if ($telegramChat->telegram_user_id !== $telegramUser->id) {
+            // Разрешаем superadmin/admin управлять любыми чатами (опционально).
+            if (!in_array($role, ['admin', 'superadmin'], true)) {
+                throw new RuntimeException('Этот чат не привязан к текущему пользователю');
+            }
+        }
+
+        return [$telegramChat, $role];
+    }
+
+    /**
+     * Вытянуть TelegramChat с проверкой прав.
+     *
+     * Тонкая обёртка над resolveManagedChat, чтобы не дублировать проверки.
+     */
+    private function getChatByTelegram(
+        int $telegramId,
+        int $telegramChatId,
+    ): TelegramChat {
+        [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
+
+        return $chat;
+    }
+
+    /**
+     * Логика “пора ли запускать рассылку” для одного канала.
+     *
+     * Основывается на:
+     *  - enabled
+     *  - period (daily_10 / weekly_fri_12 / …)
+     *  - last_run_at
+     */
+    private function isSingleRunDue(
+        TelegramChatBroadcast $broadcast,
+        Carbon $now,
+    ): bool {
+        if (!$broadcast->enabled) {
+            return false;
+        }
+
+        $period = trim((string) $broadcast->period);
+        if ($period === '' || $period === 'off') {
+            return false;
+        }
+
+        /** @var Carbon|null $lastRun */
+        $lastRun = $broadcast->last_run_at instanceof Carbon
+            ? $broadcast->last_run_at
+            : null;
+
+        // daily_HH
+        if (str_starts_with($period, 'daily_')) {
+            $hour = (int) substr($period, 6) ?: 10;
+
+            $candidate = $now->copy()->setTime($hour, 0, 0);
+
+            // если сейчас ещё не HH:00 — берём вчерашнее окно
+            if ($now->lt($candidate)) {
+                $candidate->subDay();
+            }
+
+            // нужно отработать, если мы ещё ни разу не запускались после этого окна
+            return !$lastRun || $lastRun->lt($candidate);
+        }
+
+        // weekly_<dow>_<HH>  (пример: weekly_fri_12)
+        if (str_starts_with($period, 'weekly_')) {
+            $parts   = explode('_', $period); // [weekly, fri, 12]
+            $dowCode = $parts[1] ?? 'fri';
+            $hour    = isset($parts[2]) ? (int) $parts[2] : 12;
+
+            $dowMap = [
+                'mon' => Carbon::MONDAY,
+                'tue' => Carbon::TUESDAY,
+                'wed' => Carbon::WEDNESDAY,
+                'thu' => Carbon::THURSDAY,
+                'fri' => Carbon::FRIDAY,
+                'sat' => Carbon::SATURDAY,
+                'sun' => Carbon::SUNDAY,
+            ];
+            $targetDow = $dowMap[$dowCode] ?? Carbon::FRIDAY;
+
+            // последнее «окно» не позже now
+            $candidate = $now->copy()->setTime($hour, 0, 0);
+
+            // отматываем назад до нужного дня недели и не позже now
+            while ($candidate->dayOfWeek !== $targetDow || $candidate->gt($now)) {
+                $candidate->subDay();
+            }
+
+            return !$lastRun || $lastRun->lt($candidate);
+        }
+
+        // неизвестный period — игнорируем
+        return false;
     }
 }

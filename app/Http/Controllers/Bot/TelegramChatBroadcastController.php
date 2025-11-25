@@ -7,6 +7,7 @@ use App\Models\TelegramMessageTemplate;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Services\Telegram\TelegramMessageTemplateService;
 use App\Models\TelegramChatBroadcastItem;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use RuntimeException;
@@ -534,4 +535,42 @@ class TelegramChatBroadcastController extends Controller
         }
     }
 
+    /**
+     * Забрать пачку задач одиночной рассылки, которые должны отработать "сейчас".
+     *
+     * POST /api/bot/broadcast/single/run/poll
+     *
+     * Body:
+     * {
+     *   "limit": 50 // опционально, по умолчанию 50
+     * }
+     */
+    public function pollSingleRuns(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'limit' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        $limit = isset($validated['limit'])
+            ? (int) $validated['limit']
+            : 50;
+
+        try {
+            $now   = Carbon::now();
+            $items = $this->broadcastService->collectDueSingleRuns($now, $limit);
+
+            return response()->json([
+                'ok'    => true,
+                'items' => $items,
+            ]);
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json([
+                'ok'    => false,
+                'error' => 'Не удалось собрать задачи рассылки.',
+                'items' => [],
+            ]);
+        }
+    }
 }

@@ -41,6 +41,10 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     Route::post('/broadcast/single/enqueue', [TelegramChatBroadcastController::class, 'enqueueSingle']);
     Route::post('/broadcast/single/queue', [TelegramChatBroadcastController::class, 'listQueue']);
     Route::post('/broadcast/single/queue/skip', [TelegramChatBroadcastController::class, 'skipSingleFromQueue']);
+    Route::post(
+        '/broadcast/single/run/poll',
+        [TelegramChatBroadcastController::class, 'pollSingleRuns'],
+    );
 
     Route::get('/broadcast/templates', [TelegramChatBroadcastController::class, 'listTemplates']);
 });

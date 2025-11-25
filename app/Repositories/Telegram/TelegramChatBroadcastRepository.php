@@ -5,9 +5,22 @@ namespace App\Repositories\Telegram;
 use App\Contracts\Telegram\TelegramChatBroadcastRepositoryInterface;
 use App\Models\TelegramChatBroadcast;
 use DateTimeInterface;
+use Illuminate\Support\Collection;
 
 class TelegramChatBroadcastRepository implements TelegramChatBroadcastRepositoryInterface
 {
+    public function listEnabledWithSchedule(): Collection
+    {
+        return TelegramChatBroadcast::query()
+            ->where('enabled', true)
+            // period не 'off' и не пустой — на уровне PHP можно ещё раз проверить,
+            // но тут хоть что-то отфильтруем
+            ->whereNotNull('settings')
+            ->with(['chat.owner']) // ВАЖНО: owner должен существовать
+            ->get();
+    }
+
+
     /**
      * {@inheritdoc}
      */

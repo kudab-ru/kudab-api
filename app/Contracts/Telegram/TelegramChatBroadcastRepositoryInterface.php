@@ -4,6 +4,7 @@ namespace App\Contracts\Telegram;
 
 use App\Models\TelegramChatBroadcast;
 use DateTimeInterface;
+use Illuminate\Support\Collection;
 
 interface TelegramChatBroadcastRepositoryInterface
 {
@@ -51,4 +52,10 @@ interface TelegramChatBroadcastRepositoryInterface
         int $chatId,
         ?DateTimeInterface $moment = null,
     ): void;
+
+    /**
+     * @return \Illuminate\Support\Collection<TelegramChatBroadcast>
+     */
+    public function listEnabledWithSchedule(): Collection;
+
 }
