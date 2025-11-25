@@ -164,11 +164,27 @@ class TelegramChatBroadcastService
     ): ?int {
         $chat = $this->getChatByTelegram($telegramId, $telegramChatId);
 
+        // Берём/создаём broadcast для этого чата
+        $broadcast = $this->broadcastRepository->getOrCreateByChatId($chat->id);
+
         $cityId = $chat->city_id ?? null;
+
+        // Какие статусы считаем "уже использованными" для этого канала
+        $usedStatuses = [
+            TelegramChatBroadcastItem::STATUS_PENDING,
+            TelegramChatBroadcastItem::STATUS_PLANNED,
+            TelegramChatBroadcastItem::STATUS_POSTED,
+            TelegramChatBroadcastItem::STATUS_SKIPPED,
+        ];
 
         $query = Event::query()
             ->active()
             ->upcoming()
+            // не брать события, по которым уже есть элемент очереди/отправки
+            ->whereDoesntHave('broadcastItems', function ($q) use ($broadcast, $usedStatuses) {
+                $q->where('broadcast_id', $broadcast->id)
+                    ->whereIn('status', $usedStatuses);
+            })
             ->orderBy('start_time');
 
         if ($cityId) {
@@ -185,6 +201,7 @@ class TelegramChatBroadcastService
 
         return $event?->id;
     }
+
 
     /**
      * Список элементов очереди для заданного Telegram-чата.

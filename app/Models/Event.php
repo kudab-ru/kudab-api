@@ -124,4 +124,9 @@ class Event extends Model
         $arr = $this->images(1);
         return $arr[0] ?? null;
     }
+
+    public function broadcastItems()
+    {
+        return $this->hasMany(TelegramChatBroadcastItem::class, 'event_id');
+    }
 }
