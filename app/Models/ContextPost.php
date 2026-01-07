@@ -11,6 +11,7 @@ class ContextPost extends Model
 
     protected $fillable = [
         'external_id',
+        'external_url',
         'source',
         'author_id',
         'author_type',
