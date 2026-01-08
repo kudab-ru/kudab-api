@@ -23,14 +23,24 @@ class EventRepository
      */
     public function paginateUpcoming(array $filters, int $perPage = 20): LengthAwarePaginator
     {
+        $todayMsk = now('Europe/Moscow')->toDateString();
+
         $q = Event::query()
             ->whereNull('deleted_at')
-            ->where('start_time', '>=', now()->subDay()) // небольшая толерантность ко времени
+            ->where(function ($w) use ($todayMsk) {
+                $w->where('start_time', '>=', now()->subDay())
+                    ->orWhere(function ($x) use ($todayMsk) {
+                        $x->whereNull('start_time')
+                            ->whereNotNull('start_date')
+                            ->where('start_date', '>=', $todayMsk);
+                    });
+            })
             ->with([
                 'community:id,name,city,avatar_url',
                 'interests:id,name',
             ])
-            ->orderBy('start_time');
+            ->orderByRaw('start_date asc nulls last')
+            ->orderByRaw('start_time asc nulls last');
 
         if (!empty($filters['city'])) {
             // Для Postgres регистронезависимый поиск: ILIKE
@@ -38,11 +48,29 @@ class EventRepository
         }
 
         if (!empty($filters['date_from'])) {
-            $q->where('start_time', '>=', $filters['date_from']);
+            $fromDate = substr((string)$filters['date_from'], 0, 10); // YYYY-MM-DD
+
+            $q->where(function ($w) use ($filters, $fromDate) {
+                $w->where('start_time', '>=', $filters['date_from'])
+                    ->orWhere(function ($x) use ($fromDate) {
+                        $x->whereNull('start_time')
+                            ->whereNotNull('start_date')
+                            ->where('start_date', '>=', $fromDate);
+                    });
+            });
         }
 
         if (!empty($filters['date_to'])) {
-            $q->where('start_time', '<=', $filters['date_to']);
+            $toDate = substr((string)$filters['date_to'], 0, 10); // YYYY-MM-DD
+
+            $q->where(function ($w) use ($filters, $toDate) {
+                $w->where('start_time', '<=', $filters['date_to'])
+                    ->orWhere(function ($x) use ($toDate) {
+                        $x->whereNull('start_time')
+                            ->whereNotNull('start_date')
+                            ->where('start_date', '<=', $toDate);
+                    });
+            });
         }
 
         if (!empty($filters['community_id'])) {
