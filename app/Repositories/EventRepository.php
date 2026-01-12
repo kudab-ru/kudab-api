@@ -14,7 +14,8 @@ class EventRepository
      * Пагинация будущих событий с фильтрами.
      *
      * Поддерживаемые фильтры:
-     * - city: string
+     * - city: string (старый режим)
+     * - city_id: int (новый режим, приоритетнее city)
      * - date_from: Y-m-d или RFC3339
      * - date_to:   Y-m-d или RFC3339
      * - q: поиск по названию/описанию события и названию/описанию сообщества (ILIKE)
@@ -42,13 +43,14 @@ class EventRepository
             ->orderByRaw('start_date asc nulls last')
             ->orderByRaw('start_time asc nulls last');
 
-        if (!empty($filters['city'])) {
-            // Для Postgres регистронезависимый поиск: ILIKE
+        if (!empty($filters['city_id'])) {
+            $q->where('city_id', (int) $filters['city_id']);
+        } elseif (!empty($filters['city'])) {
             $q->where('city', 'ILIKE', $filters['city']);
         }
 
         if (!empty($filters['date_from'])) {
-            $fromDate = substr((string)$filters['date_from'], 0, 10); // YYYY-MM-DD
+            $fromDate = substr((string)$filters['date_from'], 0, 10);
 
             $q->where(function ($w) use ($filters, $fromDate) {
                 $w->where('start_time', '>=', $filters['date_from'])
@@ -61,7 +63,7 @@ class EventRepository
         }
 
         if (!empty($filters['date_to'])) {
-            $toDate = substr((string)$filters['date_to'], 0, 10); // YYYY-MM-DD
+            $toDate = substr((string)$filters['date_to'], 0, 10);
 
             $q->where(function ($w) use ($filters, $toDate) {
                 $w->where('start_time', '<=', $filters['date_to'])
@@ -102,7 +104,91 @@ class EventRepository
         $events = $paginator->getCollection();
         $this->hydrateImages($events);
 
-        // вернуть тот же paginator, но с дополненными событиями
+        return $paginator->setCollection($events);
+    }
+
+    /**
+     * Витринная пагинация (для /api/web/events):
+     * та же логика фильтров, но добавляем city_slug через join.
+     */
+    public function paginateUpcomingWeb(array $filters, int $perPage = 20): LengthAwarePaginator
+    {
+        $todayMsk = now('Europe/Moscow')->toDateString();
+
+        $q = Event::query()
+            ->select('events.*', 'ct.slug as city_slug')
+            ->leftJoin('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->whereNull('events.deleted_at')
+            ->where(function ($w) use ($todayMsk) {
+                $w->where('events.start_time', '>=', now()->subDay())
+                    ->orWhere(function ($x) use ($todayMsk) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $todayMsk);
+                    });
+            })
+            ->orderByRaw('events.start_date asc nulls last')
+            ->orderByRaw('events.start_time asc nulls last');
+
+        if (!empty($filters['city_id'])) {
+            $q->where('events.city_id', (int) $filters['city_id']);
+        }
+
+        if (!empty($filters['date_from'])) {
+            $fromDate = substr((string)$filters['date_from'], 0, 10);
+
+            $q->where(function ($w) use ($filters, $fromDate) {
+                $w->where('events.start_time', '>=', $filters['date_from'])
+                    ->orWhere(function ($x) use ($fromDate) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $fromDate);
+                    });
+            });
+        }
+
+        if (!empty($filters['date_to'])) {
+            $toDate = substr((string)$filters['date_to'], 0, 10);
+
+            $q->where(function ($w) use ($filters, $toDate) {
+                $w->where('events.start_time', '<=', $filters['date_to'])
+                    ->orWhere(function ($x) use ($toDate) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '<=', $toDate);
+                    });
+            });
+        }
+
+        if (!empty($filters['community_id'])) {
+            $q->where('events.community_id', (int) $filters['community_id']);
+        }
+
+        if (!empty($filters['q'])) {
+            $term = '%'.trim((string) $filters['q']).'%';
+            $q->where(function ($w) use ($term) {
+                $w->where('events.title', 'ILIKE', $term)
+                    ->orWhere('events.description', 'ILIKE', $term)
+                    ->orWhereHas('community', function ($c) use ($term) {
+                        $c->where('name', 'ILIKE', $term)
+                            ->orWhere('description', 'ILIKE', $term);
+                    });
+            });
+        }
+
+        if (!empty($filters['interests']) && is_array($filters['interests'])) {
+            $ids = array_filter(array_map('intval', $filters['interests']));
+            if ($ids) {
+                $q->whereHas('interests', function ($w) use ($ids) {
+                    $w->whereIn('interests.id', $ids);
+                });
+            }
+        }
+
+        $paginator = $q->paginate($perPage);
+        $events = $paginator->getCollection();
+        $this->hydrateImages($events);
+
         return $paginator->setCollection($events);
     }
 
@@ -124,13 +210,6 @@ class EventRepository
         return $event;
     }
 
-    /**
-     * Подмешивает к моделям $event->images — массив URL (стабильный порядок).
-     * Приоритет:
-     *   1) event_sources.images (агрегация всех источников события)
-     *   2) attachments(parent=context_post, type in [image,photo])
-     *   3) attachments(parent=event,       type in [image,photo])
-     */
     private function hydrateImages(EloquentCollection $events): void
     {
         if ($events->isEmpty()) return;
@@ -138,7 +217,6 @@ class EventRepository
         $eventIds = $events->pluck('id')->all();
         $postIds  = $events->pluck('original_post_id')->filter()->unique()->values()->all();
 
-        // 1) Изображения из event_sources.images
         $esRows = DB::table('event_sources')
             ->select('event_id', 'images')
             ->whereIn('event_id', $eventIds)
@@ -154,7 +232,6 @@ class EventRepository
                         }
                     }
                 }
-                // уникализируем, сохраняем относительный порядок
                 $seen = [];
                 $uniq = [];
                 foreach ($all as $u) {
@@ -166,7 +243,6 @@ class EventRepository
                 return $uniq;
             });
 
-        // 2) Вложения у исходного поста
         $cpRows = collect();
         if ($postIds) {
             $cpRows = DB::table('attachments')
@@ -185,7 +261,6 @@ class EventRepository
                             if (is_string($u) && $u !== '') $urls[] = $u;
                         }
                     }
-                    // уникальность + порядок
                     $seen = [];
                     $uniq = [];
                     foreach ($urls as $u) {
@@ -198,7 +273,6 @@ class EventRepository
                 });
         }
 
-        // 3) Вложения прямо у события
         $evRows = DB::table('attachments')
             ->select('parent_id', 'type', 'url', 'preview_url', 'order', 'id')
             ->where('parent_type', 'App\\Models\\Event')
@@ -215,7 +289,6 @@ class EventRepository
                         if (is_string($u) && $u !== '') $urls[] = $u;
                     }
                 }
-                // уникальность + порядок
                 $seen = [];
                 $uniq = [];
                 foreach ($urls as $u) {
@@ -227,7 +300,6 @@ class EventRepository
                 return $uniq;
             });
 
-        // Сборка с приоритетами
         $events->each(function (Event $e) use ($esRows, $cpRows, $evRows) {
             $images = $esRows->get($e->id, []);
             if (empty($images) && $e->original_post_id) {
@@ -237,10 +309,8 @@ class EventRepository
                 $images = $evRows->get($e->id, []);
             }
 
-            // Чистый массив строк в стабильном порядке
             $images = array_values($images);
 
-            // Массив картинок + отдельная обложка
             $e->setAttribute('images', $images);
             $e->setAttribute('poster', $images[0] ?? null);
         });

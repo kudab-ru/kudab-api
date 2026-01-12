@@ -17,6 +17,11 @@ class EventService
         return $this->repo->paginateUpcoming($filters, $perPage);
     }
 
+    public function listWeb(array $filters, int $perPage = 20): LengthAwarePaginator
+    {
+        return $this->repo->paginateUpcomingWeb($filters, $perPage);
+    }
+
     public function get(int $id): Event
     {
         return $this->repo->findWithDetails($id);
