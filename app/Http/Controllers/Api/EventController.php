@@ -82,33 +82,39 @@ class EventController extends Controller
     public function index(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'page'         => 'sometimes|integer|min:1',
-            'per_page'     => 'sometimes|integer|min:1',
-            'city'         => 'sometimes|string',
-            'date_from'    => 'sometimes|date',
-            'date_to'      => 'sometimes|date',
-            'q'            => 'sometimes|string',
-            'community_id' => 'sometimes|integer',
-            'interests'    => 'sometimes|array',
-            'interests.*'  => 'integer',
+            'page'         => ['sometimes','integer','min:1'],
+            'per_page'     => ['sometimes','integer','min:1','max:50'],
+            // city — это slug
+            'city'         => ['sometimes','string','max:64','regex:/^[a-z0-9-]+$/'],
+            'date_from'    => ['sometimes','date'],
+            'date_to'      => ['sometimes','date'],
+            'q'            => ['sometimes','string','max:255'],
+            'community_id' => ['sometimes','integer'],
+            'interests'    => ['sometimes','array'],
+            'interests.*'  => ['integer'],
         ]);
 
-        $perPage = (int) $request->query('per_page', 20);
-        $perPage = max(1, min($perPage, 50));
+        $pageNum  = (int) ($validated['page'] ?? 1);
+
+        $perPage  = (int) ($validated['per_page'] ?? 20);
+        $perPage  = max(1, min($perPage, 50));
 
         $filters = $validated;
         unset($filters['per_page'], $filters['page']);
 
-        // --- Шаг 4: city=slug -> city_id -> фильтрация по events.city_id ---
-        $citySlug = trim((string) $request->query('city', ''));
+        // city=slug -> city_id -> фильтрация по events.city_id
+        $citySlug = trim((string) ($validated['city'] ?? ''));
         if ($citySlug !== '') {
-            $cityId = City::query()->where('slug', $citySlug)->value('id');
+            $cityId = City::query()
+                ->where('slug', $citySlug)
+                ->value('id');
 
             if (!$cityId) {
+                // slug не найден — отдаём пустую пагинацию, но per_page оставляем как у запроса
                 return response()->json([
                     'meta' => [
-                        'current_page' => 1,
-                        'per_page'     => 0,
+                        'current_page' => $pageNum,
+                        'per_page'     => $perPage,
                         'total'        => 0,
                         'last_page'    => 1,
                     ],
@@ -116,7 +122,6 @@ class EventController extends Controller
                 ]);
             }
 
-            // передаём в сервис уже city_id (а не city-строку)
             $filters['city_id'] = (int) $cityId;
             unset($filters['city']);
         }
@@ -130,7 +135,6 @@ class EventController extends Controller
                 'total'        => $page->total(),
                 'last_page'    => $page->lastPage(),
             ],
-            // Модели уже содержат $event->images, поэтому можно отдавать напрямую
             'data' => $page->items(),
         ]);
     }
