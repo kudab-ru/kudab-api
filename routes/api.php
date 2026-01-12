@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\CityController;
 use App\Http\Controllers\Api\EventController;
+use App\Http\Controllers\Api\Web\CitiesController;
 use App\Http\Controllers\Bot\RoleController;
 use App\Http\Controllers\Bot\TelegramChatBroadcastController;
 use App\Http\Controllers\Bot\TelegramChatController;
@@ -23,6 +24,8 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('ping', fn () => ['ok' => true, 'result' => 'pong']);
     Route::get('events', [EventController::class, 'index']);
     Route::get('events/{id}', [EventController::class, 'show']);
+
+    Route::get('cities', [CitiesController::class, 'index']);
 });
 
 Route::prefix('bot')->middleware('bot.auth')->group(function () {
