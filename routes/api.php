@@ -14,8 +14,16 @@ Route::get('/ping', function () {
     ]);
 });
 
-Route::get('/events', [EventController::class, 'index']);
-Route::get('/events/{id}', [EventController::class, 'show']);
+Route::middleware(['throttle:web'])->group(function () {
+    Route::get('events', [EventController::class, 'index']);
+    Route::get('events/{id}', [EventController::class, 'show']);
+});
+
+Route::prefix('web')->middleware(['throttle:web'])->group(function () {
+    Route::get('ping', fn () => ['ok' => true, 'result' => 'pong']);
+    Route::get('events', [EventController::class, 'index']);
+    Route::get('events/{id}', [EventController::class, 'show']);
+});
 
 Route::prefix('bot')->middleware('bot.auth')->group(function () {
     Route::get('/role/by-telegram/{telegram_id}', [RoleController::class, 'byTelegram']);

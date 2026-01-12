@@ -15,6 +15,9 @@ use App\Repositories\Telegram\TelegramChatRepository;
 use App\Repositories\Telegram\TelegramMessageTemplateRepository;
 use App\Repositories\Telegram\TelegramUserRepository;
 use App\Services\Telegram\BotRoleService;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -37,6 +40,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        //
+        RateLimiter::for('web', function (Request $request) {
+            return Limit::perMinute(60)->by($request->ip());
+        });
     }
 }

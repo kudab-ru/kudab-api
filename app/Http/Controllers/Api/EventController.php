@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Models\City;
 use App\Services\EventService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -82,7 +83,7 @@ class EventController extends Controller
     {
         $validated = $request->validate([
             'page'         => 'sometimes|integer|min:1',
-            'per_page'     => 'sometimes|integer|min:1|max:50',
+            'per_page'     => 'sometimes|integer|min:1',
             'city'         => 'sometimes|string',
             'date_from'    => 'sometimes|date',
             'date_to'      => 'sometimes|date',
@@ -92,9 +93,33 @@ class EventController extends Controller
             'interests.*'  => 'integer',
         ]);
 
-        $perPage = (int)($validated['per_page'] ?? 20);
+        $perPage = (int) $request->query('per_page', 20);
+        $perPage = max(1, min($perPage, 50));
+
         $filters = $validated;
         unset($filters['per_page'], $filters['page']);
+
+        // --- Шаг 4: city=slug -> city_id -> фильтрация по events.city_id ---
+        $citySlug = trim((string) $request->query('city', ''));
+        if ($citySlug !== '') {
+            $cityId = City::query()->where('slug', $citySlug)->value('id');
+
+            if (!$cityId) {
+                return response()->json([
+                    'meta' => [
+                        'current_page' => 1,
+                        'per_page'     => 0,
+                        'total'        => 0,
+                        'last_page'    => 1,
+                    ],
+                    'data' => [],
+                ]);
+            }
+
+            // передаём в сервис уже city_id (а не city-строку)
+            $filters['city_id'] = (int) $cityId;
+            unset($filters['city']);
+        }
 
         $page = $this->service->list($filters, $perPage);
 

@@ -15,7 +15,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'bot.auth' => \App\Http\Middleware\BotAuthMiddleware::class,
         ]);
-        $middleware->appendToGroup('api', \App\Http\Middleware\BotAuthMiddleware::class);
+//        $middleware->appendToGroup('api', \App\Http\Middleware\BotAuthMiddleware::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //
