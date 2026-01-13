@@ -28,32 +28,34 @@ class WebEventResource extends JsonResource
         if (!is_array($images)) $images = [];
 
         return [
-            'id'            => $this->id,
-            'title'         => (string) ($this->title ?? ''),
+            'id'             => (int) $this->id,
+            'title'          => (string) ($this->title ?? ''),
 
-            'city_slug'     => $this->getAttribute('city_slug') ?: null,
-            'venue'         => null,
-            'address'       => $this->address,
+            'city_slug'      => $this->getAttribute('city_slug') ?: null,
+            'venue'          => null,
+            'address'        => $this->address !== null ? (string) $this->address : null,
 
-            'poster'        => $this->poster,
-            'images'        => array_values($images),
+            'poster'         => $this->poster !== null ? (string) $this->poster : null,
+            'images'         => array_values(array_filter($images, fn($u) => is_string($u) && $u !== '')),
 
-            'lat'           => $this->latitude,
-            'lng'           => $this->longitude,
+            'lat'            => $this->latitude !== null ? (float) $this->latitude : null,
+            'lng'            => $this->longitude !== null ? (float) $this->longitude : null,
 
-            'external_url'  => $this->external_url,
+            'external_url'   => $this->external_url !== null ? (string) $this->external_url : null,
 
-            'start_at'      => $startAt,
-            'end_at'        => $endAt,
-            'start_date'    => $this->start_date,
-            'time_precision'=> $this->time_precision,
+            'start_at'       => $startAt,
+            'end_at'         => $endAt,
+            'start_date'     => $this->start_date ? substr((string) $this->start_date, 0, 10) : null,
+            'time_precision' => (string) ($this->time_precision ?? 'datetime'),
 
-            'price_status'  => $this->price_status,
-            'price_min'     => $this->price_min,
-            'price_max'     => $this->price_max,
-            'price_text'    => $this->price_text,
-            'price_url'     => $this->price_url,
-            'free'          => ($this->price_status === 'free'),
+            'price_status'   => (string) ($this->price_status ?? 'unknown'),
+            'price_min'      => $this->price_min !== null ? (int) $this->price_min : null,
+            'price_max'      => $this->price_max !== null ? (int) $this->price_max : null,
+            'price_text'     => $this->price_text !== null ? (string) $this->price_text : null,
+            'price_url'      => $this->price_url !== null ? (string) $this->price_url : null,
+
+            'free'           => ($this->price_status === 'free')
+                || ((int)($this->price_min ?? -1) === 0 && $this->price_max === null),
         ];
     }
 }

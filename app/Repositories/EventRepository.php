@@ -41,12 +41,14 @@ class EventRepository
                 'interests:id,name',
             ])
             ->orderByRaw('start_date asc nulls last')
-            ->orderByRaw('start_time asc nulls last');
+            ->orderByRaw('start_time asc nulls last')
+            ->orderBy('id', 'asc');
 
         if (!empty($filters['city_id'])) {
             $q->where('city_id', (int) $filters['city_id']);
         } elseif (!empty($filters['city'])) {
-            $q->where('city', 'ILIKE', $filters['city']);
+            // старый режим: текстовый город
+            $q->where('city', 'ILIKE', trim((string)$filters['city']));
         }
 
         if (!empty($filters['date_from'])) {
@@ -128,7 +130,8 @@ class EventRepository
                     });
             })
             ->orderByRaw('events.start_date asc nulls last')
-            ->orderByRaw('events.start_time asc nulls last');
+            ->orderByRaw('events.start_time asc nulls last')
+            ->orderBy('events.id', 'asc');
 
         if (!empty($filters['city_id'])) {
             $q->where('events.city_id', (int) $filters['city_id']);

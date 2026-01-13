@@ -36,6 +36,7 @@ class Event extends Model
     protected $casts = [
         'start_time' => 'datetime',
         'end_time'   => 'datetime',
+        'start_date' => 'date:Y-m-d',
         'latitude'   => 'float',
         'longitude'  => 'float',
         'created_at' => 'datetime',
@@ -128,5 +129,10 @@ class Event extends Model
     public function broadcastItems()
     {
         return $this->hasMany(TelegramChatBroadcastItem::class, 'event_id');
+    }
+
+    public function city(): BelongsTo
+    {
+        return $this->belongsTo(City::class);
     }
 }
