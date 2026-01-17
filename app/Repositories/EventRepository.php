@@ -213,6 +213,31 @@ class EventRepository
         return $event;
     }
 
+    /**
+     * Получить одно событие для витрины (для /api/web/events/{id})
+     * + city_slug, + sources (event_sources) и остальное.
+     */
+    public function findWebWithDetails(int $id): Event
+    {
+        $event = Event::query()
+            ->select('events.*', 'ct.slug as city_slug')
+            ->leftJoin('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->whereNull('events.deleted_at')
+            ->where('events.id', $id)
+            ->with([
+                'community:id,name,city,avatar_url',
+                'interests:id,name',
+                'eventSources:id,event_id,source,post_external_id,external_url,published_at,images,generated_link,social_link_id',
+                'originalPost:id,text',
+            ])
+            ->firstOrFail();
+
+        $this->hydrateImages(new EloquentCollection([$event]));
+
+        return $event;
+    }
+
+
     private function hydrateImages(EloquentCollection $events): void
     {
         if ($events->isEmpty()) return;

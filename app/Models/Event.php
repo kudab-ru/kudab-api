@@ -135,4 +135,9 @@ class Event extends Model
     {
         return $this->belongsTo(City::class);
     }
+
+    public function eventSources()
+    {
+        return $this->hasMany(\App\Models\EventSource::class, 'event_id');
+    }
 }

@@ -24,7 +24,7 @@ Route::middleware(['throttle:web'])->group(function () {
 Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('ping', fn () => ['ok' => true, 'result' => 'pong']);
     Route::get('events', [WebEventsController::class, 'index']);
-//    Route::get('events/{id}', [WebEventsController::class, 'show']);
+    Route::get('events/{id}', [WebEventsController::class, 'show'])->whereNumber('id');
 
     Route::get('cities', [CitiesController::class, 'index']);
 });

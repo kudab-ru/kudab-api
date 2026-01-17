@@ -8,6 +8,7 @@ use App\Models\City;
 use App\Services\EventService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use App\Http\Resources\WebEventDetailResource;
 
 class EventsController extends Controller
 {
@@ -67,6 +68,15 @@ class EventsController extends Controller
                 'last_page'    => $page->lastPage(),
             ],
             'data' => WebEventResource::collection($page->items()),
+        ]);
+    }
+
+    public function show(int $id): JsonResponse
+    {
+        $event = $this->service->getWeb($id);
+
+        return response()->json([
+            'data' => (new WebEventDetailResource($event))->toArray(request()),
         ]);
     }
 }

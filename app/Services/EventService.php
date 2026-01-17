@@ -26,4 +26,10 @@ class EventService
     {
         return $this->repo->findWithDetails($id);
     }
+
+    public function getWeb(int $id): Event
+    {
+        return $this->repo->findWebWithDetails($id);
+    }
+
 }
