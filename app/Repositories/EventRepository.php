@@ -188,6 +188,49 @@ class EventRepository
             }
         }
 
+        // free=1
+        if (!empty($filters['free'])) {
+            $q->where(function ($w) {
+                $w->where('events.price_status', 'free')
+                    ->orWhere(function ($x) {
+                        $x->where('events.price_min', 0)
+                            ->whereNull('events.price_max');
+                    });
+            });
+        }
+
+        // sort/dir (whitelist)
+        $sort = $filters['sort'] ?? null;
+        $dir = strtolower((string)($filters['dir'] ?? 'asc'));
+        $dir = $dir === 'desc' ? 'desc' : 'asc';
+
+        if ($sort) {
+            $q->reorder();
+
+            switch ($sort) {
+                case 'start_at':
+                case 'start_date':
+                    $q->orderByRaw("events.start_date {$dir} nulls last")
+                        ->orderByRaw("events.start_time {$dir} nulls last");
+                    break;
+
+                case 'start_time':
+                    $q->orderByRaw("events.start_time {$dir} nulls last")
+                        ->orderByRaw("events.start_date {$dir} nulls last");
+                    break;
+
+                case 'created_at':
+                    $q->orderBy("events.created_at", $dir);
+                    break;
+
+                case 'price_min':
+                    $q->orderByRaw("events.price_min {$dir} nulls last");
+                    break;
+            }
+
+            $q->orderBy('events.id', 'asc');
+        }
+
         $paginator = $q->paginate($perPage);
         $events = $paginator->getCollection();
         $this->hydrateImages($events);
@@ -236,7 +279,6 @@ class EventRepository
 
         return $event;
     }
-
 
     private function hydrateImages(EloquentCollection $events): void
     {

@@ -9,6 +9,8 @@ use App\Services\EventService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use App\Http\Resources\WebEventDetailResource;
+use Carbon\Carbon;
+use Illuminate\Validation\Rule;
 
 class EventsController extends Controller
 {
@@ -21,13 +23,22 @@ class EventsController extends Controller
         $v = validator($request->all(), [
             'page'         => ['sometimes','integer','min:1'],
             'per_page'     => ['sometimes','integer','min:1'],
+
             'city'         => ['sometimes','string','max:64','regex:/^[a-z0-9-]+$/'],
+
             'date_from'    => ['sometimes','date'],
             'date_to'      => ['sometimes','date'],
+
+            'when'         => ['sometimes', Rule::in(['today','now','weekend'])],
+            'free'         => ['sometimes','boolean'],
+
             'q'            => ['sometimes','string','max:255'],
             'community_id' => ['sometimes','integer'],
             'interests'    => ['sometimes','array'],
             'interests.*'  => ['integer'],
+
+            'sort'         => ['sometimes', Rule::in(['start_at','start_date','start_time','created_at','price_min'])],
+            'dir'          => ['sometimes', Rule::in(['asc','desc'])],
         ])->validate();
 
         $pageNum = (int) ($v['page'] ?? 1);
@@ -36,6 +47,29 @@ class EventsController extends Controller
         $perPage = max(1, min($perPage, 50));
 
         unset($v['page'], $v['per_page']);
+
+        if (!empty($v['when']) && empty($v['date_from']) && empty($v['date_to'])) {
+            $now = Carbon::now('Europe/Moscow');
+
+            if ($v['when'] === 'today') {
+                $v['date_from'] = $now->copy()->startOfDay()->toDateTimeString();
+                $v['date_to']   = $now->copy()->endOfDay()->toDateTimeString();
+            } elseif ($v['when'] === 'weekend') {
+                // ближайшая суббота (или сегодня, если уже суббота)
+                $daysToSat = (Carbon::SATURDAY - $now->dayOfWeek + 7) % 7;
+
+                $sat = $now->copy()->addDays($daysToSat)->startOfDay();
+                $sun = $sat->copy()->addDay()->endOfDay();
+
+                $v['date_from'] = $sat->toDateTimeString();
+                $v['date_to']   = $sun->toDateTimeString();
+            } elseif ($v['when'] === 'now') {
+                $v['date_from'] = $now->copy()->subHours(2)->toDateTimeString();
+                $v['date_to']   = $now->copy()->addHours(4)->toDateTimeString();
+            }
+        }
+
+        unset($v['when']);
 
         // city=slug -> city_id
         $citySlug = trim((string)($v['city'] ?? ''));
