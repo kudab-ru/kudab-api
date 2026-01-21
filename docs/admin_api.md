@@ -1,269 +1,329 @@
 
-# Admin API (MVP contract)
-
-Цель: зафиксировать минимальный контракт для админки и интеграций.
-Swagger пока не используем.
-
-## Base
-
-- Base URL: `/api/admin`
-- Auth: `Authorization: Bearer <token>`
-- Response формат:
-  - list: `{ "meta": {...}, "data": [...] }`
-  - item: `{ "data": {...} }`
-  - ok: `{ "ok": true }`
-- Ошибки:
-  - 401 Unauthorized (нет/неверный токен)
-  - 403 Forbidden (нет роли/прав)
-  - 404 Not found
-  - 422 Validation error (Laravel стандарт)
-
-## Soft delete / restore
-
-Модели используют soft delete.
-
-- `DELETE /resource/{id}` → soft delete
-- `POST /resource/{id}/restore` → restore
-
-Флаги в списках:
-- `with_deleted=1` — включить удалённые в выдачу
-- `only_deleted=1` — только удалённые (подразумевает `with_deleted`)
+# Admin API (минимальная документация)
 
 ---
 
-# Events
+## База
 
-## List
+Все эндпоинты ниже начинаются с:
 
-`GET /events`
+- `/api/admin/...`
 
-### Query params
+Формат ответов: JSON.
 
-Pagination:
-- `page` (int >= 1)
-- `per_page` (int 1..100, default 20)
+---
 
-Search / filters:
-- `q` (string) — поиск по:
-  - `events.title`
-  - `events.description`
-  - `community.name`
-  - `community.description`
-- `city_id` (int)
-- `community_id` (int)
-- `status` (string)
+## Авторизация
 
-Date filters:
-- `date_from` (date or datetime string)
-- `date_to` (date or datetime string)
+Обязательна для всех запросов.
 
-Правило сравнения дат:
-- если у события есть `start_time` → сравниваем по `start_time`
-- если `start_time` = null, но есть `start_date` → сравниваем по `start_date` (YYYY-MM-DD)
+Заголовки:
 
-Price:
-- `free` (boolean) — если `true`, то событие считается бесплатным когда:
-  - `price_status = "free"`
-  - ИЛИ (`price_min = 0` и `price_max IS NULL`)
+- `Accept: application/json`
+- `Authorization: Bearer <TOKEN>`
 
-Interests:
-- `interests[]` (array<int>) — **ANY-логика**:
-  событие подходит, если у него есть **хотя бы один** interest из списка.
+Если токена нет или он неверный:
 
-Soft delete flags:
-- `with_deleted` (boolean)
-- `only_deleted` (boolean)
-
-Sorting:
-- `sort` ∈ `id | title | start_date | start_time | created_at | updated_at | price_min`
-- `dir` ∈ `asc | desc`
-- Особенности (Postgres):
-  - для `start_date`, `start_time`, `price_min` используется `NULLS LAST`
-
-### Example
-
-```bash
-curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
-"http://127.0.0.1:8088/api/admin/events?per_page=10&page=1&city_id=14&q=театр&sort=start_date&dir=asc" | jq
+```json
+{ "message": "Unauthenticated." }
 ````
 
-### Response
+---
+
+## Общий формат ответов
+
+### Список с пагинацией
 
 ```json
 {
-  "meta": { "current_page": 1, "per_page": 10, "total": 21, "last_page": 3 },
+  "meta": {
+    "current_page": 1,
+    "per_page": 20,
+    "total": 123,
+    "last_page": 7
+  },
+  "data": [ ... ]
+}
+```
+
+### Одна сущность
+
+```json
+{ "data": { ... } }
+```
+
+### Селекты
+
+```json
+{
   "data": [
-    {
-      "id": 32,
-      "title": "...",
-      "start_time": "2026-01-21T13:00:00.000000Z",
-      "start_date": "2026-01-21",
-      "city": { "id": 14, "name": "Воронеж", "slug": "voronezh" },
-      "community": { "id": 1, "name": "...", "city": "Воронеж", "avatar_url": null },
-      "interests": []
-    }
+    { "id": 1, "label": "..." }
   ]
 }
 ```
 
-## Show
+### Мягкое удаление (soft delete)
 
-`GET /events/{id}`
+* `DELETE` не удаляет запись физически, а проставляет `deleted_at`
+* `POST .../restore` восстанавливает
 
-* Возвращает событие, включая soft-deleted.
+Ответ на удаление:
 
-```bash
-curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
-"http://127.0.0.1:8088/api/admin/events/32" | jq
+```json
+{ "ok": true }
 ```
-
-## Create
-
-`POST /events`
-
-* Body: поля события + `interests[]` (опционально).
-* Возвращает созданное событие в формате `{ data: ... }`.
-
-## Update
-
-`PATCH /events/{id}`
-
-* Частичное обновление.
-* `interests[]` если передан — синхронизируется (replace).
-
-## Delete (soft)
-
-`DELETE /events/{id}`
-
-## Restore
-
-`POST /events/{id}/restore`
 
 ---
 
-# Communities
+## Ошибки
 
-## List
+### Валидация (422)
 
-`GET /communities`
+Laravel вернет 422 с описанием ошибок (формат стандартный для Laravel).
 
-### Query params
+### Не найдено (404)
 
-Pagination:
+Если запись не найдена.
 
-* `page` (int >= 1)
-* `per_page` (int 1..100, default 20)
+---
 
-Search / filters:
+## Events (события)
 
-* `q` (string) — поиск по `name`, `description` (и другим полям, если добавлены)
+### GET `/api/admin/events`
+
+Список событий с фильтрами и сортировкой.
+
+Параметры:
+
+* `page` (int, >= 1)
+* `per_page` (int, 1..100, по умолчанию 20)
+
+Поиск:
+
+* `q` (string) поиск по `title`, `description`, а также по сообществу (`community.name`, `community.description`)
+
+Фильтры:
+
+* `city_id` (int)
+* `community_id` (int)
+* `status` (string)
+* `date_from` (date) рекомендуемый формат `YYYY-MM-DD`
+* `date_to` (date) рекомендуемый формат `YYYY-MM-DD`
+* `free` (bool) если `true`, то событие считается бесплатным если:
+
+    * `price_status = "free"`
+    * или `price_min = 0` и `price_max = null`
+* `interests[]` (array<int>) фильтр по интересам работает как ANY:
+  событие подходит, если у него есть хотя бы один интерес из списка
+
+Удаленные:
+
+* `with_deleted` (bool)
+* `only_deleted` (bool)
+
+Сортировка:
+
+* `sort` one of: `id`, `title`, `start_date`, `start_time`, `created_at`, `updated_at`, `price_min`
+* `dir` one of: `asc`, `desc`
+
+Особенности сортировки:
+
+* Для `start_date`, `start_time`, `price_min` используется `NULLS LAST` (Postgres).
+
+Пример:
+
+```bash
+curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
+"http://127.0.0.1:8088/api/admin/events?per_page=5&page=1&city_id=14&free=1&interests[]=2&interests[]=7" | jq
+```
+
+### GET `/api/admin/events/{id}`
+
+Показывает событие по id, включая мягко удаленные.
+
+### POST `/api/admin/events`
+
+Создает событие. (Тело запроса соответствует полям модели, включая `interests[]`.)
+
+### PATCH `/api/admin/events/{id}`
+
+Обновляет событие.
+
+### DELETE `/api/admin/events/{id}`
+
+Мягко удаляет событие. Ответ:
+
+```json
+{ "ok": true }
+```
+
+### POST `/api/admin/events/{id}/restore`
+
+Восстанавливает мягко удаленное событие.
+
+---
+
+## Communities (сообщества)
+
+### GET `/api/admin/communities`
+
+Список сообществ с фильтрами и сортировкой.
+
+Параметры:
+
+* `page` (int, >= 1)
+* `per_page` (int, 1..100, по умолчанию 20)
+
+Поиск:
+
+* `q` (string) поиск по `name`, `description`
+  Примечание: если в таблице нет `external_id`, то по нему не ищем.
+
+Фильтры:
+
 * `city_id` (int)
 * `verification_status` (string)
 
-Soft delete flags:
+Удаленные:
 
-* `with_deleted` (boolean)
-* `only_deleted` (boolean)
+* `with_deleted` (bool)
+* `only_deleted` (bool)
 
-Sorting:
+Сортировка:
 
-* `sort` ∈ `id | name | created_at | updated_at | last_checked_at`
-* `dir` ∈ `asc | desc`
+* `sort` one of: `id`, `name`, `created_at`, `updated_at`, `last_checked_at`
+* `dir` one of: `asc`, `desc`
 
-## Show
+### GET `/api/admin/communities/{id}`
 
-`GET /communities/{id}`
+Показывает сообщество по id, включая мягко удаленные.
 
-* Возвращает community, включая soft-deleted.
+### POST `/api/admin/communities`
 
-## Create
+Создает сообщество.
 
-`POST /communities`
+### PATCH `/api/admin/communities/{id}`
 
-## Update
+Обновляет сообщество.
 
-`PATCH /communities/{id}`
+### DELETE `/api/admin/communities/{id}`
 
-## Delete (soft)
+Мягко удаляет сообщество. Ответ:
 
-`DELETE /communities/{id}`
+```json
+{ "ok": true }
+```
 
-## Restore
+### POST `/api/admin/communities/{id}/restore`
 
-`POST /communities/{id}/restore`
+Восстанавливает мягко удаленное сообщество.
 
 ---
 
-# Select endpoints
+## Select (селекты для форм)
 
-Формат ответа общий:
+Назначение: быстрые выпадающие списки. Ответ всегда:
 
 ```json
-{
-  "data": [
-    { "id": 14, "label": "Воронеж" }
-  ]
-}
+{ "data": [ { "id": 1, "label": "..." } ] }
 ```
 
-## Cities
+Общие параметры для всех select-эндпоинтов:
 
-`GET /select/cities`
+* `q` (string) строка поиска
+* `limit` (int, 1..50, по умолчанию 20)
 
-Query:
+### Preload режим (чтобы подставить уже выбранные значения)
 
-* `q` (string, optional)
-* `limit` (int, default 10, max 50)
-* Preload:
+Во всех селектах можно вместо `q` передать:
 
-    * `id` или `ids` (например `ids=1,2,3`) — вернуть выбранные значения
+* `id=<число>` для одного значения
+* `ids=1,2,3` списком через запятую
+* `ids[]=1&ids[]=2` массивом
 
-Example:
+Правила:
+
+* если передан `id` или `ids`, параметр `q` игнорируется
+* `limit` работает как верхняя граница
+* для `communities` часто нужен `with_deleted=1`, чтобы выбранное удаленное значение тоже вернулось
+
+---
+
+### GET `/api/admin/select/cities`
+
+Возвращает города.
+
+Label:
+
+* просто название города
+
+Пример:
 
 ```bash
 curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
 "http://127.0.0.1:8088/api/admin/select/cities?q=вор&limit=10" | jq
 ```
 
-## Communities
+---
 
-`GET /select/communities`
+### GET `/api/admin/select/communities`
 
-Query:
+Возвращает сообщества.
 
-* `q` (string, optional)
-* `limit` (int, default 10, max 50)
-* `with_deleted` (boolean, optional)
-* Preload:
+Доп. параметры:
 
-    * `id` или `ids`
+* `city_id` (int) фильтр по городу (удобно в форме события)
+* `with_deleted` (bool)
+* `only_deleted` (bool)
 
-Example:
+Поиск:
+
+* по `name` и `description` (без `external_id`)
+
+Label:
+
+* базово: `name`
+* если у сообщества есть город и название города не встречается в `name`, добавляем ` · <Город>`
+* если `deleted_at` не null, добавляем ` (deleted)`
+
+Пример:
 
 ```bash
 curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
 "http://127.0.0.1:8088/api/admin/select/communities?q=театр&limit=10&with_deleted=1" | jq
 ```
 
-Label правило (UI-friendly):
+Preload примеры:
 
-* Пример: `"Никитинский театр · Воронеж"`
+```bash
+curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
+"http://127.0.0.1:8088/api/admin/select/communities?id=5&with_deleted=1" | jq
 
-## Interests
+curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
+"http://127.0.0.1:8088/api/admin/select/communities?ids=5,3&limit=2&with_deleted=1" | jq
+```
 
-`GET /select/interests`
+---
 
-Query:
+### GET `/api/admin/select/interests`
 
-* `q` (string, optional)
-* `limit` (int, default 10, max 50)
-* Preload:
+Возвращает интересы.
 
-    * `id` или `ids`
+Label:
 
-Example:
+* просто название интереса
+
+Пример:
 
 ```bash
 curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
 "http://127.0.0.1:8088/api/admin/select/interests?q=муз&limit=10" | jq
 ```
+
+Preload пример:
+
+```bash
+curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
+"http://127.0.0.1:8088/api/admin/select/interests?ids[]=2&ids[]=7" | jq
+```
+
