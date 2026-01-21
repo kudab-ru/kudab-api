@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\Admin\AdminSelectController;
 use App\Http\Controllers\Api\CityController;
 use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Api\Web\CitiesController;
@@ -15,6 +16,34 @@ Route::get('/ping', function () {
         'result' => 'pong',
     ]);
 });
+
+use App\Http\Controllers\Api\Admin\AdminCommunitiesController;
+use App\Http\Controllers\Api\Admin\AdminEventsController;
+
+Route::prefix('admin')
+    ->middleware(['auth:sanctum', 'role:admin|superadmin'])
+    ->group(function () {
+        Route::get('select/cities', [AdminSelectController::class, 'cities']);
+        Route::get('select/communities', [AdminSelectController::class, 'communities']);
+        Route::get('select/interests', [AdminSelectController::class, 'interests']);
+
+        // communities
+        Route::get('/communities', [AdminCommunitiesController::class, 'index']);
+        Route::get('/communities/{id}', [AdminCommunitiesController::class, 'show']);
+        Route::post('/communities', [AdminCommunitiesController::class, 'store']);
+        Route::patch('/communities/{id}', [AdminCommunitiesController::class, 'update']);
+        Route::delete('/communities/{id}', [AdminCommunitiesController::class, 'destroy']);
+        Route::post('/communities/{id}/restore', [AdminCommunitiesController::class, 'restore']);
+
+        // events
+        Route::get('/events', [AdminEventsController::class, 'index']);
+        Route::get('/events/{id}', [AdminEventsController::class, 'show']);
+        Route::post('/events', [AdminEventsController::class, 'store']);
+        Route::patch('/events/{id}', [AdminEventsController::class, 'update']);
+        Route::delete('/events/{id}', [AdminEventsController::class, 'destroy']);
+        Route::post('/events/{id}/restore', [AdminEventsController::class, 'restore']);
+    });
+
 
 Route::middleware(['throttle:web'])->group(function () {
     Route::get('events', [EventController::class, 'index']);

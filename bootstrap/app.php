@@ -14,8 +14,14 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'bot.auth' => \App\Http\Middleware\BotAuthMiddleware::class,
+
+            'role' => \Spatie\Permission\Middleware\RoleMiddleware::class,
+            'permission' => \Spatie\Permission\Middleware\PermissionMiddleware::class,
+            'role_or_permission' => \Spatie\Permission\Middleware\RoleOrPermissionMiddleware::class,
         ]);
-//        $middleware->appendToGroup('api', \App\Http\Middleware\BotAuthMiddleware::class);
+
+        // Если нужно повесить bot.auth на весь API-групп — раскомментируй:
+        // $middleware->appendToGroup('api', \App\Http\Middleware\BotAuthMiddleware::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //
