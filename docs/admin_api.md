@@ -85,6 +85,10 @@ Laravel вернет 422 с описанием ошибок (формат ста
 
 Если запись не найдена.
 
+### Доступ запрещен (403)
+
+Если токен валидный, но у пользователя нет нужной роли/прав.
+
 ---
 
 ## Events (события)
@@ -118,8 +122,12 @@ Laravel вернет 422 с описанием ошибок (формат ста
 
 Удаленные:
 
-* `with_deleted` (bool)
-* `only_deleted` (bool)
+* `with_deleted` (bool) включает удаленные (возвращает и живые, и удаленные)
+* `only_deleted` (bool) возвращает только удаленные
+
+Правило приоритета:
+
+* если `only_deleted=true`, он имеет приоритет над `with_deleted=true`
 
 Сортировка:
 
@@ -186,8 +194,12 @@ curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
 
 Удаленные:
 
-* `with_deleted` (bool)
-* `only_deleted` (bool)
+* `with_deleted` (bool) включает удаленные (возвращает и живые, и удаленные)
+* `only_deleted` (bool) возвращает только удаленные
+
+Правило приоритета:
+
+* если `only_deleted=true`, он имеет приоритет над `with_deleted=true`
 
 Сортировка:
 
@@ -244,8 +256,11 @@ curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
 Правила:
 
 * если передан `id` или `ids`, параметр `q` игнорируется
-* `limit` работает как верхняя граница
-* для `communities` часто нужен `with_deleted=1`, чтобы выбранное удаленное значение тоже вернулось
+* в preload сервер старается вернуть **все переданные ids** (даже если `limit` меньше), но с разумным капом
+* `limit` в preload — “желательное”, а не жесткий потолок
+* для `communities` удаленные выбранные значения в preload возвращаются автоматически (чтобы форма могла их подставить)
+
+    * `with_deleted/only_deleted` актуальны в основном для обычного поиска (когда ids не переданы)
 
 ---
 
@@ -273,8 +288,12 @@ curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
 Доп. параметры:
 
 * `city_id` (int) фильтр по городу (удобно в форме события)
-* `with_deleted` (bool)
-* `only_deleted` (bool)
+* `with_deleted` (bool) включает удаленные (поиск/список)
+* `only_deleted` (bool) возвращает только удаленные (поиск/список)
+
+Правило приоритета:
+
+* если `only_deleted=true`, он имеет приоритет над `with_deleted=true`
 
 Поиск:
 
@@ -297,10 +316,10 @@ Preload примеры:
 
 ```bash
 curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
-"http://127.0.0.1:8088/api/admin/select/communities?id=5&with_deleted=1" | jq
+"http://127.0.0.1:8088/api/admin/select/communities?id=5" | jq
 
 curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
-"http://127.0.0.1:8088/api/admin/select/communities?ids=5,3&limit=2&with_deleted=1" | jq
+"http://127.0.0.1:8088/api/admin/select/communities?ids=5,3&limit=2" | jq
 ```
 
 ---
@@ -327,3 +346,4 @@ curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
 "http://127.0.0.1:8088/api/admin/select/interests?ids[]=2&ids[]=7" | jq
 ```
 
+```
