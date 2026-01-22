@@ -5,12 +5,6 @@ use Illuminate\Support\Facades\DB;
 
 return new class extends Migration
 {
-    /**
-     * Postgres: CREATE/DROP INDEX CONCURRENTLY нельзя внутри транзакции.
-     * Laravel по умолчанию запускает миграции в транзакции -> выключаем.
-     */
-    public bool $withinTransaction = false;
-
     public function up(): void
     {
         // 1) Защитная проверка: если уже есть дубли — миграция падает с понятным сообщением
