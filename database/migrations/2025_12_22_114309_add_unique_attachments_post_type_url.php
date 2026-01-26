@@ -5,6 +5,8 @@ use Illuminate\Support\Facades\DB;
 
 return new class extends Migration
 {
+    public $withinTransaction = false;
+
     public function up(): void
     {
         // 1) Проверяем дубли (только там, где url не null, иначе Postgres уникальностью не спасёт)

@@ -5,9 +5,10 @@ use Illuminate\Support\Facades\DB;
 
 return new class extends Migration
 {
+    public $withinTransaction = false;
+
     public function up(): void
     {
-        // 1) Защитная проверка: если уже есть дубли — миграция падает с понятным сообщением
         $dupe = DB::selectOne("
             select source, external_id, social_link_id, count(*) as cnt
             from context_posts
@@ -26,7 +27,6 @@ return new class extends Migration
             ));
         }
 
-        // 2) Частичный уникальный индекс только для строк с social_link_id IS NOT NULL
         DB::statement("
             CREATE UNIQUE INDEX CONCURRENTLY ctx_posts_src_ext_social_uniq
             ON context_posts (source, external_id, social_link_id)
