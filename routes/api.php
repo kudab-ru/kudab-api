@@ -30,6 +30,9 @@ Route::prefix('admin')
         // communities
         Route::get('/communities', [AdminCommunitiesController::class, 'index']);
         Route::get('/communities/{id}', [AdminCommunitiesController::class, 'show']);
+
+        Route::post('/communities/import', [AdminCommunitiesController::class, 'import']);
+
         Route::post('/communities', [AdminCommunitiesController::class, 'store']);
         Route::patch('/communities/{id}', [AdminCommunitiesController::class, 'update']);
         Route::delete('/communities/{id}', [AdminCommunitiesController::class, 'destroy']);

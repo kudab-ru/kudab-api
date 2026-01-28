@@ -38,4 +38,9 @@ return [
     'bot' => [
         'shared_token' => env('BOT_SHARED_TOKEN'),
     ],
+
+    'vk' => [
+        'token'   => env('VK_ACCESS_TOKEN'),
+        'version' => env('VK_API_VERSION', '5.131'),
+    ],
 ];
