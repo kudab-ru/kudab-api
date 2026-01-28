@@ -41,9 +41,7 @@ class VkCommunityResolver
             throw new \RuntimeException('VK url has empty screen_name.');
         }
 
-        // 1) Пробуем сразу вытащить числовой id из:
-        // - wall-123_456
-        // - club123/public123/event123/123
+        // 1) Пробуем сразу вытащить числовой id из club123/public123/event123/123
         $numericGroupId = $this->extractNumericGroupId($screenNameOrId);
 
         // 2) Если не получилось — resolveScreenName
@@ -109,6 +107,7 @@ class VkCommunityResolver
     {
         $response = $this->vkMethod('groups.getById', [
             'group_id' => $groupId,
+            // Чем больше — тем полезнее импорт. Это НЕ “верификация”, это “профиль”.
             'fields' => implode(',', [
                 'screen_name',
                 'description',
@@ -118,7 +117,6 @@ class VkCommunityResolver
                 'photo_200_orig',
                 'photo_400_orig',
                 'photo_max',
-                'photo_max_orig',
                 'cover',
                 'site',
                 'status',
@@ -148,7 +146,6 @@ class VkCommunityResolver
     private function pickBestAvatarUrl(array $group): ?string
     {
         $candidates = [
-            $group['photo_max_orig'] ?? null,
             $group['photo_400_orig'] ?? null,
             $group['photo_max'] ?? null,
             $group['photo_200_orig'] ?? null,
@@ -172,7 +169,7 @@ class VkCommunityResolver
         // 1) cover.images[] (берём самый большой по width)
         if (isset($group['cover']['images']) && is_array($group['cover']['images'])) {
             $bestUrl = null;
-            $bestWidth = -1;
+            $bestW = -1;
 
             foreach ($group['cover']['images'] as $img) {
                 if (!is_array($img)) {
@@ -182,8 +179,8 @@ class VkCommunityResolver
                 $url = isset($img['url']) && is_string($img['url']) ? trim($img['url']) : '';
                 $w   = isset($img['width']) ? (int)$img['width'] : 0;
 
-                if ($url !== '' && $w > $bestWidth) {
-                    $bestWidth = $w;
+                if ($url !== '' && $w > $bestW) {
+                    $bestW = $w;
                     $bestUrl = $url;
                 }
             }
@@ -193,9 +190,8 @@ class VkCommunityResolver
             }
         }
 
-        // 2) fallback: photo_max_orig/photo_max/...
+        // 2) fallback: photo_max / photo_400_orig (иногда cover не отдают)
         $fallback = [
-            $group['photo_max_orig'] ?? null,
             $group['photo_max'] ?? null,
             $group['photo_400_orig'] ?? null,
             $group['photo_200_orig'] ?? null,
@@ -243,6 +239,7 @@ class VkCommunityResolver
             throw new \RuntimeException("VK API {$method}: {$message}", $code);
         }
 
+        // возвращаем именно response
         return is_array($json['response'] ?? null) ? $json['response'] : [];
     }
 
@@ -259,18 +256,7 @@ class VkCommunityResolver
         $trimmed = preg_replace('~^https?://m\.vk\.com~i', 'https://vk.com', $trimmed) ?? $trimmed;
         $trimmed = preg_replace('~^https?://vk\.ru~i', 'https://vk.com', $trimmed) ?? $trimmed;
 
-        // режем query/fragment → канонический инпут для парсинга
-        $parts = parse_url($trimmed);
-        $host = isset($parts['host']) ? strtolower((string)$parts['host']) : 'vk.com';
-        $host = preg_replace('~^www\.~', '', $host) ?? $host;
-
-        $path = isset($parts['path']) ? '/' . ltrim((string)$parts['path'], '/') : '/';
-        $path = rtrim($path, '/');
-
-        // "/" -> без хвоста
-        $pathForUrl = ($path === '/' ? '' : $path);
-
-        return 'https://' . $host . $pathForUrl;
+        return $trimmed;
     }
 
     private function extractScreenNameOrId(string $url): string
@@ -284,6 +270,7 @@ class VkCommunityResolver
 
         // берём первый сегмент пути
         $firstSegment = explode('/', $path, 2)[0];
+        $firstSegment = explode('?', $firstSegment, 2)[0];
         $firstSegment = ltrim($firstSegment, '@');
 
         return trim($firstSegment);
@@ -292,11 +279,6 @@ class VkCommunityResolver
     private function extractNumericGroupId(string $screenNameOrId): ?string
     {
         $screenNameOrId = trim($screenNameOrId);
-
-        // wall-123_456 / wall-123
-        if (preg_match('~^wall-(\d+)(?:_|$)~i', $screenNameOrId, $m)) {
-            return (string)$m[1];
-        }
 
         // club123 / public123 / event123
         if (preg_match('~^(club|public|event)(\d+)$~i', $screenNameOrId, $m)) {

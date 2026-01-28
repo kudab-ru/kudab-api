@@ -6,11 +6,13 @@ use App\Http\Requests\Admin\Communities\AdminCommunitiesImportRequest;
 use App\Http\Requests\Admin\Communities\AdminCommunitiesIndexRequest;
 use App\Http\Requests\Admin\Communities\AdminCommunitiesStoreRequest;
 use App\Http\Requests\Admin\Communities\AdminCommunitiesUpdateRequest;
+use App\Http\Requests\Admin\Communities\AdminCommunitiesVerifyRequest;
 use App\Http\Resources\Admin\CommunityResource as AdminCommunityResource;
 use App\Models\Community;
 use App\Models\CommunitySocialLink;
 use App\Models\SocialNetwork;
 use App\Services\Vk\VkCommunityResolver;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -68,6 +70,7 @@ class AdminCommunitiesController extends Controller
         }
 
         $page = $communitiesQuery->paginate($perPage, ['*'], 'page', $currentPage);
+
         $items = AdminCommunityResource::collection($page->getCollection())->toArray($request);
 
         return response()->json([
@@ -104,6 +107,7 @@ class AdminCommunitiesController extends Controller
         }
 
         $community->save();
+
         $community = $community->fresh(['city:id,name,slug']);
 
         return response()->json([
@@ -114,6 +118,7 @@ class AdminCommunitiesController extends Controller
     public function update(AdminCommunitiesUpdateRequest $request, int $id): JsonResponse
     {
         $community = Community::query()->findOrFail($id);
+
         $data = $request->validated();
 
         $community->fill($data);
@@ -123,6 +128,7 @@ class AdminCommunitiesController extends Controller
         }
 
         $community->save();
+
         $community = $community->fresh(['city:id,name,slug']);
 
         return response()->json([
@@ -160,61 +166,48 @@ class AdminCommunitiesController extends Controller
      * POST /api/admin/communities/import
      * Body: { url: string, auto_verify?: bool }
      *
-     * VK: синхронный online resolve + запись профиля (name/description/avatar/cover) в communities.
-     * Дубли: обновляем (перезаписываем) community и link для удобного "обновления импорта".
+     * Импорт:
+     * - нормализуем ссылку
+     * - для VK (если есть token) синхронно подтягиваем name/description/avatar/image/external_id/canonical_url
+     * - создаём или обновляем community + community_social_links
+     * - auto_verify: если true — ставим outbox на верификацию
      */
-    public function import(AdminCommunitiesImportRequest $request, VkCommunityResolver $vkResolver): JsonResponse
+    public function import(AdminCommunitiesImportRequest $request, VkCommunityResolver $vk): JsonResponse
     {
         $validated = $request->validated();
 
         $inputUrl = trim((string)$validated['url']);
-        $shouldAutoVerify = (bool)($validated['auto_verify'] ?? false);
+        $autoVerify = (bool)($validated['auto_verify'] ?? false);
 
-        [$normalizedInputUrl, $host, $path, $query] = $this->parseUrlParts($inputUrl);
+        [$normalizedUrl, $host, $path, $query] = $this->parseUrlParts($inputUrl);
         [$sourceKey, $socialNetwork] = $this->resolveSocialNetworkByHost($host);
 
-        // оффлайн-попытка (tg и спец vk ссылки)
         $externalCommunityId = $this->extractExternalCommunityId($sourceKey, $path, $query);
-
-        $canonicalUrl = $normalizedInputUrl;
 
         $resolvedName = null;
         $resolvedDescription = null;
         $resolvedAvatarUrl = null;
         $resolvedImageUrl = null;
+        $canonicalUrl = $normalizedUrl;
 
-        if ($sourceKey === 'vk') {
-            if ((string)config('services.vk.token') === '' || (string)config('services.vk.version') === '') {
-                throw ValidationException::withMessages([
-                    'url' => ['VK is not configured (services.vk.token / services.vk.version).'],
-                ]);
-            }
+        $vkConfigured = (string)config('services.vk.token') !== '' && (string)config('services.vk.version') !== '';
 
-            try {
-                $resolved = $vkResolver->resolve($normalizedInputUrl);
+        // VK: онлайн-резолв (имя/описание/фото/external_id/url)
+        if ($sourceKey === 'vk' && $vkConfigured) {
+            $resolved = $vk->resolve($normalizedUrl);
 
-                $externalCommunityId = trim((string)($resolved['external_community_id'] ?? ''));
-                $resolvedName = trim((string)($resolved['name'] ?? ''));
-
-                if ($externalCommunityId === '' || $resolvedName === '') {
-                    throw new \RuntimeException('VK resolver returned empty external_community_id or name.');
-                }
-
-                $canonicalUrl = (string)($resolved['canonical_url'] ?? $canonicalUrl);
-                $resolvedDescription = $resolved['description'] ?? null;
-                $resolvedAvatarUrl = $resolved['avatar_url'] ?? null;
-                $resolvedImageUrl = $resolved['image_url'] ?? null;
-            } catch (\Throwable $e) {
-                throw ValidationException::withMessages([
-                    'url' => ['VK resolve failed: ' . $e->getMessage()],
-                ]);
-            }
+            $externalCommunityId = (string)$resolved['external_community_id'];
+            $resolvedName = (string)$resolved['name'];
+            $resolvedDescription = $resolved['description'] ?? null;
+            $resolvedAvatarUrl = $resolved['avatar_url'] ?? null;
+            $resolvedImageUrl = $resolved['image_url'] ?? null;
+            $canonicalUrl = (string)$resolved['canonical_url'];
         }
 
-        // Дедуп: по canonical url, и (если есть) по (social_network_id + external_community_id)
+        // Идемпотентность: ищем по canonical_url, и по (social_network_id + external_community_id) если он есть
         $existingLink = CommunitySocialLink::query()
             ->where('url', $canonicalUrl)
-            ->when($externalCommunityId !== null && $externalCommunityId !== '', function ($q) use ($socialNetwork, $externalCommunityId) {
+            ->when($externalCommunityId !== null, function ($q) use ($socialNetwork, $externalCommunityId) {
                 $q->orWhere(function ($qq) use ($socialNetwork, $externalCommunityId) {
                     $qq->where('social_network_id', $socialNetwork->id)
                         ->where('external_community_id', $externalCommunityId);
@@ -223,103 +216,123 @@ class AdminCommunitiesController extends Controller
             ->first();
 
         if ($existingLink) {
-            DB::transaction(function () use (
-                $existingLink,
-                $normalizedInputUrl,
-                $canonicalUrl,
-                $externalCommunityId,
-                $resolvedName,
-                $resolvedDescription,
-                $resolvedAvatarUrl,
-                $resolvedImageUrl,
-                $shouldAutoVerify
-            ) {
-                // обновляем ссылку
-                $linkChanged = false;
+            $community = $existingLink->community;
 
-                if ($existingLink->url !== $canonicalUrl) {
-                    $existingLink->url = $canonicalUrl;
-                    $linkChanged = true;
+            $changed = false;
+
+            // “Лёгкое обновление”: если VK смог отдать профиль — перезаписываем поля
+            if ($community && $resolvedName !== null && $resolvedName !== '') {
+                if ((string)$community->name !== $resolvedName) {
+                    $community->name = $resolvedName;
+                    $changed = true;
                 }
 
-                if ($externalCommunityId !== null && $externalCommunityId !== '' &&
-                    (string)$existingLink->external_community_id !== (string)$externalCommunityId
-                ) {
-                    $existingLink->external_community_id = $externalCommunityId;
-                    $linkChanged = true;
+                // description/avatar/image обновляем только если пришло не-null (чтобы не “затирать в пустоту”)
+                if ($resolvedDescription !== null && (string)$community->description !== (string)$resolvedDescription) {
+                    $community->description = $resolvedDescription;
+                    $changed = true;
+                }
+                if ($resolvedAvatarUrl !== null && (string)$community->avatar_url !== (string)$resolvedAvatarUrl) {
+                    $community->avatar_url = $resolvedAvatarUrl;
+                    $changed = true;
+                }
+                if ($resolvedImageUrl !== null && (string)$community->image_url !== (string)$resolvedImageUrl) {
+                    $community->image_url = $resolvedImageUrl;
+                    $changed = true;
                 }
 
-                if ($linkChanged) {
-                    $existingLink->save();
+                if ($changed) {
+                    $community->verification_meta = array_merge(
+                        is_array($community->verification_meta ?? null) ? $community->verification_meta : [],
+                        [
+                            'ingest' => [
+                                'url_input' => $normalizedUrl,
+                                'url_canonical' => $canonicalUrl,
+                                'auto_verify' => $autoVerify,
+                                'updated_at' => now()->toIso8601String(),
+                                'resolved' => true,
+                            ],
+                        ]
+                    );
+
+                    $community->save();
                 }
+            }
 
-                // перезаписываем профиль (как ты хотел)
-                if ($resolvedName !== null && $resolvedName !== '') {
-                    $community = $existingLink->community;
-                    if ($community) {
-                        $community->name = $resolvedName;
-                        $community->description = $resolvedDescription;
-                        $community->avatar_url = $resolvedAvatarUrl;
-                        $community->image_url = $resolvedImageUrl;
+            // link обновляем всегда, если есть отличия (url/external id)
+            if ((string)$existingLink->url !== (string)$canonicalUrl) {
+                $existingLink->url = $canonicalUrl;
+                $changed = true;
+            }
+            if ($externalCommunityId !== null && (string)$existingLink->external_community_id !== (string)$externalCommunityId) {
+                $existingLink->external_community_id = $externalCommunityId;
+                $changed = true;
+            }
+            if ($changed) {
+                $existingLink->save();
+            }
 
-                        $meta = is_array($community->verification_meta ?? null) ? $community->verification_meta : [];
-                        $meta['ingest'] = array_merge($meta['ingest'] ?? [], [
-                            'url_input' => $normalizedInputUrl,
-                            'url_canonical' => $canonicalUrl,
-                            'auto_verify' => $shouldAutoVerify,
-                            'resolved' => true,
-                            'updated_at' => now()->toIso8601String(),
-                        ]);
-                        $community->verification_meta = $meta;
-
-                        $community->save();
-                    }
-                }
-
-                // TODO: если shouldAutoVerify=true — добавь твой outbox insert (если хочешь)
-            });
+            // auto_verify: enqueue
+            $verifyOutbox = null;
+            if ($autoVerify) {
+                $verifyOutbox = $this->enqueueVerifyOutbox(
+                    communityId: (int)$existingLink->community_id,
+                    sources: [$sourceKey], // либо ['auto'], если хочешь "по приоритету"
+                    limitPerSource: 30,
+                    overwrite: false,
+                    clearAggregator: false,
+                    requestedByUserId: optional($request->user())->id,
+                    metaSource: 'import:auto_verify'
+                );
+            }
 
             return response()->json([
                 'community_id' => (int)$existingLink->community_id,
                 'social_link_id' => (int)$existingLink->id,
-                'status' => ($resolvedName ? 'ingest_updated' : 'ingest_exists'),
-                'external_community_id' => $existingLink->external_community_id,
-                'url' => $existingLink->url,
-            ], 200);
+                'status' => $changed ? 'ingest_updated' : 'ingest_exists',
+                'external_community_id' => (string)($existingLink->external_community_id ?? ''),
+                'url' => (string)$existingLink->url,
+                'verify' => $verifyOutbox ? [
+                    'status' => 'verify_' . (string)$verifyOutbox['status'],
+                    'outbox_id' => $verifyOutbox['outbox_id'] ?? null,
+                ] : null,
+            ]);
         }
 
         [$community, $link] = DB::transaction(function () use (
-            $normalizedInputUrl,
+            $normalizedUrl,
             $canonicalUrl,
             $host,
             $path,
+            $autoVerify,
             $socialNetwork,
             $externalCommunityId,
             $resolvedName,
             $resolvedDescription,
             $resolvedAvatarUrl,
-            $resolvedImageUrl,
-            $shouldAutoVerify
+            $resolvedImageUrl
         ) {
             $community = new Community();
-
-            $community->name = ($resolvedName && $resolvedName !== '')
-                ? $resolvedName
-                : $this->buildPlaceholderName($host, $path);
-
-            $community->description = $resolvedDescription;
-            $community->avatar_url = $resolvedAvatarUrl;
-            $community->image_url = $resolvedImageUrl;
-
+            $community->name = ($resolvedName && $resolvedName !== '') ? $resolvedName : $this->buildPlaceholderName($host, $path);
             $community->verification_status = 'pending';
+
+            if ($resolvedDescription !== null) {
+                $community->description = $resolvedDescription;
+            }
+            if ($resolvedAvatarUrl !== null) {
+                $community->avatar_url = $resolvedAvatarUrl;
+            }
+            if ($resolvedImageUrl !== null) {
+                $community->image_url = $resolvedImageUrl;
+            }
 
             $community->verification_meta = array_merge(
                 is_array($community->verification_meta ?? null) ? $community->verification_meta : [],
                 [
                     'ingest' => [
-                        'url_input' => $normalizedInputUrl,
+                        'url_input' => $normalizedUrl,
                         'url_canonical' => $canonicalUrl,
-                        'auto_verify' => $shouldAutoVerify,
+                        'auto_verify' => $autoVerify,
                         'created_at' => now()->toIso8601String(),
                         'resolved' => (bool)($resolvedName && $resolvedName !== ''),
                     ],
@@ -335,19 +348,64 @@ class AdminCommunitiesController extends Controller
             $link->url = $canonicalUrl;
             $link->save();
 
-            // TODO: если shouldAutoVerify=true — добавь твой outbox insert (если хочешь)
-
             return [$community, $link];
         });
+
+        // auto_verify: enqueue
+        $verifyOutbox = null;
+        if ($autoVerify) {
+            $verifyOutbox = $this->enqueueVerifyOutbox(
+                communityId: (int)$community->id,
+                sources: [$sourceKey], // либо ['auto']
+                limitPerSource: 30,
+                overwrite: false,
+                clearAggregator: false,
+                requestedByUserId: optional($request->user())->id,
+                metaSource: 'import:auto_verify'
+            );
+        }
 
         return response()->json([
             'community_id' => (int)$community->id,
             'social_link_id' => (int)$link->id,
-            'status' => ($resolvedName ? 'ingest_resolved' : 'ingest_created'),
-            'name' => $community->name,
-            'external_community_id' => $link->external_community_id,
-            'url' => $link->url,
+            'status' => ($resolvedName && $resolvedName !== '') ? 'ingest_resolved' : 'ingest_created',
+            'external_community_id' => (string)($link->external_community_id ?? ''),
+            'url' => (string)$link->url,
+            'verify' => $verifyOutbox ? [
+                'status' => 'verify_' . (string)$verifyOutbox['status'],
+                'outbox_id' => $verifyOutbox['outbox_id'] ?? null,
+            ] : null,
         ], 201);
+    }
+
+    /**
+     * POST /api/admin/communities/{id}/verify
+     *
+     * Запуск верификации ПО ЗАПРОСУ:
+     * - Никаких VK запросов тут.
+     * - Только outbox_messages → parser заберёт и запустит VerifyCommunityJob.
+     */
+    public function verify(AdminCommunitiesVerifyRequest $request, int $id): JsonResponse
+    {
+        $community = Community::withTrashed()->findOrFail($id);
+        $validated = $request->validated();
+
+        $result = $this->enqueueVerifyOutbox(
+            communityId: (int)$community->id,
+            sources: array_values($validated['sources'] ?? ['vk']),
+            limitPerSource: (int)($validated['limit_per_source'] ?? 30),
+            overwrite: (bool)($validated['overwrite'] ?? false),
+            clearAggregator: (bool)($validated['clear_aggregator'] ?? false),
+            requestedByUserId: optional($request->user())->id,
+            metaSource: 'api'
+        );
+
+        return response()->json([
+            'ok' => true,
+            'status' => 'verify_' . (string)$result['status'],
+            'outbox_id' => $result['outbox_id'] ?? null,
+            'community_id' => (int)$community->id,
+        ], 202);
     }
 
     private function parseUrlParts(string $url): array
@@ -366,14 +424,11 @@ class AdminCommunitiesController extends Controller
         }
 
         $host = strtolower((string)$parts['host']);
-        $host = preg_replace('~^www\.~', '', $host) ?? $host;
+        $host = preg_replace('~^www\.~', '', $host);
 
         $path = (string)($parts['path'] ?? '');
         $path = '/' . ltrim($path, '/');
         $path = rtrim($path, '/');
-        if ($path === '') {
-            $path = '/';
-        }
 
         $query = (string)($parts['query'] ?? '');
 
@@ -397,17 +452,17 @@ class AdminCommunitiesController extends Controller
             $sourceKey = 'site';
         }
 
-        $socialNetwork = SocialNetwork::query()
+        $sn = SocialNetwork::query()
             ->whereIn('slug', $slugCandidates)
             ->first();
 
-        if (!$socialNetwork) {
+        if (!$sn) {
             throw ValidationException::withMessages([
-                'url' => ['Не найдена соцсеть в social_networks (slug: ' . implode(',', $slugCandidates) . ').'],
+                'url' => ['Не найдена соцсеть в справочнике social_networks (slug: ' . implode(',', $slugCandidates) . ').'],
             ]);
         }
 
-        return [$sourceKey, $socialNetwork];
+        return [$sourceKey, $sn];
     }
 
     private function extractExternalCommunityId(string $sourceKey, string $path, string $query): ?string
@@ -457,5 +512,88 @@ class AdminCommunitiesController extends Controller
         $p = trim($path, '/');
         $base = $host . ($p !== '' ? '/' . $p : '');
         return Str::limit('Импорт: ' . $base, 255, '…');
+    }
+
+    private function enqueueVerifyOutbox(
+        int $communityId,
+        array $sources,
+        int $limitPerSource,
+        bool $overwrite,
+        bool $clearAggregator,
+        ?int $requestedByUserId,
+        string $metaSource
+    ): array {
+        $topic = 'community.verify.auto';
+        $dedupKey = 'community:' . $communityId;
+
+        $payload = [
+            'community_id' => $communityId,
+            'sources' => array_values($sources),
+            'limit_per_source' => $limitPerSource,
+            'overwrite' => $overwrite,
+            'clear_aggregator' => $clearAggregator,
+            'requested_at' => now()->toIso8601String(),
+            'requested_by_user_id' => $requestedByUserId,
+        ];
+
+        try {
+            $outboxId = DB::table('outbox_messages')->insertGetId([
+                'producer' => 'kudab-api',
+                'topic' => $topic,
+                'dedup_key' => $dedupKey,
+                'payload' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'status' => 'queued',
+                'attempt' => 0,
+                'max_attempts' => 10,
+                'retry_at' => null,
+                'started_at' => null,
+                'finished_at' => null,
+                'locked_at' => null,
+                'locked_by' => null,
+                'error_code' => null,
+                'error_message' => null,
+                'meta' => json_encode(['source' => $metaSource], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            return ['status' => 'queued', 'outbox_id' => (int)$outboxId];
+        } catch (QueryException $e) {
+            $sqlState = (string)($e->errorInfo[0] ?? '');
+            if ($sqlState !== '23505') {
+                throw $e;
+            }
+        }
+
+        $existing = DB::table('outbox_messages')
+            ->where('topic', $topic)
+            ->where('dedup_key', $dedupKey)
+            ->first();
+
+        if (!$existing) {
+            return ['status' => 'dedup_conflict_not_found', 'outbox_id' => null];
+        }
+
+        if (in_array((string)$existing->status, ['queued', 'processing'], true)) {
+            return ['status' => 'already_queued', 'outbox_id' => (int)$existing->id];
+        }
+
+        DB::table('outbox_messages')
+            ->where('id', (int)$existing->id)
+            ->update([
+                'payload' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'status' => 'queued',
+                'attempt' => 0,
+                'retry_at' => null,
+                'started_at' => null,
+                'finished_at' => null,
+                'locked_at' => null,
+                'locked_by' => null,
+                'error_code' => null,
+                'error_message' => null,
+                'updated_at' => now(),
+            ]);
+
+        return ['status' => 'requeued', 'outbox_id' => (int)$existing->id];
     }
 }

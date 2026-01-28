@@ -32,6 +32,7 @@ Route::prefix('admin')
         Route::get('/communities/{id}', [AdminCommunitiesController::class, 'show']);
 
         Route::post('/communities/import', [AdminCommunitiesController::class, 'import']);
+        Route::post('/communities/{id}/verify', [AdminCommunitiesController::class, 'verify']);
 
         Route::post('/communities', [AdminCommunitiesController::class, 'store']);
         Route::patch('/communities/{id}', [AdminCommunitiesController::class, 'update']);
