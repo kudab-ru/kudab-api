@@ -1,4 +1,3 @@
-
 # Admin API (минимальная документация)
 
 ---
@@ -324,6 +323,142 @@ curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
 
 ---
 
+### POST `/api/admin/communities/import`
+
+Импортирует сообщество по ссылке и (опционально) ставит задачу автоверификации.
+
+Тело запроса:
+
+* `url` (string, обязателен) ссылка на VK / Telegram / сайт
+* `auto_verify` (bool, опционально) если `true`, то сразу создается запись в outbox на автоверификацию
+
+Что делает импорт:
+
+* нормализует URL:
+
+    * если нет схемы — добавит `https://`
+    * уберет `www.`
+    * уберет хвостовой `/`
+* определяет источник по host:
+
+    * VK → `vk.com`, `vkontakte.ru`
+    * Telegram → `t.me`, `telegram.me`
+    * иначе → `site`
+* пытается извлечь `external_community_id`:
+
+    * VK: `.../club123`, `.../public123`, `.../event123`, а также `wall-123...`
+    * Telegram: `t.me/<channel>` (инвайт-ссылки вида `joinchat/...` и `+...` не дают id)
+* если VK настроен (token+version), то может подтянуть профиль:
+
+    * `name`, `description`, `avatar_url`, `image_url`, `canonical_url`, `external_community_id`
+* идемпотентность:
+
+    * если ссылка уже есть — вернет существующую запись (`ingest_exists`) или обновит поля (`ingest_updated`)
+    * если ссылки нет — создаст `зcommunity` и `community_social_link` (`ingest_created`/`ingest_resolved`)
+
+Ответ:
+
+* `200` если ссылка уже существовала
+* `201` если создана новая запись
+
+Формат ответа:
+
+```json
+{
+  "community_id": 10,
+  "social_link_id": 13,
+  "status": "ingest_created",
+  "external_community_id": "123",
+  "url": "https://vk.com/...",
+  "verify": {
+    "status": "verify_queued",
+    "outbox_id": 55
+  }
+}
+```
+
+Поле `status`:
+
+* `ingest_created` — создано без онлайн-резолва (например, VK не настроен или это не VK)
+* `ingest_resolved` — создано и заполнено из онлайн-резолва (VK настроен)
+* `ingest_exists` — ссылка уже была, изменений почти нет
+* `ingest_updated` — ссылка/поля обновлены
+
+Поле `verify`:
+
+* присутствует только если `auto_verify=true`
+* `status` возвращается как `verify_<...>`:
+
+    * `verify_queued` — задача поставлена
+    * `verify_already_queued` — уже стоит в очереди
+    * `verify_requeued` — переочередили старую
+    * `verify_dedup_conflict_not_found` — редкий кейс гонки (почти не должен происходить)
+
+Пример:
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8088/api/admin/communities/import" \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://vk.com/popcorn.drama","auto_verify":true}' | jq
+```
+
+---
+
+### POST `/api/admin/communities/{id}/verify`
+
+Ставит задачу автоверификации сообщества (через outbox). Сам запрос **не выполняет** верификацию синхронно.
+
+Тело запроса:
+
+* `sources` (array<string>, опционально) источники:
+
+    * `["vk"]`, `["tg"]`, `["site"]`
+    * `["vk","tg"]` и т.п.
+    * спец-режимы: `["auto"]` (1 источник по приоритету), `["all"]` (все ссылки)
+    * если не передано — по умолчанию `["vk"]`
+* `limit_per_source` (int, опционально, по умолчанию 30)
+* `overwrite` (bool, опционально, по умолчанию false) — перезаписывать `city/street/house`, даже если уже заполнено
+* `clear_aggregator` (bool, опционально, по умолчанию false) — очищать `street/house` если итоговый `kind=aggregator`
+
+Ответ: `202 Accepted`
+
+```json
+{
+  "ok": true,
+  "status": "verify_queued",
+  "outbox_id": 55,
+  "community_id": 10
+}
+```
+
+`status` возвращается как `verify_<...>`:
+
+* `verify_queued`
+* `verify_already_queued`
+* `verify_requeued`
+* `verify_dedup_conflict_not_found`
+
+Важное:
+
+* Дедупликация идет по сообществу: одновременно активно обычно только одно задание на `community_id`.
+* Если сообщество вручную помечено `approved/rejected` (в `verification_meta.manual_final=true`),
+  то автопроверка **не перезаписывает** `verification_status` и `is_verified`,
+  но может обновлять `verification_meta.final` и `_auto_*` (для прозрачности авто-результата).
+
+Пример:
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8088/api/admin/communities/10/verify" \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sources":["vk"],"limit_per_source":20,"overwrite":false,"clear_aggregator":false}' | jq
+```
+
+---
+
 ### GET `/api/admin/select/interests`
 
 Возвращает интересы.
@@ -344,6 +479,4 @@ Preload пример:
 ```bash
 curl -sS -H "Accept: application/json" -H "Authorization: Bearer $TOKEN" \
 "http://127.0.0.1:8088/api/admin/select/interests?ids[]=2&ids[]=7" | jq
-```
-
 ```
