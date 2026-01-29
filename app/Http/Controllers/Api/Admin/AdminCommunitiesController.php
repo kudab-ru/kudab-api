@@ -123,6 +123,33 @@ class AdminCommunitiesController extends Controller
 
         $community->fill($data);
 
+        // Ручной финал: фиксируем в meta, чтобы авто-джоба НЕ перетирала решение.
+        if (array_key_exists('verification_status', $data)) {
+            $status = (string)($data['verification_status'] ?? '');
+
+            $metaRaw = $community->verification_meta ?? null;
+            $meta = is_array($metaRaw) ? $metaRaw : (is_string($metaRaw) ? json_decode($metaRaw, true) : []);
+            if (!is_array($meta)) $meta = [];
+
+            if (in_array($status, ['approved', 'rejected'], true)) {
+                $meta['manual_final'] = true;
+                $meta['manual'] = [
+                    'status' => $status,
+                    'at' => now()->toIso8601String(),
+                    'by_user_id' => optional($request->user())->id,
+                ];
+            } elseif ($status === 'pending') {
+                unset($meta['manual_final'], $meta['manual']);
+            }
+
+            $community->verification_meta = $meta;
+
+            // Консистентность флагов при ручной правке (если поле есть)
+            if (array_key_exists('is_verified', $community->getAttributes())) {
+                $community->is_verified = ($status === 'approved');
+            }
+        }
+
         if (array_key_exists('city_id', $data)) {
             $community->city_id = $data['city_id'];
         }

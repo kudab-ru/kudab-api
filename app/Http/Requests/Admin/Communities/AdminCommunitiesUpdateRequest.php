@@ -17,6 +17,7 @@ class AdminCommunitiesUpdateRequest extends FormRequest
             'avatar_url' => ['sometimes','nullable','string','max:2048'],
             'external_id' => ['sometimes','nullable','string','max:255'],
             'city_id' => ['sometimes','nullable','integer','min:1'],
+            'verification_status' => ['sometimes', 'string', 'in:pending,approved,rejected'],
         ];
     }
 }
