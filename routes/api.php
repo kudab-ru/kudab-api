@@ -48,18 +48,17 @@ Route::prefix('admin')
         Route::post('/events/{id}/restore', [AdminEventsController::class, 'restore']);
     });
 
-
-Route::middleware(['throttle:web'])->group(function () {
-    Route::get('events', [EventController::class, 'index']);
-    Route::get('events/{id}', [EventController::class, 'show']);
-});
-
 Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('ping', fn () => ['ok' => true, 'result' => 'pong']);
     Route::get('events', [WebEventsController::class, 'index']);
     Route::get('events/{id}', [WebEventsController::class, 'show'])->whereNumber('id');
 
     Route::get('cities', [CitiesController::class, 'index']);
+
+    // TEMP (для /organizers STATUS): проксируем админ-контроллер
+    Route::post('communities/import', [AdminCommunitiesController::class, 'import']);
+    Route::get('communities/{id}', [AdminCommunitiesController::class, 'show'])->whereNumber('id');
+    Route::post('communities/{id}/verify', [AdminCommunitiesController::class, 'verify'])->whereNumber('id');
 });
 
 Route::prefix('bot')->middleware('bot.auth')->group(function () {
