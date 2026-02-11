@@ -11,6 +11,65 @@ use Illuminate\Support\Facades\DB;
 class EventRepository
 {
     /**
+     * Лёгкая выдача для sitemap: только id + lastmod (atom),
+     * с курсором after_id чтобы можно было чанковать.
+     *
+     * mode:
+     * - upcoming (по умолчанию): только будущие (и чуть прошлого, как в витрине)
+     * - all: всё, кроме deleted
+     */
+    public function listWebIdsForSitemap(int $afterId = 0, int $limit = 5000, string $mode = 'upcoming'): array
+    {
+        $limit = max(1, min($limit, 50000));
+
+        $q = Event::query()
+            ->select(['id', 'updated_at', 'created_at', 'start_time', 'start_date'])
+            ->whereNull('deleted_at')
+            ->where('id', '>', $afterId)
+            ->orderBy('id', 'asc')
+            ->limit($limit + 1);
+
+        if ($mode !== 'all') {
+            $todayMsk = now('Europe/Moscow')->toDateString();
+
+            $q->where(function ($w) use ($todayMsk) {
+                $w->where('start_time', '>=', now()->subDay())
+                    ->orWhere(function ($x) use ($todayMsk) {
+                        $x->whereNull('start_time')
+                            ->whereNotNull('start_date')
+                            ->where('start_date', '>=', $todayMsk);
+                    });
+            });
+        }
+
+        $rows = $q->get();
+
+        $hasMore = $rows->count() > $limit;
+        if ($hasMore) {
+            $rows = $rows->slice(0, $limit);
+        }
+
+        $items = $rows->map(function ($e) {
+            $lm = $e->updated_at ?? $e->created_at;
+
+            return [
+                'id' => (int) $e->id,
+                'lastmod' => $lm ? $lm->toAtomString() : null,
+            ];
+        })->values()->all();
+
+        $nextAfterId = null;
+        if ($hasMore && !empty($items)) {
+            $nextAfterId = $items[count($items) - 1]['id'];
+        }
+
+        return [
+            'items' => $items,
+            'next_after_id' => $nextAfterId,
+        ];
+    }
+
+    /**
      * Пагинация будущих событий с фильтрами.
      *
      * Поддерживаемые фильтры:

@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\Admin\AdminSelectController;
 use App\Http\Controllers\Api\CityController;
 use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Api\Web\CitiesController;
+use App\Http\Controllers\Api\Web\WebSitemapController;
 use App\Http\Controllers\Bot\RoleController;
 use App\Http\Controllers\Bot\TelegramChatBroadcastController;
 use App\Http\Controllers\Bot\TelegramChatController;
@@ -49,6 +50,8 @@ Route::prefix('admin')
     });
 
 Route::prefix('web')->middleware(['throttle:web'])->group(function () {
+    Route::get('sitemap/events', [WebSitemapController::class, 'events']);
+
     Route::get('ping', fn () => ['ok' => true, 'result' => 'pong']);
     Route::get('events', [WebEventsController::class, 'index']);
     Route::get('events/{id}', [WebEventsController::class, 'show'])->whereNumber('id');
