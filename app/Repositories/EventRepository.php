@@ -197,7 +197,7 @@ class EventRepository
         }
 
         if (!empty($filters['date_from'])) {
-            $fromDate = substr((string)$filters['date_from'], 0, 10);
+            $fromDate = substr((string) $filters['date_from'], 0, 10);
 
             $q->where(function ($w) use ($filters, $fromDate) {
                 $w->where('events.start_time', '>=', $filters['date_from'])
@@ -210,7 +210,7 @@ class EventRepository
         }
 
         if (!empty($filters['date_to'])) {
-            $toDate = substr((string)$filters['date_to'], 0, 10);
+            $toDate = substr((string) $filters['date_to'], 0, 10);
 
             $q->where(function ($w) use ($filters, $toDate) {
                 $w->where('events.start_time', '<=', $filters['date_to'])
@@ -258,13 +258,101 @@ class EventRepository
             });
         }
 
+        // ===== price range + priced =====
+        $priceMin = array_key_exists('price_min', $filters) ? (int) $filters['price_min'] : null;
+        $priceMax = array_key_exists('price_max', $filters) ? (int) $filters['price_max'] : null;
+        $priced = array_key_exists('priced', $filters)
+            ? (filter_var($filters['priced'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) === true)
+            : false;
+
+        $hasRange = ($priceMin !== null) || ($priceMax !== null);
+
+        // "известная цена" = free ИЛИ есть price_min/price_max
+        $knownPrice = function ($w) {
+            $w->where('events.price_status', 'free')
+                ->orWhereNotNull('events.price_min')
+                ->orWhereNotNull('events.price_max');
+        };
+
+        // "неизвестная цена" = НЕ free и оба поля цены null
+        $unknownCaseSql =
+            "CASE WHEN (events.price_min IS NULL AND events.price_max IS NULL AND COALESCE(events.price_status,'') <> 'free') THEN 1 ELSE 0 END";
+
+        $minExpr = "COALESCE(events.price_min, events.price_max, CASE WHEN events.price_status='free' THEN 0 END)";
+        $maxExpr = "COALESCE(events.price_max, events.price_min, CASE WHEN events.price_status='free' THEN 0 END)";
+
+        if ($hasRange) {
+            $q->where(function ($w) use ($knownPrice, $priced, $minExpr, $maxExpr, $priceMin, $priceMax) {
+                // 1) известная цена + в диапазоне
+                $w->where(function ($x) use ($knownPrice, $minExpr, $maxExpr, $priceMin, $priceMax) {
+                    $x->where($knownPrice);
+
+                    if ($priceMin !== null) $x->whereRaw("$maxExpr >= ?", [$priceMin]);
+                    if ($priceMax !== null) $x->whereRaw("$minExpr <= ?", [$priceMax]);
+                });
+
+                // 2) если priced не включён — добавляем "без цены" в хвост выдачи
+                if (!$priced) {
+                    $w->orWhere(function ($x) {
+                        $x->whereNull('events.price_min')
+                            ->whereNull('events.price_max')
+                            ->whereRaw("COALESCE(events.price_status,'') <> 'free'");
+                    });
+                }
+            });
+        } elseif ($priced) {
+            // priced=1 без диапазона — просто выкидываем безценовые
+            $q->where($knownPrice);
+        }
+
+        // если диапазон задан и priced НЕ включён — сортируем "без цены" в конец
+        $unknownLast = $hasRange && !$priced;
+        if ($unknownLast) {
+            // делаем unknown-last первичным orderBy (иначе он будет только "тай-брейкером")
+            $q->reorder()
+                ->orderByRaw("$unknownCaseSql asc")
+                ->orderByRaw('events.start_date asc nulls last')
+                ->orderByRaw('events.start_time asc nulls last')
+                ->orderBy('events.id', 'asc');
+        }
+
+        // tod=morning/day/evening/night — фильтр по часу старта (MSK), только когда start_time известен
+        if (!empty($filters['tod'])) {
+            $tod = (string) $filters['tod'];
+            $q->whereNotNull('events.start_time');
+
+            $hourExpr = "EXTRACT(HOUR FROM (events.start_time AT TIME ZONE 'Europe/Moscow'))";
+
+            switch ($tod) {
+                case 'morning': // 05–11
+                    $q->whereRaw("{$hourExpr} >= 5 AND {$hourExpr} <= 11");
+                    break;
+                case 'day': // 12–16
+                    $q->whereRaw("{$hourExpr} >= 12 AND {$hourExpr} <= 16");
+                    break;
+                case 'evening': // 17–22
+                    $q->whereRaw("{$hourExpr} >= 17 AND {$hourExpr} <= 22");
+                    break;
+                case 'night': // 23–04
+                    $q->where(function ($w) use ($hourExpr) {
+                        $w->whereRaw("{$hourExpr} >= 23")
+                            ->orWhereRaw("{$hourExpr} <= 4");
+                    });
+                    break;
+            }
+        }
+
         // sort/dir (whitelist)
         $sort = $filters['sort'] ?? null;
-        $dir = strtolower((string)($filters['dir'] ?? 'asc'));
+        $dir = strtolower((string) ($filters['dir'] ?? 'asc'));
         $dir = $dir === 'desc' ? 'desc' : 'asc';
 
         if ($sort) {
             $q->reorder();
+
+            if ($unknownLast) {
+                $q->orderByRaw("$unknownCaseSql asc");
+            }
 
             switch ($sort) {
                 case 'start_at':

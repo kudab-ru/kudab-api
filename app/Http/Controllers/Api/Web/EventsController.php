@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\Web;
 
+use Illuminate\Support\Arr;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\WebEventResource;
 use App\Models\City;
@@ -32,10 +33,18 @@ class EventsController extends Controller
             'when'         => ['sometimes', Rule::in(['today','now','weekend'])],
             'free'         => ['sometimes','boolean'],
 
+            // alias для “Для детей” (временно маппим в q)
+            'kids'         => ['sometimes','boolean'],
+
             'q'            => ['sometimes','string','max:255'],
             'community_id' => ['sometimes','integer'],
             'interests'    => ['sometimes','array'],
             'interests.*'  => ['integer'],
+
+            'priced'       => ['sometimes','boolean'],
+            'price_min'    => ['sometimes','integer','min:0'],
+            'price_max'    => ['sometimes','integer','min:0'],
+            'tod'          => ['sometimes', Rule::in(['morning','day','evening','night'])],
 
             'sort'         => ['sometimes', Rule::in(['start_at','start_date','start_time','created_at','price_min'])],
             'dir'          => ['sometimes', Rule::in(['asc','desc'])],
@@ -47,6 +56,16 @@ class EventsController extends Controller
         $perPage = max(1, min($perPage, 50));
 
         unset($v['page'], $v['per_page']);
+
+        // нормализуем price range (на всякий случай)
+        if (isset($v['price_min'], $v['price_max'])) {
+            $a = (int) $v['price_min'];
+            $b = (int) $v['price_max'];
+            if ($a > $b) {
+                $v['price_min'] = $b;
+                $v['price_max'] = $a;
+            }
+        }
 
         if (!empty($v['when']) && empty($v['date_from']) && empty($v['date_to'])) {
             $now = Carbon::now('Europe/Moscow');
@@ -70,6 +89,16 @@ class EventsController extends Controller
         }
 
         unset($v['when']);
+
+        // kids=1 -> если q пустой, подставляем “дет” (быстро, но URL остаётся чистым)
+        $kids = !empty($v['kids']);
+        unset($v['kids']);
+        if ($kids) {
+            $qVal = trim((string) ($v['q'] ?? ''));
+            if ($qVal === '') {
+                $v['q'] = 'дет';
+            }
+        }
 
         // city=slug -> city_id
         $citySlug = trim((string)($v['city'] ?? ''));
