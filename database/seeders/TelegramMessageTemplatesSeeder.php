@@ -26,7 +26,7 @@ class TelegramMessageTemplatesSeeder extends Seeder
             '',
             '{tags|prepend:"🏷 "}',
             '',
-            '<a href="{url}">Подробнее на kudasobrat.ru →</a>',
+            '<a href="{url}">Подробнее на kudab.ru →</a>',
         ]);
 
         // Краткий: заголовок, адрес/дата/цена, теги, ссылка (без описания).
@@ -39,7 +39,7 @@ class TelegramMessageTemplatesSeeder extends Seeder
             '',
             '{tags|prepend:"🏷 "}',
             '',
-            '<a href="{url}">Подробнее на kudasobrat.ru →</a>',
+            '<a href="{url}">Подробнее на kudab.ru →</a>',
         ]);
 
         // Промо: заголовок, адрес/дата/цена, короткое описание, теги, ссылка.
@@ -54,7 +54,7 @@ class TelegramMessageTemplatesSeeder extends Seeder
             '',
             '{tags|prepend:"🏷 "}',
             '',
-            '<a href="{url}">Подробнее на kudasobrat.ru →</a>',
+            '<a href="{url}">Подробнее на kudab.ru →</a>',
         ]);
 
         // --- Набор строк для upsert -----------------------------------------
