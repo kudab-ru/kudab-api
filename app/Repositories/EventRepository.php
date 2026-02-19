@@ -81,7 +81,12 @@ class EventRepository
             ->with([
                 'community:id,name,city,avatar_url',
                 'interests:id,name',
-            ])
+            ]);
+
+        $q->addSelect('events.*');
+        $this->addImgRank($q);
+
+        $q->orderBy('__img_rank', 'asc')
             ->orderByRaw('events.start_date asc nulls last')
             ->orderByRaw('events.start_time asc nulls last')
             ->orderBy('events.id', 'asc');
@@ -125,7 +130,7 @@ class EventRepository
         $qNorm = $this->normalizeQ($filters['q'] ?? null);
 
         if ($qNorm !== null) {
-            $q->select('events.*')
+            $q->addSelect('events.*')
                 ->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id')
                 ->distinct();
 
@@ -171,6 +176,7 @@ class EventRepository
                 $q->selectRaw("$scoreExpr as __score", [$token, $token]);
 
                 $q->reorder()
+                    ->orderBy('__img_rank', 'asc')
                     ->orderBy('__like_rank', 'asc')
                     ->orderBy('__score', 'desc')
                     ->orderByRaw('events.start_date asc nulls last')
@@ -193,7 +199,7 @@ class EventRepository
         $this->hydrateImages($events);
 
         $events->each(function (Event $e) {
-            $e->makeHidden(['__like_rank', '__score', '__unknown_last']);
+            $e->makeHidden(['__img_rank', '__like_rank', '__score', '__unknown_last']);
         });
 
         return $paginator->setCollection($events);
@@ -214,7 +220,11 @@ class EventRepository
                             ->whereNotNull('events.start_date')
                             ->where('events.start_date', '>=', $todayMsk);
                     });
-            })
+            });
+
+        $this->addImgRank($q);
+
+        $q->orderBy('__img_rank', 'asc')
             ->orderByRaw('events.start_date asc nulls last')
             ->orderByRaw('events.start_time asc nulls last')
             ->orderBy('events.id', 'asc');
@@ -359,9 +369,16 @@ class EventRepository
         }
 
         if ($unknownLast) {
-            $q->reorder()
-                ->when($hasDistinct, fn($qq) => $qq->orderBy('__unknown_last', 'asc'), fn($qq) => $qq->orderByRaw("$unknownCaseSql asc"))
-                ->orderByRaw('events.start_date asc nulls last')
+            $q->reorder();
+            $q->orderBy('__img_rank', 'asc');
+
+            if ($hasDistinct) {
+                $q->orderBy('__unknown_last', 'asc');
+            } else {
+                $q->orderByRaw("$unknownCaseSql asc");
+            }
+
+            $q->orderByRaw('events.start_date asc nulls last')
                 ->orderByRaw('events.start_time asc nulls last')
                 ->orderBy('events.id', 'asc');
         }
@@ -397,6 +414,7 @@ class EventRepository
 
         if ($sort) {
             $q->reorder();
+            $q->orderBy('__img_rank', 'asc');
 
             if ($unknownLast) {
                 if ($hasDistinct) $q->orderBy('__unknown_last', 'asc');
@@ -442,6 +460,7 @@ class EventRepository
             $q->selectRaw("$scoreExpr as __score", [$token, $token]);
 
             $q->reorder();
+            $q->orderBy('__img_rank', 'asc');
 
             if ($unknownLast) {
                 if ($hasDistinct) $q->orderBy('__unknown_last', 'asc');
@@ -460,7 +479,7 @@ class EventRepository
         $this->hydrateImages($events);
 
         $events->each(function (Event $e) {
-            $e->makeHidden(['__like_rank', '__score', '__unknown_last']);
+            $e->makeHidden(['__img_rank', '__like_rank', '__score', '__unknown_last']);
         });
 
         return $paginator->setCollection($events);
@@ -605,6 +624,37 @@ class EventRepository
             $e->setAttribute('images', $images);
             $e->setAttribute('poster', $images[0] ?? null);
         });
+    }
+
+    private function addImgRank($q): void
+    {
+        $sql = "CASE WHEN (
+            EXISTS (
+                SELECT 1 FROM event_sources es
+                WHERE es.event_id = events.id
+                  AND es.images IS NOT NULL
+                  AND es.images::text NOT IN ('[]','null')
+                LIMIT 1
+            )
+            OR EXISTS (
+                SELECT 1 FROM attachments a
+                WHERE a.parent_type = 'App\\\\Models\\\\Event'
+                  AND a.parent_id = events.id
+                  AND a.type IN ('image','photo')
+                  AND (a.url IS NOT NULL OR a.preview_url IS NOT NULL)
+                LIMIT 1
+            )
+            OR EXISTS (
+                SELECT 1 FROM attachments ap
+                WHERE ap.parent_type = 'App\\\\Models\\\\ContextPost'
+                  AND ap.parent_id = events.original_post_id
+                  AND ap.type IN ('image','photo')
+                  AND (ap.url IS NOT NULL OR ap.preview_url IS NOT NULL)
+                LIMIT 1
+            )
+        ) THEN 0 ELSE 1 END";
+
+        $q->selectRaw("$sql as __img_rank");
     }
 
     private function normalizeQ(?string $q): ?string
