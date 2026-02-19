@@ -140,14 +140,17 @@ class EventRepository
             $q->where('community_id', (int) $filters['community_id']);
         }
 
-        if (!empty($filters['q'])) {
-            $term = '%'.trim((string) $filters['q']).'%';
+        $qNorm = $this->normalizeQ($filters['q'] ?? null);
+
+        if ($qNorm !== null) {
+            $term = '%'.$qNorm.'%';
+
             $q->where(function ($w) use ($term) {
-                $w->where('title', 'ILIKE', $term)
-                    ->orWhere('description', 'ILIKE', $term)
+                $w->whereRaw("public.ru_normalize(events.title) LIKE ?", [$term])
+                    ->orWhereRaw("public.ru_normalize(events.description) LIKE ?", [$term])
                     ->orWhereHas('community', function ($c) use ($term) {
-                        $c->where('name', 'ILIKE', $term)
-                            ->orWhere('description', 'ILIKE', $term);
+                        $c->whereRaw("public.ru_normalize(communities.name) LIKE ?", [$term])
+                            ->orWhereRaw("public.ru_normalize(communities.description) LIKE ?", [$term]);
                     });
             });
         }
@@ -226,14 +229,17 @@ class EventRepository
             $q->where('events.community_id', (int) $filters['community_id']);
         }
 
-        if (!empty($filters['q'])) {
-            $term = '%'.trim((string) $filters['q']).'%';
+        $qNorm = $this->normalizeQ($filters['q'] ?? null);
+
+        if ($qNorm !== null) {
+            $term = '%'.$qNorm.'%';
+
             $q->where(function ($w) use ($term) {
-                $w->where('events.title', 'ILIKE', $term)
-                    ->orWhere('events.description', 'ILIKE', $term)
+                $w->whereRaw("public.ru_normalize(events.title) LIKE ?", [$term])
+                    ->orWhereRaw("public.ru_normalize(events.description) LIKE ?", [$term])
                     ->orWhereHas('community', function ($c) use ($term) {
-                        $c->where('name', 'ILIKE', $term)
-                            ->orWhere('description', 'ILIKE', $term);
+                        $c->whereRaw("public.ru_normalize(communities.name) LIKE ?", [$term])
+                            ->orWhereRaw("public.ru_normalize(communities.description) LIKE ?", [$term]);
                     });
             });
         }
@@ -531,5 +537,17 @@ class EventRepository
             $e->setAttribute('images', $images);
             $e->setAttribute('poster', $images[0] ?? null);
         });
+    }
+
+    private function normalizeQ(?string $q): ?string
+    {
+        $q = trim((string)$q);
+        if ($q === '') return null;
+
+        $q = mb_strtolower($q);
+        // после strtolower достаточно заменить только ё
+        $q = str_replace('ё', 'е', $q);
+
+        return $q;
     }
 }

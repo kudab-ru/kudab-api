@@ -100,6 +100,10 @@ class EventsController extends Controller
             }
         }
 
+        if (array_key_exists('q', $v)) {
+            $v['q'] = trim((string)$v['q']);
+        }
+
         // city=slug -> city_id
         $citySlug = trim((string)($v['city'] ?? ''));
         if ($citySlug !== '') {
