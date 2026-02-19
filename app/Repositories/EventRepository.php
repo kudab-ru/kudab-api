@@ -10,14 +10,11 @@ use Illuminate\Support\Facades\DB;
 
 class EventRepository
 {
-    /**
-     * Лёгкая выдача для sitemap: только id + lastmod (atom),
-     * с курсором after_id чтобы можно было чанковать.
-     *
-     * mode:
-     * - upcoming (по умолчанию): только будущие (и чуть прошлого, как в витрине)
-     * - all: всё, кроме deleted
-     */
+    private const FUZZY_MIN_LEN = 3;
+
+    private ?bool $hasTrgm = null;
+    private ?bool $hasWordSim = null;
+
     public function listWebIdsForSitemap(int $afterId = 0, int $limit = 5000, string $mode = 'upcoming'): array
     {
         $limit = max(1, min($limit, 50000));
@@ -45,9 +42,7 @@ class EventRepository
         $rows = $q->get();
 
         $hasMore = $rows->count() > $limit;
-        if ($hasMore) {
-            $rows = $rows->slice(0, $limit);
-        }
+        if ($hasMore) $rows = $rows->slice(0, $limit);
 
         $items = $rows->map(function ($e) {
             $lm = $e->updated_at ?? $e->created_at;
@@ -69,90 +64,119 @@ class EventRepository
         ];
     }
 
-    /**
-     * Пагинация будущих событий с фильтрами.
-     *
-     * Поддерживаемые фильтры:
-     * - city: string (старый режим)
-     * - city_id: int (новый режим, приоритетнее city)
-     * - date_from: Y-m-d или RFC3339
-     * - date_to:   Y-m-d или RFC3339
-     * - q: поиск по названию/описанию события и названию/описанию сообщества (ILIKE)
-     * - community_id: int
-     * - interests: int[] — список ID интересов
-     */
     public function paginateUpcoming(array $filters, int $perPage = 20): LengthAwarePaginator
     {
         $todayMsk = now('Europe/Moscow')->toDateString();
 
         $q = Event::query()
-            ->whereNull('deleted_at')
+            ->whereNull('events.deleted_at')
             ->where(function ($w) use ($todayMsk) {
-                $w->where('start_time', '>=', now()->subDay())
+                $w->where('events.start_time', '>=', now()->subDay())
                     ->orWhere(function ($x) use ($todayMsk) {
-                        $x->whereNull('start_time')
-                            ->whereNotNull('start_date')
-                            ->where('start_date', '>=', $todayMsk);
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $todayMsk);
                     });
             })
             ->with([
                 'community:id,name,city,avatar_url',
                 'interests:id,name',
             ])
-            ->orderByRaw('start_date asc nulls last')
-            ->orderByRaw('start_time asc nulls last')
-            ->orderBy('id', 'asc');
+            ->orderByRaw('events.start_date asc nulls last')
+            ->orderByRaw('events.start_time asc nulls last')
+            ->orderBy('events.id', 'asc');
 
         if (!empty($filters['city_id'])) {
-            $q->where('city_id', (int) $filters['city_id']);
+            $q->where('events.city_id', (int) $filters['city_id']);
         } elseif (!empty($filters['city'])) {
-            // старый режим: текстовый город
-            $q->where('city', 'ILIKE', trim((string)$filters['city']));
+            $q->where('events.city', 'ILIKE', trim((string) $filters['city']));
         }
 
         if (!empty($filters['date_from'])) {
-            $fromDate = substr((string)$filters['date_from'], 0, 10);
+            $fromDate = substr((string) $filters['date_from'], 0, 10);
 
             $q->where(function ($w) use ($filters, $fromDate) {
-                $w->where('start_time', '>=', $filters['date_from'])
+                $w->where('events.start_time', '>=', $filters['date_from'])
                     ->orWhere(function ($x) use ($fromDate) {
-                        $x->whereNull('start_time')
-                            ->whereNotNull('start_date')
-                            ->where('start_date', '>=', $fromDate);
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $fromDate);
                     });
             });
         }
 
         if (!empty($filters['date_to'])) {
-            $toDate = substr((string)$filters['date_to'], 0, 10);
+            $toDate = substr((string) $filters['date_to'], 0, 10);
 
             $q->where(function ($w) use ($filters, $toDate) {
-                $w->where('start_time', '<=', $filters['date_to'])
+                $w->where('events.start_time', '<=', $filters['date_to'])
                     ->orWhere(function ($x) use ($toDate) {
-                        $x->whereNull('start_time')
-                            ->whereNotNull('start_date')
-                            ->where('start_date', '<=', $toDate);
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '<=', $toDate);
                     });
             });
         }
 
         if (!empty($filters['community_id'])) {
-            $q->where('community_id', (int) $filters['community_id']);
+            $q->where('events.community_id', (int) $filters['community_id']);
         }
 
         $qNorm = $this->normalizeQ($filters['q'] ?? null);
 
         if ($qNorm !== null) {
-            $term = '%'.$qNorm.'%';
+            $q->select('events.*')
+                ->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id')
+                ->distinct();
 
-            $q->where(function ($w) use ($term) {
-                $w->whereRaw("public.ru_normalize(events.title) LIKE ?", [$term])
-                    ->orWhereRaw("public.ru_normalize(events.description) LIKE ?", [$term])
-                    ->orWhereHas('community', function ($c) use ($term) {
-                        $c->whereRaw("public.ru_normalize(communities.name) LIKE ?", [$term])
-                            ->orWhereRaw("public.ru_normalize(communities.description) LIKE ?", [$term]);
-                    });
+            $like = '%'.$qNorm.'%';
+
+            $token = $this->pickFuzzyToken($qNorm);
+            $thr = $this->fuzzyThreshold($token);
+
+            $fuzzyOn = $this->trgmEnabled()
+                && $this->wordSimEnabled()
+                && mb_strlen($token) >= self::FUZZY_MIN_LEN
+                && mb_strlen($token) >= 4;
+
+            $q->where(function ($w) use ($like, $token, $thr, $fuzzyOn) {
+                $w->whereRaw("public.ru_normalize(events.title) LIKE ?", [$like])
+                    ->orWhereRaw("public.ru_normalize(events.description) LIKE ?", [$like])
+                    ->orWhereRaw("public.ru_normalize(cm.name) LIKE ?", [$like])
+                    ->orWhereRaw("public.ru_normalize(cm.description) LIKE ?", [$like]);
+
+                if ($fuzzyOn) {
+                    $w->orWhereRaw(
+                        "word_similarity(?, public.ru_normalize(events.title)) >= ?",
+                        [$token, $thr]
+                    )->orWhereRaw(
+                        "word_similarity(?, public.ru_normalize(cm.name)) >= ?",
+                        [$token, $thr]
+                    );
+                }
             });
+
+            if (empty($filters['sort']) && $fuzzyOn) {
+                $isLikeExpr = "CASE WHEN (
+                    public.ru_normalize(events.title) LIKE ?
+                    OR public.ru_normalize(cm.name) LIKE ?
+                ) THEN 0 ELSE 1 END";
+
+                $scoreExpr = "GREATEST(
+                    word_similarity(?, public.ru_normalize(events.title)),
+                    word_similarity(?, public.ru_normalize(cm.name))
+                )";
+
+                $q->selectRaw("$isLikeExpr as __like_rank", [$like, $like]);
+                $q->selectRaw("$scoreExpr as __score", [$token, $token]);
+
+                $q->reorder()
+                    ->orderBy('__like_rank', 'asc')
+                    ->orderBy('__score', 'desc')
+                    ->orderByRaw('events.start_date asc nulls last')
+                    ->orderByRaw('events.start_time asc nulls last')
+                    ->orderBy('events.id', 'asc');
+            }
         }
 
         if (!empty($filters['interests']) && is_array($filters['interests'])) {
@@ -168,13 +192,13 @@ class EventRepository
         $events = $paginator->getCollection();
         $this->hydrateImages($events);
 
+        $events->each(function (Event $e) {
+            $e->makeHidden(['__like_rank', '__score', '__unknown_last']);
+        });
+
         return $paginator->setCollection($events);
     }
 
-    /**
-     * Витринная пагинация (для /api/web/events):
-     * та же логика фильтров, но добавляем city_slug через join.
-     */
     public function paginateUpcomingWeb(array $filters, int $perPage = 20): LengthAwarePaginator
     {
         $todayMsk = now('Europe/Moscow')->toDateString();
@@ -230,17 +254,42 @@ class EventRepository
         }
 
         $qNorm = $this->normalizeQ($filters['q'] ?? null);
+        $like = null;
+        $token = null;
+        $thr = null;
+        $fuzzyOn = false;
+        $hasDistinct = false;
 
         if ($qNorm !== null) {
-            $term = '%'.$qNorm.'%';
+            $q->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id')
+                ->distinct();
 
-            $q->where(function ($w) use ($term) {
-                $w->whereRaw("public.ru_normalize(events.title) LIKE ?", [$term])
-                    ->orWhereRaw("public.ru_normalize(events.description) LIKE ?", [$term])
-                    ->orWhereHas('community', function ($c) use ($term) {
-                        $c->whereRaw("public.ru_normalize(communities.name) LIKE ?", [$term])
-                            ->orWhereRaw("public.ru_normalize(communities.description) LIKE ?", [$term]);
-                    });
+            $hasDistinct = true;
+
+            $like = '%'.$qNorm.'%';
+            $token = $this->pickFuzzyToken($qNorm);
+            $thr = $this->fuzzyThreshold($token);
+
+            $fuzzyOn = $this->trgmEnabled()
+                && $this->wordSimEnabled()
+                && mb_strlen($token) >= self::FUZZY_MIN_LEN
+                && mb_strlen($token) >= 4;
+
+            $q->where(function ($w) use ($like, $token, $thr, $fuzzyOn) {
+                $w->whereRaw("public.ru_normalize(events.title) LIKE ?", [$like])
+                    ->orWhereRaw("public.ru_normalize(events.description) LIKE ?", [$like])
+                    ->orWhereRaw("public.ru_normalize(cm.name) LIKE ?", [$like])
+                    ->orWhereRaw("public.ru_normalize(cm.description) LIKE ?", [$like]);
+
+                if ($fuzzyOn) {
+                    $w->orWhereRaw(
+                        "word_similarity(?, public.ru_normalize(events.title)) >= ?",
+                        [$token, $thr]
+                    )->orWhereRaw(
+                        "word_similarity(?, public.ru_normalize(cm.name)) >= ?",
+                        [$token, $thr]
+                    );
+                }
             });
         }
 
@@ -253,7 +302,6 @@ class EventRepository
             }
         }
 
-        // free=1
         if (!empty($filters['free'])) {
             $q->where(function ($w) {
                 $w->where('events.price_status', 'free')
@@ -264,7 +312,6 @@ class EventRepository
             });
         }
 
-        // ===== price range + priced =====
         $priceMin = array_key_exists('price_min', $filters) ? (int) $filters['price_min'] : null;
         $priceMax = array_key_exists('price_max', $filters) ? (int) $filters['price_max'] : null;
         $priced = array_key_exists('priced', $filters)
@@ -273,14 +320,12 @@ class EventRepository
 
         $hasRange = ($priceMin !== null) || ($priceMax !== null);
 
-        // "известная цена" = free ИЛИ есть price_min/price_max
         $knownPrice = function ($w) {
             $w->where('events.price_status', 'free')
                 ->orWhereNotNull('events.price_min')
                 ->orWhereNotNull('events.price_max');
         };
 
-        // "неизвестная цена" = НЕ free и оба поля цены null
         $unknownCaseSql =
             "CASE WHEN (events.price_min IS NULL AND events.price_max IS NULL AND COALESCE(events.price_status,'') <> 'free') THEN 1 ELSE 0 END";
 
@@ -289,7 +334,6 @@ class EventRepository
 
         if ($hasRange) {
             $q->where(function ($w) use ($knownPrice, $priced, $minExpr, $maxExpr, $priceMin, $priceMax) {
-                // 1) известная цена + в диапазоне
                 $w->where(function ($x) use ($knownPrice, $minExpr, $maxExpr, $priceMin, $priceMax) {
                     $x->where($knownPrice);
 
@@ -297,7 +341,6 @@ class EventRepository
                     if ($priceMax !== null) $x->whereRaw("$minExpr <= ?", [$priceMax]);
                 });
 
-                // 2) если priced не включён — добавляем "без цены" в хвост выдачи
                 if (!$priced) {
                     $w->orWhere(function ($x) {
                         $x->whereNull('events.price_min')
@@ -307,22 +350,22 @@ class EventRepository
                 }
             });
         } elseif ($priced) {
-            // priced=1 без диапазона — просто выкидываем безценовые
             $q->where($knownPrice);
         }
 
-        // если диапазон задан и priced НЕ включён — сортируем "без цены" в конец
         $unknownLast = $hasRange && !$priced;
+        if ($unknownLast && $hasDistinct) {
+            $q->selectRaw("$unknownCaseSql as __unknown_last");
+        }
+
         if ($unknownLast) {
-            // делаем unknown-last первичным orderBy (иначе он будет только "тай-брейкером")
             $q->reorder()
-                ->orderByRaw("$unknownCaseSql asc")
+                ->when($hasDistinct, fn($qq) => $qq->orderBy('__unknown_last', 'asc'), fn($qq) => $qq->orderByRaw("$unknownCaseSql asc"))
                 ->orderByRaw('events.start_date asc nulls last')
                 ->orderByRaw('events.start_time asc nulls last')
                 ->orderBy('events.id', 'asc');
         }
 
-        // tod=morning/day/evening/night — фильтр по часу старта (MSK), только когда start_time известен
         if (!empty($filters['tod'])) {
             $tod = (string) $filters['tod'];
             $q->whereNotNull('events.start_time');
@@ -330,16 +373,16 @@ class EventRepository
             $hourExpr = "EXTRACT(HOUR FROM (events.start_time AT TIME ZONE 'Europe/Moscow'))";
 
             switch ($tod) {
-                case 'morning': // 05–11
+                case 'morning':
                     $q->whereRaw("{$hourExpr} >= 5 AND {$hourExpr} <= 11");
                     break;
-                case 'day': // 12–16
+                case 'day':
                     $q->whereRaw("{$hourExpr} >= 12 AND {$hourExpr} <= 16");
                     break;
-                case 'evening': // 17–22
+                case 'evening':
                     $q->whereRaw("{$hourExpr} >= 17 AND {$hourExpr} <= 22");
                     break;
-                case 'night': // 23–04
+                case 'night':
                     $q->where(function ($w) use ($hourExpr) {
                         $w->whereRaw("{$hourExpr} >= 23")
                             ->orWhereRaw("{$hourExpr} <= 4");
@@ -348,7 +391,6 @@ class EventRepository
             }
         }
 
-        // sort/dir (whitelist)
         $sort = $filters['sort'] ?? null;
         $dir = strtolower((string) ($filters['dir'] ?? 'asc'));
         $dir = $dir === 'desc' ? 'desc' : 'asc';
@@ -357,7 +399,8 @@ class EventRepository
             $q->reorder();
 
             if ($unknownLast) {
-                $q->orderByRaw("$unknownCaseSql asc");
+                if ($hasDistinct) $q->orderBy('__unknown_last', 'asc');
+                else $q->orderByRaw("$unknownCaseSql asc");
             }
 
             switch ($sort) {
@@ -384,16 +427,45 @@ class EventRepository
             $q->orderBy('events.id', 'asc');
         }
 
+        if (empty($filters['sort']) && $fuzzyOn && $like !== null && $token !== null) {
+            $isLikeExpr = "CASE WHEN (
+                public.ru_normalize(events.title) LIKE ?
+                OR public.ru_normalize(cm.name) LIKE ?
+            ) THEN 0 ELSE 1 END";
+
+            $scoreExpr = "GREATEST(
+                word_similarity(?, public.ru_normalize(events.title)),
+                word_similarity(?, public.ru_normalize(cm.name))
+            )";
+
+            $q->selectRaw("$isLikeExpr as __like_rank", [$like, $like]);
+            $q->selectRaw("$scoreExpr as __score", [$token, $token]);
+
+            $q->reorder();
+
+            if ($unknownLast) {
+                if ($hasDistinct) $q->orderBy('__unknown_last', 'asc');
+                else $q->orderByRaw("$unknownCaseSql asc");
+            }
+
+            $q->orderBy('__like_rank', 'asc')
+                ->orderBy('__score', 'desc')
+                ->orderByRaw('events.start_date asc nulls last')
+                ->orderByRaw('events.start_time asc nulls last')
+                ->orderBy('events.id', 'asc');
+        }
+
         $paginator = $q->paginate($perPage);
         $events = $paginator->getCollection();
         $this->hydrateImages($events);
 
+        $events->each(function (Event $e) {
+            $e->makeHidden(['__like_rank', '__score', '__unknown_last']);
+        });
+
         return $paginator->setCollection($events);
     }
 
-    /**
-     * Получить одно событие с деталями.
-     */
     public function findWithDetails(int $id): Event
     {
         $event = Event::query()
@@ -409,10 +481,6 @@ class EventRepository
         return $event;
     }
 
-    /**
-     * Получить одно событие для витрины (для /api/web/events/{id})
-     * + city_slug, + sources (event_sources) и остальное.
-     */
     public function findWebWithDetails(int $id): Event
     {
         $event = Event::query()
@@ -541,13 +609,65 @@ class EventRepository
 
     private function normalizeQ(?string $q): ?string
     {
-        $q = trim((string)$q);
+        $q = trim((string) $q);
         if ($q === '') return null;
 
         $q = mb_strtolower($q);
-        // после strtolower достаточно заменить только ё
         $q = str_replace('ё', 'е', $q);
+        $q = str_replace('-', ' ', $q);
+        $q = preg_replace('~[^\p{L}\p{N}\s]+~u', ' ', $q);
+        $q = preg_replace('~\s+~u', ' ', $q);
+        $q = trim($q);
 
-        return $q;
+        return $q !== '' ? $q : null;
+    }
+
+    private function pickFuzzyToken(string $qNorm): string
+    {
+        $parts = preg_split('~\s+~u', $qNorm, -1, PREG_SPLIT_NO_EMPTY);
+        if (!$parts) return $qNorm;
+
+        $token = '';
+        foreach ($parts as $p) {
+            if (mb_strlen($p) > mb_strlen($token)) $token = $p;
+        }
+
+        return $token !== '' ? $token : $qNorm;
+    }
+
+    private function fuzzyThreshold(string $token): float
+    {
+        $n = mb_strlen($token);
+        if ($n <= 4) return 0.20;
+        if ($n <= 6) return 0.18;
+        return 0.14;
+    }
+
+    private function trgmEnabled(): bool
+    {
+        if ($this->hasTrgm !== null) return $this->hasTrgm;
+
+        try {
+            DB::selectOne("select similarity('a','a') as s");
+            $this->hasTrgm = true;
+        } catch (\Throwable $e) {
+            $this->hasTrgm = false;
+        }
+
+        return $this->hasTrgm;
+    }
+
+    private function wordSimEnabled(): bool
+    {
+        if ($this->hasWordSim !== null) return $this->hasWordSim;
+
+        try {
+            DB::selectOne("select word_similarity('a','a') as s");
+            $this->hasWordSim = true;
+        } catch (\Throwable $e) {
+            $this->hasWordSim = false;
+        }
+
+        return $this->hasWordSim;
     }
 }
