@@ -11,6 +11,8 @@ use Illuminate\Support\Facades\DB;
 class EventRepository
 {
     private const FUZZY_MIN_LEN = 3;
+    private const PAST_GRACE_HOURS = 1;
+    private const PAST_LOOKBACK_DAYS = 7;
 
     private ?bool $hasTrgm = null;
     private ?bool $hasWordSim = null;
@@ -66,16 +68,18 @@ class EventRepository
 
     public function paginateUpcoming(array $filters, int $perPage = 20): LengthAwarePaginator
     {
-        $todayMsk = now('Europe/Moscow')->toDateString();
+        $nowMsk = now('Europe/Moscow');
+        $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
+        $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
 
         $q = Event::query()
             ->whereNull('events.deleted_at')
-            ->where(function ($w) use ($todayMsk) {
-                $w->where('events.start_time', '>=', now()->subDay())
-                    ->orWhere(function ($x) use ($todayMsk) {
+            ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
+                $w->where('events.start_time', '>=', $cutoffTs)
+                    ->orWhere(function ($x) use ($fromDateMsk) {
                         $x->whereNull('events.start_time')
                             ->whereNotNull('events.start_date')
-                            ->where('events.start_date', '>=', $todayMsk);
+                            ->where('events.start_date', '>=', $fromDateMsk);
                     });
             })
             ->with([
@@ -84,9 +88,11 @@ class EventRepository
             ]);
 
         $q->addSelect('events.*');
+        $this->addPastRank($q);
         $this->addImgRank($q);
 
-        $q->orderBy('__img_rank', 'asc')
+        $q->orderBy('__past_rank', 'asc')
+            ->orderBy('__img_rank', 'asc')
             ->orderByRaw('events.start_date asc nulls last')
             ->orderByRaw('events.start_time asc nulls last')
             ->orderBy('events.id', 'asc');
@@ -130,8 +136,7 @@ class EventRepository
         $qNorm = $this->normalizeQ($filters['q'] ?? null);
 
         if ($qNorm !== null) {
-            $q->addSelect('events.*')
-                ->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id')
+            $q->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id')
                 ->distinct();
 
             $like = '%'.$qNorm.'%';
@@ -176,6 +181,7 @@ class EventRepository
                 $q->selectRaw("$scoreExpr as __score", [$token, $token]);
 
                 $q->reorder()
+                    ->orderBy('__past_rank', 'asc')
                     ->orderBy('__img_rank', 'asc')
                     ->orderBy('__like_rank', 'asc')
                     ->orderBy('__score', 'desc')
@@ -199,7 +205,7 @@ class EventRepository
         $this->hydrateImages($events);
 
         $events->each(function (Event $e) {
-            $e->makeHidden(['__img_rank', '__like_rank', '__score', '__unknown_last']);
+            $e->makeHidden(['__past_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
         });
 
         return $paginator->setCollection($events);
@@ -207,24 +213,28 @@ class EventRepository
 
     public function paginateUpcomingWeb(array $filters, int $perPage = 20): LengthAwarePaginator
     {
-        $todayMsk = now('Europe/Moscow')->toDateString();
+        $nowMsk = now('Europe/Moscow');
+        $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
+        $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
 
         $q = Event::query()
             ->select('events.*', 'ct.slug as city_slug')
             ->leftJoin('cities as ct', 'ct.id', '=', 'events.city_id')
             ->whereNull('events.deleted_at')
-            ->where(function ($w) use ($todayMsk) {
-                $w->where('events.start_time', '>=', now()->subDay())
-                    ->orWhere(function ($x) use ($todayMsk) {
+            ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
+                $w->where('events.start_time', '>=', $cutoffTs)
+                    ->orWhere(function ($x) use ($fromDateMsk) {
                         $x->whereNull('events.start_time')
                             ->whereNotNull('events.start_date')
-                            ->where('events.start_date', '>=', $todayMsk);
+                            ->where('events.start_date', '>=', $fromDateMsk);
                     });
             });
 
+        $this->addPastRank($q);
         $this->addImgRank($q);
 
-        $q->orderBy('__img_rank', 'asc')
+        $q->orderBy('__past_rank', 'asc')
+            ->orderBy('__img_rank', 'asc')
             ->orderByRaw('events.start_date asc nulls last')
             ->orderByRaw('events.start_time asc nulls last')
             ->orderBy('events.id', 'asc');
@@ -369,16 +379,14 @@ class EventRepository
         }
 
         if ($unknownLast) {
-            $q->reorder();
-            $q->orderBy('__img_rank', 'asc');
+            $q->reorder()
+                ->orderBy('__past_rank', 'asc');
 
-            if ($hasDistinct) {
-                $q->orderBy('__unknown_last', 'asc');
-            } else {
-                $q->orderByRaw("$unknownCaseSql asc");
-            }
+            if ($hasDistinct) $q->orderBy('__unknown_last', 'asc');
+            else $q->orderByRaw("$unknownCaseSql asc");
 
-            $q->orderByRaw('events.start_date asc nulls last')
+            $q->orderBy('__img_rank', 'asc')
+                ->orderByRaw('events.start_date asc nulls last')
                 ->orderByRaw('events.start_time asc nulls last')
                 ->orderBy('events.id', 'asc');
         }
@@ -413,13 +421,15 @@ class EventRepository
         $dir = $dir === 'desc' ? 'desc' : 'asc';
 
         if ($sort) {
-            $q->reorder();
-            $q->orderBy('__img_rank', 'asc');
+            $q->reorder()
+                ->orderBy('__past_rank', 'asc');
 
             if ($unknownLast) {
                 if ($hasDistinct) $q->orderBy('__unknown_last', 'asc');
                 else $q->orderByRaw("$unknownCaseSql asc");
             }
+
+            $q->orderBy('__img_rank', 'asc');
 
             switch ($sort) {
                 case 'start_at':
@@ -459,15 +469,16 @@ class EventRepository
             $q->selectRaw("$isLikeExpr as __like_rank", [$like, $like]);
             $q->selectRaw("$scoreExpr as __score", [$token, $token]);
 
-            $q->reorder();
-            $q->orderBy('__img_rank', 'asc');
+            $q->reorder()
+                ->orderBy('__past_rank', 'asc');
 
             if ($unknownLast) {
                 if ($hasDistinct) $q->orderBy('__unknown_last', 'asc');
                 else $q->orderByRaw("$unknownCaseSql asc");
             }
 
-            $q->orderBy('__like_rank', 'asc')
+            $q->orderBy('__img_rank', 'asc')
+                ->orderBy('__like_rank', 'asc')
                 ->orderBy('__score', 'desc')
                 ->orderByRaw('events.start_date asc nulls last')
                 ->orderByRaw('events.start_time asc nulls last')
@@ -479,7 +490,7 @@ class EventRepository
         $this->hydrateImages($events);
 
         $events->each(function (Event $e) {
-            $e->makeHidden(['__img_rank', '__like_rank', '__score', '__unknown_last']);
+            $e->makeHidden(['__past_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
         });
 
         return $paginator->setCollection($events);
@@ -624,6 +635,19 @@ class EventRepository
             $e->setAttribute('images', $images);
             $e->setAttribute('poster', $images[0] ?? null);
         });
+    }
+
+    private function addPastRank($q): void
+    {
+        $graceHours = (int) self::PAST_GRACE_HOURS;
+
+        $sql = "CASE WHEN (
+            (events.start_time IS NOT NULL AND events.start_time < (now() - interval '{$graceHours} hours'))
+            OR
+            (events.start_time IS NULL AND events.start_date IS NOT NULL AND events.start_date < (now() AT TIME ZONE 'Europe/Moscow')::date)
+        ) THEN 1 ELSE 0 END";
+
+        $q->selectRaw("$sql as __past_rank");
     }
 
     private function addImgRank($q): void
