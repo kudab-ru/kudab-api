@@ -88,7 +88,7 @@ class EventRepository
             ]);
 
         $q->addSelect('events.*');
-        $this->addPastRank($q);
+        $this->addPastFlags($q); // __past_rank + __is_past
         $this->addImgRank($q);
 
         $q->orderBy('__past_rank', 'asc')
@@ -205,7 +205,7 @@ class EventRepository
         $this->hydrateImages($events);
 
         $events->each(function (Event $e) {
-            $e->makeHidden(['__past_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
+            $e->makeHidden(['__past_rank', '__is_past', '__img_rank', '__like_rank', '__score', '__unknown_last']);
         });
 
         return $paginator->setCollection($events);
@@ -230,7 +230,7 @@ class EventRepository
                     });
             });
 
-        $this->addPastRank($q);
+        $this->addPastFlags($q); // __past_rank + __is_past
         $this->addImgRank($q);
 
         $q->orderBy('__past_rank', 'asc')
@@ -490,7 +490,7 @@ class EventRepository
         $this->hydrateImages($events);
 
         $events->each(function (Event $e) {
-            $e->makeHidden(['__past_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
+            $e->makeHidden(['__past_rank', '__is_past', '__img_rank', '__like_rank', '__score', '__unknown_last']);
         });
 
         return $paginator->setCollection($events);
@@ -498,22 +498,30 @@ class EventRepository
 
     public function findWithDetails(int $id): Event
     {
-        $event = Event::query()
-            ->whereNull('deleted_at')
+        $q = Event::query()
+            ->from('events')
+            ->select('events.*')
+            ->whereNull('events.deleted_at')
             ->with([
                 'community:id,name,city,avatar_url',
                 'interests:id,name',
-            ])
-            ->findOrFail($id);
+            ]);
+
+        $this->addPastFlags($q);
+
+        $event = $q->findOrFail($id);
 
         $this->hydrateImages(new EloquentCollection([$event]));
+
+        // чтобы в ресурс не утекли служебные поля
+        $event->makeHidden(['__past_rank', '__is_past', '__img_rank', '__like_rank', '__score', '__unknown_last']);
 
         return $event;
     }
 
     public function findWebWithDetails(int $id): Event
     {
-        $event = Event::query()
+        $q = Event::query()
             ->select('events.*', 'ct.slug as city_slug')
             ->leftJoin('cities as ct', 'ct.id', '=', 'events.city_id')
             ->whereNull('events.deleted_at')
@@ -523,10 +531,15 @@ class EventRepository
                 'interests:id,name',
                 'eventSources:id,event_id,source,post_external_id,external_url,published_at,images,generated_link,social_link_id',
                 'originalPost:id,text',
-            ])
-            ->firstOrFail();
+            ]);
+
+        $this->addPastFlags($q);
+
+        $event = $q->firstOrFail();
 
         $this->hydrateImages(new EloquentCollection([$event]));
+
+        $event->makeHidden(['__past_rank', '__is_past', '__img_rank', '__like_rank', '__score', '__unknown_last']);
 
         return $event;
     }
@@ -637,17 +650,18 @@ class EventRepository
         });
     }
 
-    private function addPastRank($q): void
+    private function addPastFlags($q): void
     {
         $graceHours = (int) self::PAST_GRACE_HOURS;
 
-        $sql = "CASE WHEN (
+        $caseSql = "CASE WHEN (
             (events.start_time IS NOT NULL AND events.start_time < (now() - interval '{$graceHours} hours'))
             OR
             (events.start_time IS NULL AND events.start_date IS NOT NULL AND events.start_date < (now() AT TIME ZONE 'Europe/Moscow')::date)
         ) THEN 1 ELSE 0 END";
 
-        $q->selectRaw("$sql as __past_rank");
+        $q->selectRaw("$caseSql as __past_rank");
+        $q->selectRaw("(($caseSql) = 1) as __is_past");
     }
 
     private function addImgRank($q): void

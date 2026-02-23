@@ -104,6 +104,8 @@ class WebEventDetailResource extends JsonResource
 
             // связанные записи/источники
             'sources' => $sources,
+
+            'is_past' => (bool) ($this->getAttribute('__is_past') ?? false),
         ];
     }
 }

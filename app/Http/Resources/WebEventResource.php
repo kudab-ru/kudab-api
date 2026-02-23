@@ -56,6 +56,8 @@ class WebEventResource extends JsonResource
 
             'free'           => ($this->price_status === 'free')
                 || ((int)($this->price_min ?? -1) === 0 && $this->price_max === null),
+
+            'is_past' => (bool) ($this->getAttribute('__is_past') ?? false),
         ];
     }
 }
