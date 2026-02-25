@@ -417,9 +417,36 @@ class AdminCommunitiesController extends Controller
         $community = Community::withTrashed()->findOrFail($id);
         $validated = $request->validated();
 
+        // доступные источники по ссылкам сообщества
+        $available = CommunitySocialLink::query()
+            ->join('social_networks', 'social_networks.id', '=', 'community_social_links.social_network_id')
+            ->where('community_social_links.community_id', (int)$community->id)
+            ->pluck('social_networks.slug')
+            ->map(function ($slug) {
+                $s = (string)$slug;
+                if (in_array($s, ['vk'], true)) return 'vk';
+                if (in_array($s, ['telegram', 'tg'], true)) return 'tg';
+                return 'site';
+            })
+            ->unique()
+            ->values()
+            ->all();
+
+        $requested = array_values($validated['sources'] ?? []);
+        if (empty($requested)) {
+            $sources = !empty($available) ? $available : ['vk'];
+        } else {
+            $sources = array_values(array_intersect($requested, $available));
+            if (empty($sources)) {
+                throw ValidationException::withMessages([
+                    'sources' => ['Нет подходящих ссылок по параметру sources. Доступно: ' . implode(', ', $available ?: ['(нет ссылок)'])],
+                ]);
+            }
+        }
+
         $result = $this->enqueueVerifyOutbox(
             communityId: (int)$community->id,
-            sources: array_values($validated['sources'] ?? ['vk']),
+            sources: $sources,
             limitPerSource: (int)($validated['limit_per_source'] ?? 30),
             overwrite: (bool)($validated['overwrite'] ?? false),
             clearAggregator: (bool)($validated['clear_aggregator'] ?? false),
@@ -468,7 +495,8 @@ class AdminCommunitiesController extends Controller
     {
         $host = strtolower($host);
 
-        if (Str::endsWith($host, 'vk.com') || Str::endsWith($host, 'vkontakte.ru')) {
+        // VK: vk.com, vk.ru, vkontakte.ru (+ поддомены типа m.vk.com)
+        if (Str::endsWith($host, 'vk.com') || Str::endsWith($host, 'vk.ru') || Str::endsWith($host, 'vkontakte.ru')) {
             $slugCandidates = ['vk'];
             $sourceKey = 'vk';
         } elseif ($host === 't.me' || $host === 'telegram.me') {
@@ -495,6 +523,20 @@ class AdminCommunitiesController extends Controller
     private function extractExternalCommunityId(string $sourceKey, string $path, string $query): ?string
     {
         if ($sourceKey === 'vk') {
+            // screen-name: /vinzavodpro, /some_group (самый частый кейс)
+            $p = ltrim($path, '/');
+            $seg = trim((string)(explode('/', $p, 2)[0] ?? ''));
+            if ($seg !== '') {
+                // canonical формы: /club123 /public123 /event123
+                if (preg_match('~^(?:club|public|event)(\d+)$~', $seg, $m)) {
+                    return (string)$m[1];
+                }
+                // иногда бывает /id123
+                if (preg_match('~^id(\d+)$~', $seg, $m)) {
+                    return (string)$m[1];
+                }
+            }
+
             if (preg_match('~/(?:club|public|event)(\d+)$~', $path, $m)) {
                 return (string)$m[1];
             }
@@ -511,7 +553,8 @@ class AdminCommunitiesController extends Controller
                 }
             }
 
-            return null;
+            // если это /vinzavodpro — вернём seg (string), чтобы дальше не было NULL
+            return $seg !== '' ? $seg : null;
         }
 
         if ($sourceKey === 'tg') {

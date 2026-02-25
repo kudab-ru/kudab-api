@@ -16,6 +16,7 @@ class AdminCommunitiesVerifyRequest extends FormRequest
         return [
             'sources' => ['sometimes', 'array'],
             'sources.*' => ['string', 'in:vk,tg,site'],
+
             'limit_per_source' => ['sometimes', 'integer', 'min:1', 'max:200'],
             'overwrite' => ['sometimes', 'boolean'],
             'clear_aggregator' => ['sometimes', 'boolean'],
