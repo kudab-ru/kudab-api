@@ -11,6 +11,8 @@ use App\Http\Resources\Admin\CommunityResource as AdminCommunityResource;
 use App\Models\Community;
 use App\Models\CommunitySocialLink;
 use App\Models\SocialNetwork;
+use App\Services\Url\SocialNetworkSourceMapper;
+use App\Services\Url\UrlClassifier;
 use App\Services\Vk\VkCommunityResolver;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
@@ -123,7 +125,6 @@ class AdminCommunitiesController extends Controller
 
         $community->fill($data);
 
-        // Ручной финал: фиксируем в meta, чтобы авто-джоба НЕ перетирала решение.
         if (array_key_exists('verification_status', $data)) {
             $status = (string)($data['verification_status'] ?? '');
 
@@ -144,7 +145,6 @@ class AdminCommunitiesController extends Controller
 
             $community->verification_meta = $meta;
 
-            // Консистентность флагов при ручной правке (если поле есть)
             if (array_key_exists('is_verified', $community->getAttributes())) {
                 $community->is_verified = ($status === 'approved');
             }
@@ -199,17 +199,34 @@ class AdminCommunitiesController extends Controller
      * - создаём или обновляем community + community_social_links
      * - auto_verify: если true — ставим outbox на верификацию
      */
-    public function import(AdminCommunitiesImportRequest $request, VkCommunityResolver $vk): JsonResponse
-    {
+    public function import(
+        AdminCommunitiesImportRequest $request,
+        VkCommunityResolver $vk,
+        UrlClassifier $urlClassifier
+    ): JsonResponse {
         $validated = $request->validated();
 
         $inputUrl = trim((string)$validated['url']);
         $autoVerify = (bool)($validated['auto_verify'] ?? false);
 
-        [$normalizedUrl, $host, $path, $query] = $this->parseUrlParts($inputUrl);
-        [$sourceKey, $socialNetwork] = $this->resolveSocialNetworkByHost($host);
+        $cls = $urlClassifier->classify($inputUrl);
 
-        $externalCommunityId = $this->extractExternalCommunityId($sourceKey, $path, $query);
+        $normalizedUrl = $cls->normalizedUrl;
+        $host = $cls->host;
+        $path = $cls->path;
+        $query = $cls->query;
+        $sourceKey = $cls->sourceKey;
+        $externalCommunityId = $cls->externalCommunityId;
+
+        $socialNetwork = SocialNetwork::query()
+            ->whereIn('slug', $cls->slugCandidates)
+            ->first();
+
+        if (!$socialNetwork) {
+            throw ValidationException::withMessages([
+                'url' => ['Не найдена соцсеть в справочнике social_networks (slug: ' . implode(',', $cls->slugCandidates) . ').'],
+            ]);
+        }
 
         $resolvedName = null;
         $resolvedDescription = null;
@@ -219,7 +236,6 @@ class AdminCommunitiesController extends Controller
 
         $vkConfigured = (string)config('services.vk.token') !== '' && (string)config('services.vk.version') !== '';
 
-        // VK: онлайн-резолв (имя/описание/фото/external_id/url)
         if ($sourceKey === 'vk' && $vkConfigured) {
             $resolved = $vk->resolve($normalizedUrl);
 
@@ -231,7 +247,6 @@ class AdminCommunitiesController extends Controller
             $canonicalUrl = (string)$resolved['canonical_url'];
         }
 
-        // Идемпотентность: ищем по canonical_url, и по (social_network_id + external_community_id) если он есть
         $existingLink = CommunitySocialLink::query()
             ->where('url', $canonicalUrl)
             ->when($externalCommunityId !== null, function ($q) use ($socialNetwork, $externalCommunityId) {
@@ -247,14 +262,12 @@ class AdminCommunitiesController extends Controller
 
             $changed = false;
 
-            // “Лёгкое обновление”: если VK смог отдать профиль — перезаписываем поля
             if ($community && $resolvedName !== null && $resolvedName !== '') {
                 if ((string)$community->name !== $resolvedName) {
                     $community->name = $resolvedName;
                     $changed = true;
                 }
 
-                // description/avatar/image обновляем только если пришло не-null (чтобы не “затирать в пустоту”)
                 if ($resolvedDescription !== null && (string)$community->description !== (string)$resolvedDescription) {
                     $community->description = $resolvedDescription;
                     $changed = true;
@@ -286,7 +299,6 @@ class AdminCommunitiesController extends Controller
                 }
             }
 
-            // link обновляем всегда, если есть отличия (url/external id)
             if ((string)$existingLink->url !== (string)$canonicalUrl) {
                 $existingLink->url = $canonicalUrl;
                 $changed = true;
@@ -299,12 +311,11 @@ class AdminCommunitiesController extends Controller
                 $existingLink->save();
             }
 
-            // auto_verify: enqueue
             $verifyOutbox = null;
             if ($autoVerify) {
                 $verifyOutbox = $this->enqueueVerifyOutbox(
                     communityId: (int)$existingLink->community_id,
-                    sources: [$sourceKey], // либо ['auto'], если хочешь "по приоритету"
+                    sources: [$sourceKey],
                     limitPerSource: 30,
                     overwrite: false,
                     clearAggregator: false,
@@ -378,12 +389,11 @@ class AdminCommunitiesController extends Controller
             return [$community, $link];
         });
 
-        // auto_verify: enqueue
         $verifyOutbox = null;
         if ($autoVerify) {
             $verifyOutbox = $this->enqueueVerifyOutbox(
                 communityId: (int)$community->id,
-                sources: [$sourceKey], // либо ['auto']
+                sources: [$sourceKey],
                 limitPerSource: 30,
                 overwrite: false,
                 clearAggregator: false,
@@ -412,22 +422,16 @@ class AdminCommunitiesController extends Controller
      * - Никаких VK запросов тут.
      * - Только outbox_messages → parser заберёт и запустит VerifyCommunityJob.
      */
-    public function verify(AdminCommunitiesVerifyRequest $request, int $id): JsonResponse
+    public function verify(AdminCommunitiesVerifyRequest $request, int $id, SocialNetworkSourceMapper $mapper): JsonResponse
     {
         $community = Community::withTrashed()->findOrFail($id);
         $validated = $request->validated();
 
-        // доступные источники по ссылкам сообщества
         $available = CommunitySocialLink::query()
             ->join('social_networks', 'social_networks.id', '=', 'community_social_links.social_network_id')
             ->where('community_social_links.community_id', (int)$community->id)
             ->pluck('social_networks.slug')
-            ->map(function ($slug) {
-                $s = (string)$slug;
-                if (in_array($s, ['vk'], true)) return 'vk';
-                if (in_array($s, ['telegram', 'tg'], true)) return 'tg';
-                return 'site';
-            })
+            ->map(fn ($slug) => $mapper->sourceFromSlug((string)$slug))
             ->unique()
             ->values()
             ->all();
@@ -495,7 +499,6 @@ class AdminCommunitiesController extends Controller
     {
         $host = strtolower($host);
 
-        // VK: vk.com, vk.ru, vkontakte.ru (+ поддомены типа m.vk.com)
         if (Str::endsWith($host, 'vk.com') || Str::endsWith($host, 'vk.ru') || Str::endsWith($host, 'vkontakte.ru')) {
             $slugCandidates = ['vk'];
             $sourceKey = 'vk';
@@ -523,15 +526,12 @@ class AdminCommunitiesController extends Controller
     private function extractExternalCommunityId(string $sourceKey, string $path, string $query): ?string
     {
         if ($sourceKey === 'vk') {
-            // screen-name: /vinzavodpro, /some_group (самый частый кейс)
             $p = ltrim($path, '/');
             $seg = trim((string)(explode('/', $p, 2)[0] ?? ''));
             if ($seg !== '') {
-                // canonical формы: /club123 /public123 /event123
                 if (preg_match('~^(?:club|public|event)(\d+)$~', $seg, $m)) {
                     return (string)$m[1];
                 }
-                // иногда бывает /id123
                 if (preg_match('~^id(\d+)$~', $seg, $m)) {
                     return (string)$m[1];
                 }
@@ -553,7 +553,6 @@ class AdminCommunitiesController extends Controller
                 }
             }
 
-            // если это /vinzavodpro — вернём seg (string), чтобы дальше не было NULL
             return $seg !== '' ? $seg : null;
         }
 
