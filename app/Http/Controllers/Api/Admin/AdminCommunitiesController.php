@@ -460,6 +460,10 @@ class AdminCommunitiesController extends Controller
         $available = CommunitySocialLink::query()
             ->join('social_networks', 'social_networks.id', '=', 'community_social_links.social_network_id')
             ->where('community_social_links.community_id', (int)$community->id)
+            ->where(function ($q) {
+                $q->whereNull('community_social_links.status')
+                  ->orWhere('community_social_links.status', '<>', 'black');
+            })
             ->pluck('social_networks.slug')
             ->map(fn ($slug) => $mapper->sourceFromSlug((string)$slug))
             ->unique()

@@ -43,6 +43,8 @@ class EventRepository
             });
         }
 
+        $this->excludeBlacklistedSources($q);
+
         $rows = $q->get();
 
         $hasMore = $rows->count() > $limit;
@@ -92,8 +94,10 @@ class EventRepository
             ]);
 
         $q->addSelect('events.*');
-        $this->addPastFlags($q); // __past_rank + __is_past
+        $this->addPastFlags($q);
         $this->addImgRank($q);
+
+        $this->excludeBlacklistedSources($q);
 
         $q->orderBy('__past_rank', 'asc')
             ->orderBy('__img_rank', 'asc')
@@ -237,6 +241,8 @@ class EventRepository
 
         $this->addPastFlags($q); // __past_rank + __is_past
         $this->addImgRank($q);
+
+        $this->excludeBlacklistedSources($q);
 
         $q->orderBy('__past_rank', 'asc')
             ->orderBy('__img_rank', 'asc')
@@ -516,6 +522,8 @@ class EventRepository
 
         $this->addPastFlags($q);
 
+        $this->excludeBlacklistedSources($q);
+
         $event = $q->where('events.id', $id)->firstOrFail();
 
         $this->hydrateImages(new EloquentCollection([$event]));
@@ -542,6 +550,8 @@ class EventRepository
             ]);
 
         $this->addPastFlags($q);
+
+        $this->excludeBlacklistedSources($q);
 
         $event = $q->firstOrFail();
 
@@ -765,5 +775,33 @@ class EventRepository
         }
 
         return $this->hasWordSim;
+    }
+
+    private function excludeBlacklistedSources($q): void
+    {
+        // Скрываем событие только если:
+        // - есть хотя бы один source с black ссылкой
+        // - и нет ни одного source, который НЕ black (включая source без social_link_id)
+        $q->whereRaw("
+        NOT (
+            EXISTS (
+                SELECT 1
+                FROM event_sources es
+                JOIN community_social_links csl ON csl.id = es.social_link_id
+                WHERE es.event_id = events.id
+                  AND csl.status = 'black'
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM event_sources es2
+                LEFT JOIN community_social_links csl2 ON csl2.id = es2.social_link_id
+                WHERE es2.event_id = events.id
+                  AND (
+                    es2.social_link_id IS NULL
+                    OR COALESCE(csl2.status, 'active') <> 'black'
+                  )
+            )
+        )
+    ");
     }
 }

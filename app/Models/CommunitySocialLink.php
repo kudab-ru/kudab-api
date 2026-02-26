@@ -14,6 +14,7 @@ class CommunitySocialLink extends Model
         'social_network_id',
         'external_community_id',
         'url',
+        'status',
     ];
 
     /**
