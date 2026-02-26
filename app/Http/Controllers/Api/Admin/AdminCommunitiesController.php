@@ -311,17 +311,27 @@ class AdminCommunitiesController extends Controller
                 $existingLink->save();
             }
 
+            // auto_verify “мягко”: ставим outbox только если есть city_id и город active
             $verifyOutbox = null;
+
             if ($autoVerify) {
-                $verifyOutbox = $this->enqueueVerifyOutbox(
-                    communityId: (int)$existingLink->community_id,
-                    sources: [$sourceKey],
-                    limitPerSource: 30,
-                    overwrite: false,
-                    clearAggregator: false,
-                    requestedByUserId: optional($request->user())->id,
-                    metaSource: 'import:auto_verify'
-                );
+                $cityId = $community?->city_id ?? null;
+
+                if ($cityId) {
+                    $status = DB::table('cities')->where('id', (int)$cityId)->value('status');
+
+                    if ((string)$status === 'active') {
+                        $verifyOutbox = $this->enqueueVerifyOutbox(
+                            communityId: (int)($community?->id ?? $existingLink->community_id),
+                            sources: [$sourceKey],
+                            limitPerSource: 30,
+                            overwrite: false,
+                            clearAggregator: false,
+                            requestedByUserId: optional($request->user())->id,
+                            metaSource: 'import:auto_verify'
+                        );
+                    }
+                }
             }
 
             return response()->json([
@@ -389,17 +399,27 @@ class AdminCommunitiesController extends Controller
             return [$community, $link];
         });
 
+        // auto_verify “мягко”: ставим outbox только если есть city_id и город active
         $verifyOutbox = null;
+
         if ($autoVerify) {
-            $verifyOutbox = $this->enqueueVerifyOutbox(
-                communityId: (int)$community->id,
-                sources: [$sourceKey],
-                limitPerSource: 30,
-                overwrite: false,
-                clearAggregator: false,
-                requestedByUserId: optional($request->user())->id,
-                metaSource: 'import:auto_verify'
-            );
+            $cityId = $community?->city_id ?? null;
+
+            if ($cityId) {
+                $status = DB::table('cities')->where('id', (int)$cityId)->value('status');
+
+                if ((string)$status === 'active') {
+                    $verifyOutbox = $this->enqueueVerifyOutbox(
+                        communityId: (int)$community->id,
+                        sources: [$sourceKey],
+                        limitPerSource: 30,
+                        overwrite: false,
+                        clearAggregator: false,
+                        requestedByUserId: optional($request->user())->id,
+                        metaSource: 'import:auto_verify'
+                    );
+                }
+            }
         }
 
         return response()->json([
@@ -426,6 +446,18 @@ class AdminCommunitiesController extends Controller
     {
         $community = Community::withTrashed()->findOrFail($id);
         $validated = $request->validated();
+
+        // verify разрешаем и без city_id (чтобы собирать/проверять сообщества),
+        // но если city_id задан — город обязан быть active
+        $cityId = $community->city_id ?? null;
+        if ($cityId) {
+            $status = DB::table('cities')->where('id', (int)$cityId)->value('status');
+            if ((string)$status !== 'active') {
+                throw ValidationException::withMessages([
+                    'city_id' => ['Город выключен (cities.status != active).'],
+                ]);
+            }
+        }
 
         $available = CommunitySocialLink::query()
             ->join('social_networks', 'social_networks.id', '=', 'community_social_links.social_network_id')

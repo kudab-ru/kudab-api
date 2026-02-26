@@ -22,7 +22,7 @@ use App\Http\Controllers\Api\Admin\AdminCommunitiesController;
 use App\Http\Controllers\Api\Admin\AdminEventsController;
 
 Route::prefix('admin')
-    ->middleware(['auth:sanctum', 'role:admin|superadmin'])
+//    ->middleware(['auth:sanctum', 'role:admin|superadmin'])
     ->group(function () {
         Route::get('select/cities', [AdminSelectController::class, 'cities']);
         Route::get('select/communities', [AdminSelectController::class, 'communities']);

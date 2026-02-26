@@ -23,7 +23,9 @@ class EventRepository
 
         $q = Event::query()
             ->select(['id', 'updated_at', 'created_at', 'start_time', 'start_date'])
-            ->whereNull('deleted_at')
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
+            ->whereNull('events.deleted_at')
             ->where('id', '>', $afterId)
             ->orderBy('id', 'asc')
             ->limit($limit + 1);
@@ -73,6 +75,8 @@ class EventRepository
         $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
 
         $q = Event::query()
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
                 $w->where('events.start_time', '>=', $cutoffTs)
@@ -219,7 +223,8 @@ class EventRepository
 
         $q = Event::query()
             ->select('events.*', 'ct.slug as city_slug')
-            ->leftJoin('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
                 $w->where('events.start_time', '>=', $cutoffTs)
@@ -501,6 +506,8 @@ class EventRepository
         $q = Event::query()
             ->from('events')
             ->select('events.*')
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')
             ->with([
                 'community:id,name,city,avatar_url',
@@ -509,7 +516,7 @@ class EventRepository
 
         $this->addPastFlags($q);
 
-        $event = $q->findOrFail($id);
+        $event = $q->where('events.id', $id)->firstOrFail();
 
         $this->hydrateImages(new EloquentCollection([$event]));
 
@@ -523,7 +530,8 @@ class EventRepository
     {
         $q = Event::query()
             ->select('events.*', 'ct.slug as city_slug')
-            ->leftJoin('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')
             ->where('events.id', $id)
             ->with([

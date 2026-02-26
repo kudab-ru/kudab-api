@@ -107,7 +107,10 @@ class EventsController extends Controller
         // city=slug -> city_id
         $citySlug = trim((string)($v['city'] ?? ''));
         if ($citySlug !== '') {
-            $cityId = City::query()->where('slug', $citySlug)->value('id');
+            $cityId = City::query()
+                ->where('slug', $citySlug)
+                ->where('status', 'active')
+                ->value('id');
 
             if (!$cityId) {
                 return response()->json([

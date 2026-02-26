@@ -20,7 +20,9 @@ class CitiesController extends Controller
         $page = (int) $request->query('page', 1);
         $page = max(1, $page);
 
-        $query = City::query()->select(['id', 'name', 'slug']);
+        $query = City::query()
+            ->select(['id', 'name', 'slug'])
+            ->where('status', 'active');
 
         if ($q !== '') {
             $qLower = mb_strtolower($q);
