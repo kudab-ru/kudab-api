@@ -95,12 +95,15 @@ class EventRepository
 
         $q->addSelect('events.*');
         $this->addPastFlags($q);
+        $this->addGrayRank($q);
         $this->addImgRank($q);
 
         $this->excludeBlacklistedSources($q);
 
+        // приоритет: past -> image -> gray
         $q->orderBy('__past_rank', 'asc')
             ->orderBy('__img_rank', 'asc')
+            ->orderBy('__gray_rank', 'asc')
             ->orderByRaw('events.start_date asc nulls last')
             ->orderByRaw('events.start_time asc nulls last')
             ->orderBy('events.id', 'asc');
@@ -191,6 +194,7 @@ class EventRepository
                 $q->reorder()
                     ->orderBy('__past_rank', 'asc')
                     ->orderBy('__img_rank', 'asc')
+                    ->orderBy('__gray_rank', 'asc')
                     ->orderBy('__like_rank', 'asc')
                     ->orderBy('__score', 'desc')
                     ->orderByRaw('events.start_date asc nulls last')
@@ -213,7 +217,7 @@ class EventRepository
         $this->hydrateImages($events);
 
         $events->each(function (Event $e) {
-            $e->makeHidden(['__past_rank', '__is_past', '__img_rank', '__like_rank', '__score', '__unknown_last']);
+            $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
         });
 
         return $paginator->setCollection($events);
@@ -240,12 +244,15 @@ class EventRepository
             });
 
         $this->addPastFlags($q); // __past_rank + __is_past
+        $this->addGrayRank($q);
         $this->addImgRank($q);
 
         $this->excludeBlacklistedSources($q);
 
+        // приоритет: past -> image -> gray
         $q->orderBy('__past_rank', 'asc')
             ->orderBy('__img_rank', 'asc')
+            ->orderBy('__gray_rank', 'asc')
             ->orderByRaw('events.start_date asc nulls last')
             ->orderByRaw('events.start_time asc nulls last')
             ->orderBy('events.id', 'asc');
@@ -397,6 +404,7 @@ class EventRepository
             else $q->orderByRaw("$unknownCaseSql asc");
 
             $q->orderBy('__img_rank', 'asc')
+                ->orderBy('__gray_rank', 'asc')
                 ->orderByRaw('events.start_date asc nulls last')
                 ->orderByRaw('events.start_time asc nulls last')
                 ->orderBy('events.id', 'asc');
@@ -440,7 +448,8 @@ class EventRepository
                 else $q->orderByRaw("$unknownCaseSql asc");
             }
 
-            $q->orderBy('__img_rank', 'asc');
+            $q->orderBy('__img_rank', 'asc')
+                ->orderBy('__gray_rank', 'asc');
 
             switch ($sort) {
                 case 'start_at':
@@ -489,6 +498,7 @@ class EventRepository
             }
 
             $q->orderBy('__img_rank', 'asc')
+                ->orderBy('__gray_rank', 'asc')
                 ->orderBy('__like_rank', 'asc')
                 ->orderBy('__score', 'desc')
                 ->orderByRaw('events.start_date asc nulls last')
@@ -501,7 +511,7 @@ class EventRepository
         $this->hydrateImages($events);
 
         $events->each(function (Event $e) {
-            $e->makeHidden(['__past_rank', '__is_past', '__img_rank', '__like_rank', '__score', '__unknown_last']);
+            $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
         });
 
         return $paginator->setCollection($events);
@@ -521,6 +531,7 @@ class EventRepository
             ]);
 
         $this->addPastFlags($q);
+        $this->addGrayRank($q);
 
         $this->excludeBlacklistedSources($q);
 
@@ -528,8 +539,7 @@ class EventRepository
 
         $this->hydrateImages(new EloquentCollection([$event]));
 
-        // чтобы в ресурс не утекли служебные поля
-        $event->makeHidden(['__past_rank', '__is_past', '__img_rank', '__like_rank', '__score', '__unknown_last']);
+        $event->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
 
         return $event;
     }
@@ -550,6 +560,7 @@ class EventRepository
             ]);
 
         $this->addPastFlags($q);
+        $this->addGrayRank($q);
 
         $this->excludeBlacklistedSources($q);
 
@@ -557,7 +568,7 @@ class EventRepository
 
         $this->hydrateImages(new EloquentCollection([$event]));
 
-        $event->makeHidden(['__past_rank', '__is_past', '__img_rank', '__like_rank', '__score', '__unknown_last']);
+        $event->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
 
         return $event;
     }
@@ -680,6 +691,33 @@ class EventRepository
 
         $q->selectRaw("$caseSql as __past_rank");
         $q->selectRaw("(($caseSql) = 1) as __is_past");
+    }
+
+    private function addGrayRank($q): void
+    {
+        // gray-only: есть хотя бы один gray-источник
+        // и нет ни одного "хорошего" источника (active/NULL или source без social_link_id)
+        $sql = "CASE WHEN (
+            EXISTS (
+                SELECT 1
+                FROM event_sources es
+                JOIN community_social_links csl ON csl.id = es.social_link_id
+                WHERE es.event_id = events.id
+                  AND csl.status = 'gray'
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM event_sources es2
+                LEFT JOIN community_social_links csl2 ON csl2.id = es2.social_link_id
+                WHERE es2.event_id = events.id
+                  AND (
+                    es2.social_link_id IS NULL
+                    OR COALESCE(csl2.status, 'active') = 'active'
+                  )
+            )
+        ) THEN 1 ELSE 0 END";
+
+        $q->selectRaw("$sql as __gray_rank");
     }
 
     private function addImgRank($q): void
