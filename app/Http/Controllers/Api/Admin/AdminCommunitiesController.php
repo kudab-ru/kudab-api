@@ -14,6 +14,7 @@ use App\Models\SocialNetwork;
 use App\Services\Url\SocialNetworkSourceMapper;
 use App\Services\Url\UrlClassifier;
 use App\Services\Vk\VkCommunityResolver;
+use App\Support\CityGate;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -450,13 +451,10 @@ class AdminCommunitiesController extends Controller
         // verify разрешаем и без city_id (чтобы собирать/проверять сообщества),
         // но если city_id задан — город обязан быть active
         $cityId = $community->city_id ?? null;
-        if ($cityId) {
-            $status = DB::table('cities')->where('id', (int)$cityId)->value('status');
-            if ((string)$status !== 'active') {
-                throw ValidationException::withMessages([
-                    'city_id' => ['Город выключен (cities.status != active).'],
-                ]);
-            }
+        if ($cityId && CityGate::stateByCityId((int) $cityId) === CityGate::CITY_INACTIVE) {
+            throw ValidationException::withMessages([
+                'city_id' => ['Город выключен (cities.status != active).'],
+            ]);
         }
 
         $available = CommunitySocialLink::query()
