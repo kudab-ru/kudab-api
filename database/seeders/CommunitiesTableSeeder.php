@@ -12,6 +12,26 @@ class CommunitiesTableSeeder extends Seeder
     {
         $now = Carbon::now();
 
+        // Маппинг "как в сидере написано" -> slug в таблице cities
+        // (если у тебя slug другой — поменяй тут один раз)
+        $citySlugByName = [
+            'Воронеж' => 'voronezh',
+        ];
+
+        // Резолвим city_id (сначала по slug, потом по name)
+        $cityIdByName = [];
+        foreach ($citySlugByName as $cityName => $slug) {
+            $id = DB::table('cities')->where('slug', $slug)->value('id');
+            if (!$id) {
+                $id = DB::table('cities')->where('name', $cityName)->value('id');
+            }
+            $cityIdByName[$cityName] = $id;
+
+            if (!$id && $this->command) {
+                $this->command->warn("City not found: {$cityName} (slug={$slug}) → communities.city_id останется NULL");
+            }
+        }
+
         $communities = [
             [
                 'id' => 1,
@@ -22,7 +42,8 @@ class CommunitiesTableSeeder extends Seeder
                 'house' => null,
                 'avatar_url' => null,
                 'image_url' => null,
-                'last_checked_at' => $now,
+                // важно: НЕ ставим last_checked_at сейчас, иначе джоба может считать “уже проверяли”
+                'last_checked_at' => null,
                 'verification_status' => 'approved',
                 'is_verified' => true,
                 'created_at' => $now,
@@ -47,7 +68,7 @@ class CommunitiesTableSeeder extends Seeder
                 'house' => null,
                 'avatar_url' => null,
                 'image_url' => null,
-                'last_checked_at' => $now,
+                'last_checked_at' => null,
                 'verification_status' => 'approved',
                 'is_verified' => true,
                 'created_at' => $now,
@@ -68,7 +89,7 @@ https://t.me/newteatr',
                 'house' => null,
                 'avatar_url' => null,
                 'image_url' => null,
-                'last_checked_at' => $now,
+                'last_checked_at' => null,
                 'verification_status' => 'approved',
                 'is_verified' => true,
                 'created_at' => $now,
@@ -90,7 +111,7 @@ https://t.me/newteatr',
                 'house' => null,
                 'avatar_url' => null,
                 'image_url' => null,
-                'last_checked_at' => $now,
+                'last_checked_at' => null,
                 'verification_status' => 'approved',
                 'is_verified' => true,
                 'created_at' => $now,
@@ -120,13 +141,20 @@ http://nikitincenter.ru',
                 'house' => null,
                 'avatar_url' => null,
                 'image_url' => null,
-                'last_checked_at' => $now,
+                'last_checked_at' => null,
                 'verification_status' => 'approved',
                 'is_verified' => true,
                 'created_at' => $now,
                 'updated_at' => $now,
             ],
         ];
+
+        // Проставляем city_id всем, у кого есть city
+        foreach ($communities as &$community) {
+            $cityName = $community['city'] ?? null;
+            $community['city_id'] = $cityName ? ($cityIdByName[$cityName] ?? null) : null;
+        }
+        unset($community);
 
         $communitySocialLinks = [
             [
@@ -195,7 +223,6 @@ http://nikitincenter.ru',
             ],
         ];
 
-        // Вставка сообществ (id — primary key)
         foreach ($communities as $community) {
             DB::table('communities')->updateOrInsert(
                 ['id' => $community['id']],
@@ -203,7 +230,6 @@ http://nikitincenter.ru',
             );
         }
 
-        // Проверка дублей и массовая вставка ссылок
         foreach ($communitySocialLinks as $link) {
             DB::table('community_social_links')->updateOrInsert(
                 [

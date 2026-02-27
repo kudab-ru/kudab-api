@@ -11,7 +11,7 @@ class CityRepository
     public function paginate(array $v, int $perPage): LengthAwarePaginator
     {
         $q = City::query()
-            ->select(['id','name','country_code','status','latitude','longitude']);
+            ->select(['id','slug','name','country_code','status','latitude','longitude',]);
 
         // статус по умолчанию — только active
         $q->where('status', $v['status'] ?? 'active');
