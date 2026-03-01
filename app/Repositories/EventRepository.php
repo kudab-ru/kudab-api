@@ -1032,42 +1032,59 @@ class EventRepository
 
         if (!$groupIds) return;
 
-        // те же правила, что /web/events (иначе будет “в группе даты есть, а в ленте их нет”)
+        // те же правила, что /web/event-groups/{id} (и /web/events)
         $nowMsk = now('Europe/Moscow');
         $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
         $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
 
-        $q = Event::query()
-            ->from('events')
-            ->select([
-                'events.id',
-                'events.event_group_id',
-                'events.start_time',
-                'events.start_date',
-                'events.time_precision',
-                'events.time_text',
-            ])
-            ->selectRaw('count(*) OVER (PARTITION BY events.event_group_id) as __grp_count')
-            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+        // ВАЖНО: те же фильтры, что у /web/event-groups/{id}
+        $q = DB::table('events as e')
+            ->join('event_groups as eg', 'eg.id', '=', 'e.event_group_id')
+            ->join('cities as ct', 'ct.id', '=', 'e.city_id')
+            ->select(['e.id', 'e.event_group_id', 'e.start_time', 'e.start_date', 'e.time_precision', 'e.time_text'])
+            ->selectRaw('count(*) OVER (PARTITION BY e.event_group_id) as __grp_count')
+            ->whereNull('eg.deleted_at')
             ->where('ct.status', 'active')
-            ->whereNull('events.deleted_at')
-            ->whereIn('events.event_group_id', $groupIds)
+            ->whereNull('e.deleted_at')
+            ->whereIn('e.event_group_id', $groupIds)
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
-                $w->where('events.start_time', '>=', $cutoffTs)
+                $w->where('e.start_time', '>=', $cutoffTs)
                     ->orWhere(function ($x) use ($fromDateMsk) {
-                        $x->whereNull('events.start_time')
-                            ->whereNotNull('events.start_date')
-                            ->where('events.start_date', '>=', $fromDateMsk);
+                        $x->whereNull('e.start_time')
+                            ->whereNotNull('e.start_date')
+                            ->where('e.start_date', '>=', $fromDateMsk);
                     });
-            })
-            ->orderBy('events.event_group_id', 'asc')
-            ->orderByRaw('events.start_date asc nulls last')
-            ->orderByRaw('events.start_time asc nulls last')
-            ->orderBy('events.id', 'asc');
+            });
 
-        $this->excludeBlacklistedSources($q);
+        // blacklist filter (копия логики excludeBlacklistedSources(), но с alias e)
+        $q->whereRaw("
+            NOT (
+                EXISTS (
+                    SELECT 1
+                    FROM event_sources es
+                    JOIN community_social_links csl ON csl.id = es.social_link_id
+                    WHERE es.event_id = e.id
+                      AND csl.status = 'black'
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM event_sources es2
+                    LEFT JOIN community_social_links csl2 ON csl2.id = es2.social_link_id
+                    WHERE es2.event_id = e.id
+                      AND (
+                        es2.social_link_id IS NULL
+                        OR COALESCE(csl2.status, 'active') <> 'black'
+                      )
+                )
+            )
+        ");
 
-        $rows = $q->get();
+        $rows = $q
+            ->orderBy('e.event_group_id', 'asc')
+            ->orderByRaw('e.start_date asc nulls last')
+            ->orderByRaw('e.start_time asc nulls last')
+            ->orderBy('e.id', 'asc')
+            ->get();
 
         $map = [];
         $cntMap = [];
@@ -1110,7 +1127,7 @@ class EventRepository
         $events->each(function (Event $e) use ($map, $cntMap) {
             $gid = (int) ($e->event_group_id ?? 0);
             if ($gid > 0 && isset($map[$gid])) {
-                $e->setAttribute('group_dates', $map[$gid]);
+                $e->setAttribute('group_dates', $map[$gid]); // уже лимитировано
                 $e->setAttribute('group_count', (int) ($cntMap[$gid] ?? count($map[$gid])));
             }
         });
