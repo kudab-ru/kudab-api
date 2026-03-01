@@ -27,15 +27,30 @@ class WebEventResource extends JsonResource
         }
         if (!is_array($images)) $images = [];
 
+        // group: отдаём только если репозиторий положил group_dates/group_count
         $group = null;
-        $gid = $this->getAttribute('event_group_id');
-        $dates = $this->getAttribute('group_dates');
-        if (is_numeric($gid) && (int) $gid > 0 && is_array($dates) && count($dates) > 1) {
-            $group = [
-                'id'    => (int) $gid,
-                'count' => (int) ($this->getAttribute('group_count') ?? count($dates)),
-                'dates' => array_values(array_filter($dates, fn($d) => is_array($d) && isset($d['id']))),
-            ];
+        $gid = (int) ($this->event_group_id ?? 0);
+        if ($gid > 0) {
+            $dates = $this->getAttribute('group_dates');
+
+            // на всякий: если вдруг прилетело строкой
+            if (is_string($dates)) {
+                $decoded = json_decode($dates, true);
+                $dates = is_array($decoded) ? $decoded : null;
+            }
+            if (!is_array($dates)) $dates = null;
+
+            $count = $this->getAttribute('group_count');
+            $count = is_numeric($count) ? (int) $count : ($dates ? count($dates) : 0);
+
+            // В ленте показываем group только если реально есть “серия”
+            if ($dates && $count >= 2) {
+                $group = [
+                    'id'    => $gid,
+                    'count' => $count,
+                    'dates' => $dates,
+                ];
+            }
         }
 
         return [
@@ -70,7 +85,6 @@ class WebEventResource extends JsonResource
 
             'is_past' => (bool) ($this->getAttribute('__is_past') ?? false),
 
-            // grouped=1: если элемент — представитель группы, тут будет список дат
             'group' => $group,
         ];
     }

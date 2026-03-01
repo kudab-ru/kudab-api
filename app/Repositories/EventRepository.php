@@ -2,6 +2,7 @@
 
 namespace App\Repositories;
 
+use Illuminate\Support\Str;
 use App\Models\Event;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -73,15 +74,29 @@ class EventRepository
 
     /**
      * Web: количество событий в группе (для "count" в ответе).
-     * Считаем по тем же правилам, что /web/events (active city + not deleted + не blacklisted).
+     * Считаем по тем же правилам, что /web/events (active city + not deleted + not blacklisted + lookback window).
      */
     public function countWebGroup(int $groupId): int
     {
+        $nowMsk = now('Europe/Moscow');
+        $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
+        $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
+
         $q = Event::query()
+            ->join('event_groups as eg', 'eg.id', '=', 'events.event_group_id')
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->whereNull('eg.deleted_at')
             ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')
-            ->where('events.event_group_id', $groupId);
+            ->where('events.event_group_id', $groupId)
+            ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
+                $w->where('events.start_time', '>=', $cutoffTs)
+                    ->orWhere(function ($x) use ($fromDateMsk) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $fromDateMsk);
+                    });
+            });
 
         $this->excludeBlacklistedSources($q);
 
@@ -91,17 +106,32 @@ class EventRepository
     /**
      * Web: события конкретной группы (ленивая подгрузка карусели).
      * Важно: формат полей + poster/images соответствует /web/events (hydrateImages + __is_past).
+     * Фильтры: как /web/events (active city + not deleted + not blacklisted + lookback window).
      */
     public function listWebGroup(int $groupId, int $limit = 30): EloquentCollection
     {
         $limit = max(1, min($limit, 50));
 
+        $nowMsk = now('Europe/Moscow');
+        $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
+        $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
+
         $q = Event::query()
             ->select('events.*', 'ct.slug as city_slug')
+            ->join('event_groups as eg', 'eg.id', '=', 'events.event_group_id')
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->whereNull('eg.deleted_at')
             ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')
-            ->where('events.event_group_id', $groupId);
+            ->where('events.event_group_id', $groupId)
+            ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
+                $w->where('events.start_time', '>=', $cutoffTs)
+                    ->orWhere(function ($x) use ($fromDateMsk) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $fromDateMsk);
+                    });
+            });
 
         $this->addPastFlags($q); // __past_rank + __is_past
         $this->addGrayRank($q);
@@ -566,42 +596,41 @@ class EventRepository
         }
 
         if ($grouped) {
-            $orders = $q->getQuery()->orders ?? [];
-            if (!$orders) {
-                // fallback (на всякий случай)
-                $orders = [
-                    ['column' => '__past_rank', 'direction' => 'asc'],
-                    ['column' => '__img_rank', 'direction' => 'asc'],
-                    ['column' => '__gray_rank', 'direction' => 'asc'],
-                    ['sql' => "events.start_date asc nulls last"],
-                    ['sql' => "events.start_time asc nulls last"],
-                    ['column' => 'events.id', 'direction' => 'asc'],
-                ];
+            // 1 элемент на группу (stable representative):
+            // - если current_event_id задан → он главный
+            // - иначе fallback: ближайшее будущее, иначе последний прошедший (в рамках текущего окна)
+            $base = clone $q;
+
+            // важно: сортировка текущего запроса не должна влиять на row_number()
+            try {
+                $base->reorder();
+            } catch (\Throwable $e) {
+                // если вдруг Builder без reorder() — ничего страшного
             }
 
-            $finalOrder  = $this->ordersToSql($orders, 'events');
-
-            $base = clone $q;
-            $base->reorder(); // сортировка нужна только в window function / финальном order
-
-            // Выбор представителя группы:
-            // - если в группе есть будущее/текущее → ближайшее будущее
-            // - иначе → самая свежая прошедшая
-            // (так не будет ситуации, когда у прошедшей группы показывается самая ранняя дата)
             $annot = DB::query()
                 ->fromSub($base->toBase(), 'b')
                 ->select('b.*')
                 ->selectRaw("
+                    (
+                      SELECT g.current_event_id
+                      FROM event_groups g
+                      WHERE g.id = b.event_group_id
+                        AND g.deleted_at IS NULL
+                    ) as __grp_current_event_id
+                ")
+                ->selectRaw("
                     COALESCE(
                       b.start_time,
-                      ((b.start_date::timestamp AT TIME ZONE 'Europe/Moscow') + interval '12 hour')
+                      (b.start_date AT TIME ZONE 'Europe/Moscow')::timestamp
                     ) as __grp_start_ts
                 ")
                 ->selectRaw("
                     CASE WHEN (
-                      (b.start_time IS NOT NULL AND b.start_time >= (now() - interval '1 hour'))
-                      OR
-                      (b.start_time IS NULL AND b.start_date IS NOT NULL AND b.start_date >= (now() AT TIME ZONE 'Europe/Moscow')::date)
+                      COALESCE(
+                        b.start_time,
+                        (b.start_date AT TIME ZONE 'Europe/Moscow')::timestamp
+                      ) >= (now() AT TIME ZONE 'Europe/Moscow')
                     ) THEN 0 ELSE 1 END as __grp_future_rank
                 ");
 
@@ -612,6 +641,12 @@ class EventRepository
                     row_number() over (
                       partition by COALESCE(b2.event_group_id, -b2.id)
                       order by
+                        -- ✅ если current_event_id задан — он главный
+                        CASE
+                          WHEN b2.__grp_current_event_id IS NOT NULL
+                           AND b2.id = b2.__grp_current_event_id
+                          THEN 0 ELSE 1
+                        END asc,
                         b2.__grp_future_rank asc,
                         case when b2.__grp_future_rank = 0 then b2.__grp_start_ts end asc nulls last,
                         case when b2.__grp_future_rank = 1 then b2.__grp_start_ts end desc nulls last,
@@ -619,10 +654,12 @@ class EventRepository
                     ) as __grp_rn
                 ");
 
-            $q = Event::query()
-                ->fromSub($ranked, 'events')
-                ->where('__grp_rn', 1)
-                ->orderByRaw($finalOrder);
+            $repIds = DB::query()
+                ->fromSub($ranked, 'r')
+                ->select('r.id')
+                ->where('r.__grp_rn', 1);
+
+            $q->whereIn('events.id', $repIds);
         }
 
         $paginator = $q->paginate($perPage);
@@ -638,9 +675,6 @@ class EventRepository
                 '__like_rank',
                 '__score',
                 '__unknown_last',
-                '__grp_rn',
-                '__grp_start_ts',
-                '__grp_future_rank',
             ]);
         });
 
@@ -978,52 +1012,16 @@ class EventRepository
     }
 
     /**
-     * Convert Laravel "orders" array into SQL list suitable for:
-     * - window function ORDER BY
-     * - final ORDER BY on a fromSub() aliased table
-     */
-    private function ordersToSql(array $orders, string $alias): string
-    {
-        $out = [];
-
-        foreach ($orders as $o) {
-            if (isset($o['sql'])) {
-                $sql = (string) $o['sql'];
-                // swap known table aliases to our subquery alias
-                $sql = preg_replace('/\bevents\./', $alias.'.', $sql);
-                $sql = preg_replace('/\bct\./', $alias.'.', $sql);
-                $sql = preg_replace('/\bcm\./', $alias.'.', $sql);
-                $out[] = $sql;
-                continue;
-            }
-
-            $col = (string) ($o['column'] ?? '');
-            if ($col === '') continue;
-
-            $dir = strtolower((string) ($o['direction'] ?? 'asc'));
-            $dir = $dir === 'desc' ? 'desc' : 'asc';
-
-            if (str_contains($col, '.')) {
-                $col = preg_replace('/^\w+\./', $alias.'.', $col);
-            } else {
-                $col = $alias.'.'.$col;
-            }
-
-            $out[] = "{$col} {$dir}";
-        }
-
-        return implode(', ', $out);
-    }
-
-    /**
      * Attach group dates to events (one extra query per page, no N+1).
      * Result is stored as attributes:
      * - group_dates: [{id,start_at,start_date,time_precision,time_text}, ...]
-     * - group_count: int
+     * - group_count: int (реальный размер группы по “видимым” событиям)
      */
     private function hydrateGroupDates(EloquentCollection $events): void
     {
         if ($events->isEmpty()) return;
+
+        $MAX_DATES = 12; // чтобы group.dates не раздувал ответы
 
         $groupIds = $events->pluck('event_group_id')
             ->filter(fn($v) => is_numeric($v) && (int)$v > 0)
@@ -1034,20 +1032,62 @@ class EventRepository
 
         if (!$groupIds) return;
 
-        $rows = DB::table('events')
-            ->select(['id', 'event_group_id', 'start_time', 'start_date', 'time_precision', 'time_text'])
-            ->whereNull('deleted_at')
-            ->whereIn('event_group_id', $groupIds)
-            ->orderBy('event_group_id', 'asc')
-            ->orderByRaw('start_date asc nulls last')
-            ->orderByRaw('start_time asc nulls last')
-            ->orderBy('id', 'asc')
-            ->get();
+        // те же правила, что /web/events (иначе будет “в группе даты есть, а в ленте их нет”)
+        $nowMsk = now('Europe/Moscow');
+        $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
+        $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
+
+        $q = Event::query()
+            ->from('events')
+            ->select([
+                'events.id',
+                'events.event_group_id',
+                'events.start_time',
+                'events.start_date',
+                'events.time_precision',
+                'events.time_text',
+            ])
+            ->selectRaw('count(*) OVER (PARTITION BY events.event_group_id) as __grp_count')
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
+            ->whereNull('events.deleted_at')
+            ->whereIn('events.event_group_id', $groupIds)
+            ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
+                $w->where('events.start_time', '>=', $cutoffTs)
+                    ->orWhere(function ($x) use ($fromDateMsk) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $fromDateMsk);
+                    });
+            })
+            ->orderBy('events.event_group_id', 'asc')
+            ->orderByRaw('events.start_date asc nulls last')
+            ->orderByRaw('events.start_time asc nulls last')
+            ->orderBy('events.id', 'asc');
+
+        $this->excludeBlacklistedSources($q);
+
+        $rows = $q->get();
 
         $map = [];
+        $cntMap = [];
+
         foreach ($rows as $r) {
             $gid = (int) $r->event_group_id;
             if (!$gid) continue;
+
+            $grpCount = (int) ($r->__grp_count ?? 0);
+
+            // ✅ одиночки не считаем группой (и не отдаём в API вообще)
+            if ($grpCount < 2) continue;
+
+            $cntMap[$gid] = $grpCount;
+
+            if (!isset($map[$gid])) $map[$gid] = [];
+            if (count($map[$gid]) >= $MAX_DATES) {
+                // уже набрали лимит дат — остальное не тащим
+                continue;
+            }
 
             $startAt = null;
             if (!empty($r->start_time)) {
@@ -1067,11 +1107,11 @@ class EventRepository
             ];
         }
 
-        $events->each(function (Event $e) use ($map) {
+        $events->each(function (Event $e) use ($map, $cntMap) {
             $gid = (int) ($e->event_group_id ?? 0);
             if ($gid > 0 && isset($map[$gid])) {
                 $e->setAttribute('group_dates', $map[$gid]);
-                $e->setAttribute('group_count', count($map[$gid]));
+                $e->setAttribute('group_count', (int) ($cntMap[$gid] ?? count($map[$gid])));
             }
         });
     }
