@@ -71,6 +71,60 @@ class EventRepository
         ];
     }
 
+    /**
+     * Web: количество событий в группе (для "count" в ответе).
+     * Считаем по тем же правилам, что /web/events (active city + not deleted + не blacklisted).
+     */
+    public function countWebGroup(int $groupId): int
+    {
+        $q = Event::query()
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
+            ->whereNull('events.deleted_at')
+            ->where('events.event_group_id', $groupId);
+
+        $this->excludeBlacklistedSources($q);
+
+        return (int) $q->count('events.id');
+    }
+
+    /**
+     * Web: события конкретной группы (ленивая подгрузка карусели).
+     * Важно: формат полей + poster/images соответствует /web/events (hydrateImages + __is_past).
+     */
+    public function listWebGroup(int $groupId, int $limit = 30): EloquentCollection
+    {
+        $limit = max(1, min($limit, 50));
+
+        $q = Event::query()
+            ->select('events.*', 'ct.slug as city_slug')
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
+            ->whereNull('events.deleted_at')
+            ->where('events.event_group_id', $groupId);
+
+        $this->addPastFlags($q); // __past_rank + __is_past
+        $this->addGrayRank($q);
+        $this->addImgRank($q);
+        $this->excludeBlacklistedSources($q);
+
+        // Для карусели логичнее хронологически (asc)
+        $q->orderByRaw('events.start_date asc nulls last')
+            ->orderByRaw('events.start_time asc nulls last')
+            ->orderBy('events.id', 'asc')
+            ->limit($limit);
+
+        $items = $q->get();
+        $this->hydrateImages($items);
+
+        // идеально чисто: только то, что реально добавляли в этом запросе
+        $items->each(function (Event $e) {
+            $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank']);
+        });
+
+        return $items;
+    }
+
     public function paginateUpcoming(array $filters, int $perPage = 20): LengthAwarePaginator
     {
         $nowMsk = now('Europe/Moscow');

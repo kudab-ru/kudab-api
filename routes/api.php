@@ -10,6 +10,7 @@ use App\Http\Controllers\Bot\TelegramChatBroadcastController;
 use App\Http\Controllers\Bot\TelegramChatController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\Web\EventsController as WebEventsController;
+use App\Http\Controllers\Api\Web\EventGroupsController as WebEventGroupsController;
 
 Route::get('/ping', function () {
     return response()->json([
@@ -54,6 +55,7 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
 
     Route::get('ping', fn () => ['ok' => true, 'result' => 'pong']);
     Route::get('events', [WebEventsController::class, 'index']);
+    Route::get('event-groups/{id}', [WebEventGroupsController::class, 'show'])->whereNumber('id');
     Route::get('events/{id}', [WebEventsController::class, 'show'])->whereNumber('id');
 
     Route::get('cities', [CitiesController::class, 'index']);
