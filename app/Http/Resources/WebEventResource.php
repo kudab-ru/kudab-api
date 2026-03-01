@@ -27,6 +27,17 @@ class WebEventResource extends JsonResource
         }
         if (!is_array($images)) $images = [];
 
+        $group = null;
+        $gid = $this->getAttribute('event_group_id');
+        $dates = $this->getAttribute('group_dates');
+        if (is_numeric($gid) && (int) $gid > 0 && is_array($dates) && count($dates) > 1) {
+            $group = [
+                'id'    => (int) $gid,
+                'count' => (int) ($this->getAttribute('group_count') ?? count($dates)),
+                'dates' => array_values(array_filter($dates, fn($d) => is_array($d) && isset($d['id']))),
+            ];
+        }
+
         return [
             'id'             => (int) $this->id,
             'title'          => (string) ($this->title ?? ''),
@@ -55,9 +66,12 @@ class WebEventResource extends JsonResource
             'price_url'      => $this->price_url !== null ? (string) $this->price_url : null,
 
             'free'           => ($this->price_status === 'free')
-                || ((int)($this->price_min ?? -1) === 0 && $this->price_max === null),
+                || ((int) ($this->price_min ?? -1) === 0 && $this->price_max === null),
 
             'is_past' => (bool) ($this->getAttribute('__is_past') ?? false),
+
+            // grouped=1: если элемент — представитель группы, тут будет список дат
+            'group' => $group,
         ];
     }
 }

@@ -33,6 +33,8 @@ class EventsController extends Controller
             'when'         => ['sometimes', Rule::in(['today','now','weekend'])],
             'free'         => ['sometimes','boolean'],
 
+            'grouped'      => ['sometimes','boolean'],
+
             // alias для “Для детей” (временно маппим в q)
             'kids'         => ['sometimes','boolean'],
 

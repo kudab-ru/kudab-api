@@ -7,6 +7,7 @@ use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Carbon\CarbonImmutable;
 
 class EventRepository
 {
@@ -225,6 +226,10 @@ class EventRepository
 
     public function paginateUpcomingWeb(array $filters, int $perPage = 20): LengthAwarePaginator
     {
+        $grouped = array_key_exists('grouped', $filters)
+            ? (filter_var($filters['grouped'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) === true)
+            : false;
+
         $nowMsk = now('Europe/Moscow');
         $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
         $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
@@ -477,14 +482,14 @@ class EventRepository
 
         if (empty($filters['sort']) && $fuzzyOn && $like !== null && $token !== null) {
             $isLikeExpr = "CASE WHEN (
-                public.ru_normalize(events.title) LIKE ?
-                OR public.ru_normalize(cm.name) LIKE ?
-            ) THEN 0 ELSE 1 END";
+            public.ru_normalize(events.title) LIKE ?
+            OR public.ru_normalize(cm.name) LIKE ?
+        ) THEN 0 ELSE 1 END";
 
             $scoreExpr = "GREATEST(
-                word_similarity(?, public.ru_normalize(events.title)),
-                word_similarity(?, public.ru_normalize(cm.name))
-            )";
+            word_similarity(?, public.ru_normalize(events.title)),
+            word_similarity(?, public.ru_normalize(cm.name))
+        )";
 
             $q->selectRaw("$isLikeExpr as __like_rank", [$like, $like]);
             $q->selectRaw("$scoreExpr as __score", [$token, $token]);
@@ -506,13 +511,88 @@ class EventRepository
                 ->orderBy('events.id', 'asc');
         }
 
+        if ($grouped) {
+            $orders = $q->getQuery()->orders ?? [];
+            if (!$orders) {
+                // fallback (на всякий случай)
+                $orders = [
+                    ['column' => '__past_rank', 'direction' => 'asc'],
+                    ['column' => '__img_rank', 'direction' => 'asc'],
+                    ['column' => '__gray_rank', 'direction' => 'asc'],
+                    ['sql' => "events.start_date asc nulls last"],
+                    ['sql' => "events.start_time asc nulls last"],
+                    ['column' => 'events.id', 'direction' => 'asc'],
+                ];
+            }
+
+            $finalOrder  = $this->ordersToSql($orders, 'events');
+
+            $base = clone $q;
+            $base->reorder(); // сортировка нужна только в window function / финальном order
+
+            // Выбор представителя группы:
+            // - если в группе есть будущее/текущее → ближайшее будущее
+            // - иначе → самая свежая прошедшая
+            // (так не будет ситуации, когда у прошедшей группы показывается самая ранняя дата)
+            $annot = DB::query()
+                ->fromSub($base->toBase(), 'b')
+                ->select('b.*')
+                ->selectRaw("
+                    COALESCE(
+                      b.start_time,
+                      ((b.start_date::timestamp AT TIME ZONE 'Europe/Moscow') + interval '12 hour')
+                    ) as __grp_start_ts
+                ")
+                ->selectRaw("
+                    CASE WHEN (
+                      (b.start_time IS NOT NULL AND b.start_time >= (now() - interval '1 hour'))
+                      OR
+                      (b.start_time IS NULL AND b.start_date IS NOT NULL AND b.start_date >= (now() AT TIME ZONE 'Europe/Moscow')::date)
+                    ) THEN 0 ELSE 1 END as __grp_future_rank
+                ");
+
+            $ranked = DB::query()
+                ->fromSub($annot, 'b2')
+                ->select('b2.*')
+                ->selectRaw("
+                    row_number() over (
+                      partition by COALESCE(b2.event_group_id, -b2.id)
+                      order by
+                        b2.__grp_future_rank asc,
+                        case when b2.__grp_future_rank = 0 then b2.__grp_start_ts end asc nulls last,
+                        case when b2.__grp_future_rank = 1 then b2.__grp_start_ts end desc nulls last,
+                        b2.id asc
+                    ) as __grp_rn
+                ");
+
+            $q = Event::query()
+                ->fromSub($ranked, 'events')
+                ->where('__grp_rn', 1)
+                ->orderByRaw($finalOrder);
+        }
+
         $paginator = $q->paginate($perPage);
         $events = $paginator->getCollection();
         $this->hydrateImages($events);
 
         $events->each(function (Event $e) {
-            $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
+            $e->makeHidden([
+                '__past_rank',
+                '__is_past',
+                '__gray_rank',
+                '__img_rank',
+                '__like_rank',
+                '__score',
+                '__unknown_last',
+                '__grp_rn',
+                '__grp_start_ts',
+                '__grp_future_rank',
+            ]);
         });
+
+        if ($grouped) {
+            $this->hydrateGroupDates($events);
+        }
 
         return $paginator->setCollection($events);
     }
@@ -841,5 +921,104 @@ class EventRepository
             )
         )
     ");
+    }
+
+    /**
+     * Convert Laravel "orders" array into SQL list suitable for:
+     * - window function ORDER BY
+     * - final ORDER BY on a fromSub() aliased table
+     */
+    private function ordersToSql(array $orders, string $alias): string
+    {
+        $out = [];
+
+        foreach ($orders as $o) {
+            if (isset($o['sql'])) {
+                $sql = (string) $o['sql'];
+                // swap known table aliases to our subquery alias
+                $sql = preg_replace('/\bevents\./', $alias.'.', $sql);
+                $sql = preg_replace('/\bct\./', $alias.'.', $sql);
+                $sql = preg_replace('/\bcm\./', $alias.'.', $sql);
+                $out[] = $sql;
+                continue;
+            }
+
+            $col = (string) ($o['column'] ?? '');
+            if ($col === '') continue;
+
+            $dir = strtolower((string) ($o['direction'] ?? 'asc'));
+            $dir = $dir === 'desc' ? 'desc' : 'asc';
+
+            if (str_contains($col, '.')) {
+                $col = preg_replace('/^\w+\./', $alias.'.', $col);
+            } else {
+                $col = $alias.'.'.$col;
+            }
+
+            $out[] = "{$col} {$dir}";
+        }
+
+        return implode(', ', $out);
+    }
+
+    /**
+     * Attach group dates to events (one extra query per page, no N+1).
+     * Result is stored as attributes:
+     * - group_dates: [{id,start_at,start_date,time_precision,time_text}, ...]
+     * - group_count: int
+     */
+    private function hydrateGroupDates(EloquentCollection $events): void
+    {
+        if ($events->isEmpty()) return;
+
+        $groupIds = $events->pluck('event_group_id')
+            ->filter(fn($v) => is_numeric($v) && (int)$v > 0)
+            ->map(fn($v) => (int)$v)
+            ->unique()
+            ->values()
+            ->all();
+
+        if (!$groupIds) return;
+
+        $rows = DB::table('events')
+            ->select(['id', 'event_group_id', 'start_time', 'start_date', 'time_precision', 'time_text'])
+            ->whereNull('deleted_at')
+            ->whereIn('event_group_id', $groupIds)
+            ->orderBy('event_group_id', 'asc')
+            ->orderByRaw('start_date asc nulls last')
+            ->orderByRaw('start_time asc nulls last')
+            ->orderBy('id', 'asc')
+            ->get();
+
+        $map = [];
+        foreach ($rows as $r) {
+            $gid = (int) $r->event_group_id;
+            if (!$gid) continue;
+
+            $startAt = null;
+            if (!empty($r->start_time)) {
+                try {
+                    $startAt = CarbonImmutable::parse($r->start_time)->toISOString();
+                } catch (\Throwable $e) {
+                    $startAt = null;
+                }
+            }
+
+            $map[$gid][] = [
+                'id'             => (int) $r->id,
+                'start_at'       => $startAt,
+                'start_date'     => $r->start_date ? substr((string) $r->start_date, 0, 10) : null,
+                'time_precision' => (string) ($r->time_precision ?? 'datetime'),
+                'time_text'      => $r->time_text !== null ? (string) $r->time_text : null,
+            ];
+        }
+
+        $events->each(function (Event $e) use ($map) {
+            $gid = (int) ($e->event_group_id ?? 0);
+            if ($gid > 0 && isset($map[$gid])) {
+                $e->setAttribute('group_dates', $map[$gid]);
+                $e->setAttribute('group_count', count($map[$gid]));
+            }
+        });
     }
 }
