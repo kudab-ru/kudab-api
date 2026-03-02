@@ -611,14 +611,11 @@ class EventRepository
             $annot = DB::query()
                 ->fromSub($base->toBase(), 'b')
                 ->select('b.*')
-                ->selectRaw("
-                    (
-                      SELECT g.current_event_id
-                      FROM event_groups g
-                      WHERE g.id = b.event_group_id
-                        AND g.deleted_at IS NULL
-                    ) as __grp_current_event_id
-                ")
+                ->leftJoin('event_groups as eg', function ($j) {
+                    $j->on('eg.id', '=', 'b.event_group_id')
+                        ->whereNull('eg.deleted_at');
+                })
+                ->selectRaw("eg.current_event_id as __grp_current_event_id")
                 ->selectRaw("
                     COALESCE(
                       b.start_time,
