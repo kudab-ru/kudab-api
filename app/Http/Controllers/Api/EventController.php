@@ -84,7 +84,6 @@ class EventController extends Controller
         $validated = $request->validate([
             'page'         => ['sometimes','integer','min:1'],
             'per_page'     => ['sometimes','integer','min:1','max:50'],
-            // city — это slug
             'city'         => ['sometimes','string','max:64','regex:/^[a-z0-9-]+$/'],
             'date_from'    => ['sometimes','date'],
             'date_to'      => ['sometimes','date'],
@@ -92,6 +91,7 @@ class EventController extends Controller
             'community_id' => ['sometimes','integer'],
             'interests'    => ['sometimes','array'],
             'interests.*'  => ['integer'],
+            'only_actual'  => ['sometimes', 'boolean'],
         ]);
 
         $pageNum  = (int) ($validated['page'] ?? 1);

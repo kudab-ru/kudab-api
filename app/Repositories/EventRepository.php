@@ -185,6 +185,14 @@ class EventRepository
 
         $this->excludeBlacklistedSources($q);
 
+        $onlyActual = array_key_exists('only_actual', $filters)
+            ? (filter_var($filters['only_actual'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) === true)
+            : false;
+
+        if ($onlyActual) {
+            $this->applyOnlyActual($q);
+        }
+
         // приоритет: past -> image -> gray
         $q->orderBy('__past_rank', 'asc')
             ->orderBy('__img_rank', 'asc')
@@ -264,14 +272,14 @@ class EventRepository
 
             if (empty($filters['sort']) && $fuzzyOn) {
                 $isLikeExpr = "CASE WHEN (
-                    public.ru_normalize(events.title) LIKE ?
-                    OR public.ru_normalize(cm.name) LIKE ?
-                ) THEN 0 ELSE 1 END";
+                public.ru_normalize(events.title) LIKE ?
+                OR public.ru_normalize(cm.name) LIKE ?
+            ) THEN 0 ELSE 1 END";
 
                 $scoreExpr = "GREATEST(
-                    word_similarity(?, public.ru_normalize(events.title)),
-                    word_similarity(?, public.ru_normalize(cm.name))
-                )";
+                word_similarity(?, public.ru_normalize(events.title)),
+                word_similarity(?, public.ru_normalize(cm.name))
+            )";
 
                 $q->selectRaw("$isLikeExpr as __like_rank", [$like, $like]);
                 $q->selectRaw("$scoreExpr as __score", [$token, $token]);
@@ -1127,6 +1135,22 @@ class EventRepository
                 $e->setAttribute('group_dates', $map[$gid]); // уже лимитировано
                 $e->setAttribute('group_count', (int) ($cntMap[$gid] ?? count($map[$gid])));
             }
+        });
+    }
+
+    private function applyOnlyActual($q): void
+    {
+        $nowMsk = now('Europe/Moscow');
+        $todayMsk = $nowMsk->toDateString();
+        $cutoffTs = $nowMsk->copy()->subHours(self::PAST_GRACE_HOURS);
+
+        $q->where(function ($w) use ($cutoffTs, $todayMsk) {
+            $w->where('events.start_time', '>=', $cutoffTs)
+                ->orWhere(function ($x) use ($todayMsk) {
+                    $x->whereNull('events.start_time')
+                        ->whereNotNull('events.start_date')
+                        ->where('events.start_date', '>=', $todayMsk);
+                });
         });
     }
 }
