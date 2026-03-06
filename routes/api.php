@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\Admin\AdminSelectController;
 use App\Http\Controllers\Api\CityController;
 use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Api\Web\CitiesController;
+use App\Http\Controllers\Api\Web\TelegramResolveController;
 use App\Http\Controllers\Api\Web\WebSitemapController;
 use App\Http\Controllers\Bot\RoleController;
 use App\Http\Controllers\Bot\TelegramChatBroadcastController;
@@ -59,8 +60,8 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('events/{id}', [WebEventsController::class, 'show'])->whereNumber('id');
 
     Route::get('cities', [CitiesController::class, 'index']);
+    Route::get('telegram/resolve', [TelegramResolveController::class, 'show']);
 
-    // TEMP (для /organizers STATUS): проксируем админ-контроллер
     Route::post('communities/import', [AdminCommunitiesController::class, 'import']);
     Route::get('communities/{id}', [AdminCommunitiesController::class, 'show'])->whereNumber('id');
     Route::post('communities/{id}/verify', [AdminCommunitiesController::class, 'verify'])->whereNumber('id');

@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class City extends Model
 {
@@ -14,6 +15,11 @@ class City extends Model
         'latitude'  => 'float',
         'longitude' => 'float',
     ];
+
+    public function telegramChannel(): HasOne
+    {
+        return $this->hasOne(TelegramCityChannel::class, 'city_id');
+    }
 
     /** Связи */
     public function communities(): HasMany
