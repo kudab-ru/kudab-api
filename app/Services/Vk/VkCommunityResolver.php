@@ -135,7 +135,6 @@ class VkCommunityResolver
             return $response['groups'][0];
         }
 
-        // На всякий: если вдруг VK вернул одну группу плоско
         if (is_array($response) && isset($response['id'])) {
             return $response;
         }
@@ -190,7 +189,6 @@ class VkCommunityResolver
             }
         }
 
-        // 2) fallback: photo_max / photo_400_orig (иногда cover не отдают)
         $fallback = [
             $group['photo_max'] ?? null,
             $group['photo_400_orig'] ?? null,

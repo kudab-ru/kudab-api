@@ -61,7 +61,7 @@ class SyncInterestsFromCsv extends Command
 
             if (!$model) {
                 $model = new Interest();
-                $model->slug = $slugCsv ?: $this->norm($nameCsv); //fallback, чтобы пройти уникальный индекс
+                $model->slug = $slugCsv ?: $this->norm($nameCsv); // slug по имени, если в CSV он пустой
                 $model->name = $nameCsv;
                 $model->save();
                 $created++;

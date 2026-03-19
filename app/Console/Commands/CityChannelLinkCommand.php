@@ -65,7 +65,7 @@ class CityChannelLinkCommand extends Command
             $existing->is_default = false;
             $existing->save();
 
-            $this->info('✅ Привязка выключена.');
+            $this->info('Привязка выключена.');
             return self::SUCCESS;
         }
 
@@ -114,7 +114,7 @@ class CityChannelLinkCommand extends Command
             ->first();
 
         $this->info(
-            "✅ Сохранено: city={$city->slug}, url={$saved?->telegram_url}, username=" . ($saved?->telegram_username ?: '-')
+            "Сохранено: city={$city->slug}, url={$saved?->telegram_url}, username=" . ($saved?->telegram_username ?: '-')
             . ', active=' . ((int) (bool) $saved?->is_active)
             . ', default=' . ((int) (bool) $saved?->is_default)
         );

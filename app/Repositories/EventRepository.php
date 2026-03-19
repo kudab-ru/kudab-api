@@ -138,7 +138,6 @@ class EventRepository
         $this->addImgRank($q);
         $this->excludeBlacklistedSources($q);
 
-        // Для карусели логичнее хронологически (asc)
         $q->orderByRaw('events.start_date asc nulls last')
             ->orderByRaw('events.start_time asc nulls last')
             ->orderBy('events.id', 'asc')
@@ -147,7 +146,6 @@ class EventRepository
         $items = $q->get();
         $this->hydrateImages($items);
 
-        // идеально чисто: только то, что реально добавляли в этом запросе
         $items->each(function (Event $e) {
             $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank']);
         });
@@ -604,16 +602,11 @@ class EventRepository
         }
 
         if ($grouped) {
-            // 1 элемент на группу (stable representative):
-            // - если current_event_id задан → он главный
-            // - иначе fallback: ближайшее будущее, иначе последний прошедший (в рамках текущего окна)
             $base = clone $q;
 
-            // важно: сортировка текущего запроса не должна влиять на row_number()
             try {
                 $base->reorder();
             } catch (\Throwable $e) {
-                // если вдруг Builder без reorder() — ничего страшного
             }
 
             $annot = DB::query()
@@ -646,7 +639,6 @@ class EventRepository
                     row_number() over (
                       partition by COALESCE(b2.event_group_id, -b2.id)
                       order by
-                        -- ✅ если current_event_id задан — он главный
                         CASE
                           WHEN b2.__grp_current_event_id IS NOT NULL
                            AND b2.id = b2.__grp_current_event_id
@@ -1017,7 +1009,6 @@ class EventRepository
     }
 
     /**
-     * Attach group dates to events (one extra query per page, no N+1).
      * Result is stored as attributes:
      * - group_dates: [{id,start_at,start_date,time_precision,time_text}, ...]
      * - group_count: int (реальный размер группы по “видимым” событиям)
@@ -1042,7 +1033,6 @@ class EventRepository
         $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
         $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
 
-        // ВАЖНО: те же фильтры, что у /web/event-groups/{id}
         $q = DB::table('events as e')
             ->join('event_groups as eg', 'eg.id', '=', 'e.event_group_id')
             ->join('cities as ct', 'ct.id', '=', 'e.city_id')
@@ -1100,7 +1090,6 @@ class EventRepository
 
             $grpCount = (int) ($r->__grp_count ?? 0);
 
-            // ✅ одиночки не считаем группой (и не отдаём в API вообще)
             if ($grpCount < 2) continue;
 
             $cntMap[$gid] = $grpCount;

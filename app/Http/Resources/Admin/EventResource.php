@@ -12,7 +12,6 @@ class EventResource extends JsonResource
 {
     public function toArray(Request $request): array
     {
-        // ВАЖНО:
         // У Event может быть колонка `city` (строка), которая конфликтует с relation `city()`.
         // Поэтому отношения читаем только через getRelation(), НЕ через $this->city.
 

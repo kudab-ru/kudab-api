@@ -33,7 +33,6 @@ class WebEventResource extends JsonResource
         if ($gid > 0) {
             $dates = $this->getAttribute('group_dates');
 
-            // на всякий: если вдруг прилетело строкой
             if (is_string($dates)) {
                 $decoded = json_decode($dates, true);
                 $dates = is_array($decoded) ? $decoded : null;

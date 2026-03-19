@@ -64,7 +64,6 @@ class TelegramChatBroadcastController extends Controller
                 'error' => $e->getMessage(),
             ]);
         } catch (Throwable $e) {
-            // что-то пошло совсем не так — логируем и отдаём общую ошибку
             report($e);
 
             return response()->json([
@@ -230,7 +229,6 @@ class TelegramChatBroadcastController extends Controller
         }
 
         try {
-            // 👉 вся бизнес-логика — в сервисе
             $eventId = $this->broadcastService->pickSingleEventId(
                 telegramId: $telegramId,
                 telegramChatId: $telegramChatId,

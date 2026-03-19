@@ -16,7 +16,6 @@ class TelegramChatBroadcastRepository implements TelegramChatBroadcastRepository
             // period не 'off' и не пустой — на уровне PHP можно ещё раз проверить,
             // но тут хоть что-то отфильтруем
             ->whereNotNull('settings')
-            ->with(['chat.owner']) // ВАЖНО: owner должен существовать
             ->get();
     }
 

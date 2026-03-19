@@ -35,7 +35,6 @@ class EventsController extends Controller
 
             'grouped'      => ['sometimes','boolean'],
 
-            // alias для “Для детей” (временно маппим в q)
             'kids'         => ['sometimes','boolean'],
 
             'q'            => ['sometimes','string','max:255'],
@@ -59,7 +58,6 @@ class EventsController extends Controller
 
         unset($v['page'], $v['per_page']);
 
-        // нормализуем price range (на всякий случай)
         if (isset($v['price_min'], $v['price_max'])) {
             $a = (int) $v['price_min'];
             $b = (int) $v['price_max'];
@@ -92,7 +90,6 @@ class EventsController extends Controller
 
         unset($v['when']);
 
-        // kids=1 -> если q пустой, подставляем “дет” (быстро, но URL остаётся чистым)
         $kids = !empty($v['kids']);
         unset($v['kids']);
         if ($kids) {

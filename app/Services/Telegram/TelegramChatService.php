@@ -83,7 +83,6 @@ class TelegramChatService
         $chats = $this->chatRepository->getByTelegramChatId($telegramChatId, true);
 
         if ($chats->isEmpty()) {
-            // ВАЖНО: вернуть ту же Eloquent-коллекцию, а не новую collect()
             return $chats;
         }
 

@@ -16,7 +16,6 @@ return new class extends Migration
             $table->string('prompt_version', 32)->nullable()->index();
         });
 
-        // Проверка дублей (на всякий, если кто-то уже руками добавлял)
         $dupe = DB::selectOne("
             select context_post_id, task, prompt_version, count(*) as cnt
             from llm_jobs

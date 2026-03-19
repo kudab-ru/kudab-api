@@ -70,12 +70,10 @@ class AdminEventsController extends Controller
         if (!empty($validated['interests']) && is_array($validated['interests'])) {
             $interestIds = array_values(array_filter(array_map('intval', $validated['interests'])));
             if ($interestIds) {
-                // ANY: событие подходит, если есть хотя бы один interest из списка
                 $eventsQuery->whereHas('interests', fn ($q) => $q->whereIn('interests.id', $interestIds));
             }
         }
 
-        // ВАЖНО: фильтр применяем только когда free === true
         if (($validated['free'] ?? false) === true) {
             $eventsQuery->where(function ($where) {
                 $where->where('price_status', 'free')
@@ -176,7 +174,6 @@ class AdminEventsController extends Controller
         $event = new Event();
         $event->fill($data);
 
-        // На случай, если каких-то полей нет в fillable — проставим явно (без фанатизма, только важное)
         foreach ([
                      'community_id','city_id',
                      'start_time','end_time','start_date',

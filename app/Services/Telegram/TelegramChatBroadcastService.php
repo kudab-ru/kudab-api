@@ -213,7 +213,6 @@ class TelegramChatBroadcastService
             $query->whereNotIn('id', $excludeEventIds);
         }
 
-        // 🔍 Фильтр по городу: через поле events.city
         if ($cityName) {
             $query->whereRaw('LOWER(city) = LOWER(?)', [$cityName]);
             // либо попроще:

@@ -78,7 +78,7 @@ class BotSuperAdmin extends Command
         $telegramUser = $this->findTelegramUser($searchBy, $tgId, $tgUsername);
 
         if (! $telegramUser) {
-            $this->warn('🔍 TelegramUser не найден в базе.');
+            $this->warn('TelegramUser не найден в базе.');
             $this->line('Искали по ' . ($searchBy === 'id'
                     ? "telegram_id = {$tgId}"
                     : "telegram_username = @{$tgUsername}"
@@ -87,7 +87,7 @@ class BotSuperAdmin extends Command
             return self::SUCCESS;
         }
 
-        $this->info('✅ Найден TelegramUser:');
+        $this->info('Найден TelegramUser:');
         $foundTgId = data_get($telegramUser, 'telegram_id');
         $foundUsername = data_get($telegramUser, 'telegram_username');
 
@@ -154,7 +154,7 @@ class BotSuperAdmin extends Command
 
                     $telegramUser->user()->associate($user);
                     $telegramUser->save();
-                    $this->line('✅ Привязали TelegramUser к User ID ' . $user->getKey() . '.');
+                    $this->line('Привязали TelegramUser к User ID ' . $user->getKey() . '.');
                 }
             } else {
                 $this->line('ℹ️ TelegramUser не найден. Создаём web-пользователя и (при наличии ID) TelegramUser.');
@@ -170,7 +170,7 @@ class BotSuperAdmin extends Command
                     $telegramUser = $this->createTelegramUser($user, $tgId, $tgUsername);
                     $createdTelegramUser = true;
 
-                    $this->line('✅ Создан TelegramUser ID записи ' . $telegramUser->getKey() . ' и привязан к User.');
+                    $this->line('Создан TelegramUser ID записи ' . $telegramUser->getKey() . ' и привязан к User.');
                 } else {
                     $telegramUser = null;
                     $this->warn('⚠️ Telegram ID не передан, создали только User без TelegramUser.');

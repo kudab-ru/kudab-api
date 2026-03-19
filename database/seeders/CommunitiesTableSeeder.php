@@ -42,7 +42,6 @@ class CommunitiesTableSeeder extends Seeder
                 'house' => null,
                 'avatar_url' => null,
                 'image_url' => null,
-                // важно: НЕ ставим last_checked_at сейчас, иначе джоба может считать “уже проверяли”
                 'last_checked_at' => null,
                 'verification_status' => 'approved',
                 'is_verified' => true,

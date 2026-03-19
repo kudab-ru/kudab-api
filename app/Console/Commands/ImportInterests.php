@@ -38,7 +38,6 @@ class ImportInterests extends Command
             if ($slug === '' || $name === '') continue;
 
             $interest = Interest::firstOrNew(['slug' => $slug]);
-            $interest->slug = $slug; // важно: явно проставить
             $interest->name = $name;
 
             if ($hasDescription) {
