@@ -4,7 +4,7 @@
 
 ## Стек
 
-PHP 8.3, Laravel 12, PostgreSQL, Redis, Docker
+PHP 8.2, Laravel 12, PostgreSQL, Redis, Docker
 
 ## Возможности
 
