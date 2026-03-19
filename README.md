@@ -40,7 +40,7 @@ docker-compose exec api php artisan migrate --seed
 ## Тесты
 
 ```bash
-docker-compose exec api php artisan test
+docker-compose exec kudab-api php artisan test
 ```
 
 Покрыты: валидация данных событий, фильтрация и поиск, ранжирование, API-эндпоинты.
