@@ -17,6 +17,7 @@ class DatabaseSeeder extends Seeder
         $seeders = [
             SocialNetworksTableSeeder::class,
             RolesSeeder::class,
+            AdminUserSeeder::class,
             TelegramMessageTemplatesSeeder::class,
             CitiesSeeder::class,
             CommunitiesTableSeeder::class,

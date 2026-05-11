@@ -20,11 +20,33 @@ Route::get('/ping', function () {
     ]);
 });
 
+use App\Http\Controllers\Api\Admin\AdminAuthController;
 use App\Http\Controllers\Api\Admin\AdminCommunitiesController;
+use App\Http\Controllers\Api\Admin\AdminCommunityLinksController;
+use App\Http\Controllers\Api\Admin\AdminDashboardController;
 use App\Http\Controllers\Api\Admin\AdminEventsController;
+use App\Http\Controllers\Api\Admin\AdminParsingStatusController;
+
+// Публичные admin endpoint'ы (логин), throttle от brute-force.
+// Внутренний RateLimiter в AdminAuthController:: login() — точечно на email+ip.
+Route::prefix('admin/auth')
+    ->middleware(['throttle:10,1'])
+    ->group(function () {
+        Route::post('login', [AdminAuthController::class, 'login']);
+    });
+
+// Авторизованные admin endpoint'ы для auth-сессии (без role-check —
+// логаут и me должны быть доступны любому залогиненному, например
+// будущему organizer'у).
+Route::prefix('admin/auth')
+    ->middleware(['auth:sanctum'])
+    ->group(function () {
+        Route::post('logout', [AdminAuthController::class, 'logout']);
+        Route::get('me', [AdminAuthController::class, 'me']);
+    });
 
 Route::prefix('admin')
-//    ->middleware(['auth:sanctum', 'role:admin|superadmin'])
+    ->middleware(['auth:sanctum', 'role:admin|superadmin'])
     ->group(function () {
         Route::get('select/cities', [AdminSelectController::class, 'cities']);
         Route::get('select/communities', [AdminSelectController::class, 'communities']);
@@ -49,6 +71,16 @@ Route::prefix('admin')
         Route::patch('/events/{id}', [AdminEventsController::class, 'update']);
         Route::delete('/events/{id}', [AdminEventsController::class, 'destroy']);
         Route::post('/events/{id}/restore', [AdminEventsController::class, 'restore']);
+
+        // community-social-links (статус active|gray|black, аналог make link-ban/unban/gray)
+        Route::patch('/community-links/{id}/status', [AdminCommunityLinksController::class, 'updateStatus']);
+
+        // parsing-status (мониторинг frozen-источников + ручная разморозка)
+        Route::get('/parsing-status', [AdminParsingStatusController::class, 'index']);
+        Route::post('/parsing-status/{linkId}/unfreeze', [AdminParsingStatusController::class, 'unfreeze']);
+
+        // dashboard
+        Route::get('/dashboard/stats', [AdminDashboardController::class, 'stats']);
     });
 
 Route::prefix('web')->middleware(['throttle:web'])->group(function () {
