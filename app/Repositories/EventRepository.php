@@ -686,7 +686,19 @@ class EventRepository
         // на которые юзер может перейти (с axis A уже схлопнутыми по
         // event_group_id, потому что разные даты одного события = тот же
         // event detail). `meta.total` остаётся rep-count для пагинации.
-        $uncollapsedQ = $groupedByPost ? (clone $q) : null;
+        //
+        // §13p: snapshot НЕ должен включать past events — иначе
+        // total_events и pool siblings'ов содержат уже прошедшие даты,
+        // которые на UI не показываются (rep кластера выбирается future-
+        // first, past siblings отбрасываются в hydrateSiblings).
+        // Применяем applyOnlyActual к snapshot'у, но НЕ к основному $q
+        // (который продолжает показывать past карточки в архивной части
+        // ленты, отсортированные через __past_rank).
+        $uncollapsedQ = null;
+        if ($groupedByPost) {
+            $uncollapsedQ = clone $q;
+            $this->applyOnlyActual($uncollapsedQ);
+        }
 
         if ($groupedByPost) {
             $base = clone $q;
@@ -750,8 +762,16 @@ class EventRepository
                 ->where('ct.canon_rn', 1);
 
             // Step 5: partition by cluster_key (если в кластере ≥2) или
-            // 'solo|<event_id>' (иначе). Rank: earliest start_at внутри
-            // кластера / уникален для solo. rn=1 — rep или solo event.
+            // 'solo|<event_id>' (иначе). Rank: future-first → earliest
+            // start_at. rn=1 — rep кластера (или solo event).
+            //
+            // future-first (TASKS.md §13p): если в кластере есть хотя бы
+            // одно будущее событие — оно становится rep'ом, кластер
+            // остаётся в актуальной ленте. Если все события past —
+            // earliest past, как раньше (кластер уходит в архив целиком,
+            // что корректно). Это исправляет баг «весь кластер уезжает
+            // в past из-за одного past sibling».
+            $graceHours = (int) self::PAST_GRACE_HOURS;
             $ranked = DB::query()
                 ->fromSub($canon, 'c')
                 ->selectRaw("
@@ -763,6 +783,10 @@ class EventRepository
                                 ELSE 'solo|' || c.event_id::text
                             END
                         ORDER BY
+                            CASE WHEN (
+                                (c.start_time IS NOT NULL AND c.start_time < (now() - interval '{$graceHours} hours'))
+                                OR (c.start_time IS NULL AND c.start_date IS NOT NULL AND c.start_date < (now() AT TIME ZONE 'Europe/Moscow')::date)
+                            ) THEN 1 ELSE 0 END ASC,
                             COALESCE(
                                 c.start_time,
                                 (c.start_date AT TIME ZONE 'Europe/Moscow')::timestamp
@@ -1582,7 +1606,13 @@ class EventRepository
             $repToClusterKeys[$rid][] = $key;
         }
 
-        $events->each(function (Event $e) use ($repToClusterKeys, $clusterMap, $MAX_SIBLINGS) {
+        // Cutoff'ы для фильтрации past siblings — те же, что в applyOnlyActual
+        // / addPastFlags, чтобы поведение карусели и счётчика на главной
+        // совпадало с критериями «актуальности» (TASKS.md §13p).
+        $cutoffTs = now('Europe/Moscow')->copy()->subHours(self::PAST_GRACE_HOURS);
+        $todayMsk = now('Europe/Moscow')->toDateString();
+
+        $events->each(function (Event $e) use ($repToClusterKeys, $clusterMap, $MAX_SIBLINGS, $cutoffTs, $todayMsk) {
             $rid = (int) $e->id;
             $keys = $repToClusterKeys[$rid] ?? [];
             if (!$keys) return;
@@ -1602,6 +1632,13 @@ class EventRepository
             $siblings = [];
             foreach ($clusterMap[$bestKey] as $r) {
                 if ((int) $r->id === $rid) continue; // self — представитель
+
+                // §13p: отбрасываем уже прошедшие siblings — в карусели
+                // «другие даты этого события» прошлые даты бесполезны.
+                // Семантика: если у rep'а есть future-siblings, кластер
+                // в актуальной ленте; past-даты этого же поста просто не
+                // показываем.
+                if (!$this->siblingIsFuture($r, $cutoffTs, $todayMsk)) continue;
 
                 $startAt = null;
                 if (!empty($r->start_time)) {
@@ -1653,5 +1690,26 @@ class EventRepository
                         ->where('events.start_date', '>=', $todayMsk);
                 });
         });
+    }
+
+    /**
+     * Sibling-строка — будущая (по тем же критериям, что applyOnlyActual)?
+     * Используется в hydrateSiblings для отбрасывания past дат из карусели
+     * (TASKS.md §13p).
+     */
+    private function siblingIsFuture(object $r, \Carbon\CarbonInterface $cutoffTs, string $todayMsk): bool
+    {
+        if (!empty($r->start_time)) {
+            try {
+                return CarbonImmutable::parse($r->start_time)->greaterThanOrEqualTo($cutoffTs);
+            } catch (\Throwable $ex) {
+                return true; // невалидный TS — оставим, не выкидываем
+            }
+        }
+        if (!empty($r->start_date)) {
+            $d = substr((string) $r->start_date, 0, 10);
+            return $d >= $todayMsk;
+        }
+        return true; // нет даты — не выкидываем (странный кейс, оставим решать выше)
     }
 }

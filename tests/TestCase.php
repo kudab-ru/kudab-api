@@ -28,8 +28,32 @@ abstract class TestCase extends BaseTestCase
      */
     protected function setUp(): void
     {
-        $this->assertTestDatabase();
+        // Pre-boot env check: проверяем DB_DATABASE до bootstrap'а
+        // Application — иначе RefreshDatabase в parent::setUp() уже
+        // успеет сделать migrate:fresh на dev-БД.
+        $this->assertTestDatabaseViaEnv();
         parent::setUp();
+        // Post-boot sanity check: после загрузки фасадов проверяем
+        // реальное имя БД (на случай rebind connection в bootstrap'е).
+        $this->assertTestDatabase();
+    }
+
+    private function assertTestDatabaseViaEnv(): void
+    {
+        $name = $_ENV['DB_DATABASE'] ?? getenv('DB_DATABASE') ?: '';
+        if ($this->dbNameIsTest((string) $name)) return;
+
+        $msg = "SafetyGuard (pre-boot): DB_DATABASE='{$name}' не похоже на test-БД."
+            . " Запускайте через `make test` / `make test-filter` (они загружают .env.testing"
+            . " с DB_DATABASE=kudab_test). Не выполнять `artisan test` напрямую без --env=testing.";
+        fwrite(STDERR, $msg . PHP_EOL);
+        throw new \RuntimeException($msg);
+    }
+
+    private function dbNameIsTest(string $n): bool
+    {
+        if ($n === '' || $n === ':memory:') return true;
+        return str_contains(strtolower($n), 'test');
     }
 
     private function assertTestDatabase(): void
@@ -37,17 +61,7 @@ abstract class TestCase extends BaseTestCase
         $connection = DB::connection();
         $name = $connection->getDatabaseName();
 
-        // Допустимые имена test-БД:
-        //  - 'kudab_test'                 — стандарт make test (pgsql)
-        //  - ':memory:'                   — sqlite memory (если ENABLED)
-        //  - что-то с '_test' или 'test_' — общая практика
-        $allowed = function (string $n): bool {
-            if ($n === '' || $n === ':memory:') return true;
-            $lower = strtolower($n);
-            return str_contains($lower, 'test');
-        };
-
-        if ($allowed($name)) return;
+        if ($this->dbNameIsTest($name)) return;
 
         // НЕ-test БД. Аварийно прерываем со внятным сообщением.
         $env = (string) config('app.env');
