@@ -52,7 +52,14 @@ class WebEventResource extends JsonResource
             }
         }
 
-        return [
+        // siblings: ось B (kudab-parser/TASKS.md 2.3). Заполняется
+        // hydrateSiblings в репозитории при `grouped_by_post=1`. Включаем в
+        // payload только если массив непустой — иначе ключ опускаем (фронт
+        // ловит через Array.isArray && length>=1).
+        $siblings = $this->getAttribute('siblings');
+        $siblings = is_array($siblings) && count($siblings) > 0 ? $siblings : null;
+
+        $out = [
             'id'             => (int) $this->id,
             'title'          => (string) ($this->title ?? ''),
 
@@ -86,5 +93,11 @@ class WebEventResource extends JsonResource
 
             'group' => $group,
         ];
+
+        if ($siblings !== null) {
+            $out['siblings'] = $siblings;
+        }
+
+        return $out;
     }
 }

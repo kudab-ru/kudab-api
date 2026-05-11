@@ -314,10 +314,24 @@ class EventRepository
         return $paginator->setCollection($events);
     }
 
-    public function paginateUpcomingWeb(array $filters, int $perPage = 20): LengthAwarePaginator
+    /**
+     * @return array{page: LengthAwarePaginator, totalEvents: int|null}
+     *   - page: пагинатор reps (используется для hasMore-логики на фронте)
+     *   - totalEvents: количество events до схлопывания (для display-счётчика),
+     *     либо null если ни grouped, ни grouped_by_post не были запрошены
+     */
+    public function paginateUpcomingWeb(array $filters, int $perPage = 20): array
     {
         $grouped = array_key_exists('grouped', $filters)
             ? (filter_var($filters['grouped'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) === true)
+            : false;
+
+        // grouped_by_post: ось B группировки (kudab-parser/TASKS.md 2.3).
+        // Один пост в соцсети рождает несколько разных events — кластеризуем
+        // по event_sources(source, post_external_id), оставляем одного
+        // представителя на кластер, остальных отдаём в payload как siblings.
+        $groupedByPost = array_key_exists('grouped_by_post', $filters)
+            ? (filter_var($filters['grouped_by_post'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) === true)
             : false;
 
         $nowMsk = now('Europe/Moscow');
@@ -659,6 +673,112 @@ class EventRepository
             $q->whereIn('events.id', $repIds);
         }
 
+        // grouped_by_post: ось B. Кластеризуем filtered-events по
+        // event_sources(source, post_external_id). Кластер = ≥2 events на
+        // одну пару. Rep = earliest start_at в кластере. Соло-events (нет
+        // event_sources или кластер size=1) проходят через как обычно
+        // (partition by event_id, rn=1 всегда). Фильтры применяются
+        // ДО кластеризации — кластер собирается только из подходящих под
+        // фильтры events.
+
+        // Снимок $q ПОСЛЕ axis A (grouped), но ДО axis B (grouped_by_post) —
+        // используется для подсчёта `total_events`: реальное число events,
+        // на которые юзер может перейти (с axis A уже схлопнутыми по
+        // event_group_id, потому что разные даты одного события = тот же
+        // event detail). `meta.total` остаётся rep-count для пагинации.
+        $uncollapsedQ = $groupedByPost ? (clone $q) : null;
+
+        if ($groupedByPost) {
+            $base = clone $q;
+            try { $base->reorder(); } catch (\Throwable $e) {}
+
+            // Step 1: filtered events × LEFT JOIN event_sources
+            // (LEFT JOIN — чтобы соло-events без event_sources тоже попали)
+            $ep = DB::query()
+                ->fromSub(
+                    $base->toBase()->select('events.id as event_id', 'events.start_time', 'events.start_date'),
+                    'fe'
+                )
+                ->leftJoin('event_sources as es', 'es.event_id', '=', 'fe.event_id')
+                ->select([
+                    'fe.event_id',
+                    'fe.start_time',
+                    'fe.start_date',
+                    'es.source',
+                    'es.post_external_id',
+                ]);
+
+            // Step 2: cluster sizes (только для не-null пар)
+            $cs = DB::query()
+                ->fromSub($ep, 'cs_ep')
+                ->whereNotNull('cs_ep.source')
+                ->whereNotNull('cs_ep.post_external_id')
+                ->groupBy('cs_ep.source', 'cs_ep.post_external_id')
+                ->selectRaw('cs_ep.source, cs_ep.post_external_id, COUNT(DISTINCT cs_ep.event_id) AS cnt');
+
+            // Step 3: ep + cluster_cnt (0 если не в кластере или null pair)
+            $epSize = DB::query()
+                ->fromSub($ep, 'ep2')
+                ->leftJoinSub($cs, 'cs2', function ($j) {
+                    $j->on('cs2.source', '=', 'ep2.source')
+                        ->on('cs2.post_external_id', '=', 'ep2.post_external_id');
+                })
+                ->selectRaw("
+                    ep2.event_id, ep2.start_time, ep2.start_date,
+                    ep2.source, ep2.post_external_id,
+                    COALESCE(cs2.cnt, 0) AS cluster_cnt
+                ");
+
+            // Step 4: canonical cluster per event (max cnt wins для cross-post)
+            $canonTmp = DB::query()
+                ->fromSub($epSize, 'es3')
+                ->selectRaw("
+                    es3.event_id, es3.start_time, es3.start_date,
+                    es3.source, es3.post_external_id, es3.cluster_cnt,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY es3.event_id
+                        ORDER BY
+                            es3.cluster_cnt DESC NULLS LAST,
+                            es3.source ASC NULLS LAST,
+                            es3.post_external_id ASC NULLS LAST
+                    ) AS canon_rn
+                ");
+
+            $canon = DB::query()
+                ->fromSub($canonTmp, 'ct')
+                ->select(['ct.event_id', 'ct.start_time', 'ct.start_date', 'ct.source', 'ct.post_external_id', 'ct.cluster_cnt'])
+                ->where('ct.canon_rn', 1);
+
+            // Step 5: partition by cluster_key (если в кластере ≥2) или
+            // 'solo|<event_id>' (иначе). Rank: earliest start_at внутри
+            // кластера / уникален для solo. rn=1 — rep или solo event.
+            $ranked = DB::query()
+                ->fromSub($canon, 'c')
+                ->selectRaw("
+                    c.event_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            CASE
+                                WHEN c.cluster_cnt >= 2 THEN c.source || '|' || c.post_external_id
+                                ELSE 'solo|' || c.event_id::text
+                            END
+                        ORDER BY
+                            COALESCE(
+                                c.start_time,
+                                (c.start_date AT TIME ZONE 'Europe/Moscow')::timestamp
+                            ) ASC NULLS LAST,
+                            c.event_id ASC
+                    ) AS __post_rn
+                ");
+
+            $postRepIds = DB::query()
+                ->fromSub($ranked, 'r')
+                ->select('r.event_id')
+                ->where('r.__post_rn', 1);
+
+            $q->whereIn('events.id', $postRepIds);
+        }
+
         $paginator = $q->paginate($perPage);
         $events = $paginator->getCollection();
         $this->hydrateImages($events);
@@ -679,7 +799,18 @@ class EventRepository
             $this->hydrateGroupDates($events);
         }
 
-        return $paginator->setCollection($events);
+        if ($groupedByPost) {
+            $this->hydrateSiblings($events);
+        }
+
+        $page = $paginator->setCollection($events);
+
+        $totalEvents = null;
+        if ($uncollapsedQ !== null) {
+            $totalEvents = (int) $uncollapsedQ->toBase()->getCountForPagination();
+        }
+
+        return ['page' => $page, 'totalEvents' => $totalEvents];
     }
 
     public function findWithDetails(int $id): Event
@@ -838,6 +969,13 @@ class EventRepository
             }
 
             $images = array_values($images);
+
+            // Эвристический выбор обложки: сортируем так, чтобы первая
+            // картинка была наиболее «карточной» (правильные пропорции,
+            // достаточный размер). Поведение задаётся `App\Support\CoverPicker`.
+            if (count($images) > 1) {
+                $images = \App\Support\CoverPicker::pickBest($images);
+            }
 
             $e->setAttribute('images', $images);
             $e->setAttribute('poster', $images[0] ?? null);
@@ -1123,6 +1261,154 @@ class EventRepository
             if ($gid > 0 && isset($map[$gid])) {
                 $e->setAttribute('group_dates', $map[$gid]); // уже лимитировано
                 $e->setAttribute('group_count', (int) ($cntMap[$gid] ?? count($map[$gid])));
+            }
+        });
+    }
+
+    /**
+     * Для каждого rep-event из payload находит его cluster (events с тем же
+     * event_sources.source + post_external_id) и навешивает атрибут
+     * `siblings` — массив preview-DTO для каждого «брата» (без самого rep'а).
+     *
+     * Скоп: только active не-удалённые events. Cross-post: если rep в нескольких
+     * (source, post_external_id), выбираем кластер с наибольшим количеством
+     * братьев.
+     */
+    private function hydrateSiblings(EloquentCollection $events): void
+    {
+        if ($events->isEmpty()) return;
+
+        $MAX_SIBLINGS = 13; // p90 кластер на dev = 14 events, 13 siblings + rep
+
+        $repIds = $events->pluck('id')
+            ->filter(fn ($v) => is_numeric($v) && (int) $v > 0)
+            ->map(fn ($v) => (int) $v)
+            ->unique()
+            ->values()
+            ->all();
+        if (!$repIds) return;
+
+        // Все (source, post_external_id) пары, в которых участвуют rep'ы.
+        // Один rep может быть в нескольких — cross-post.
+        $repPairs = DB::table('event_sources')
+            ->whereIn('event_id', $repIds)
+            ->select(['event_id', 'source', 'post_external_id'])
+            ->get();
+
+        if ($repPairs->isEmpty()) return;
+
+        // Уникальные пары для batch-fetch всех cluster-events.
+        $pairKeys = [];
+        $pairs = [];
+        foreach ($repPairs as $rp) {
+            $key = $rp->source . '|' . $rp->post_external_id;
+            if (!isset($pairKeys[$key])) {
+                $pairKeys[$key] = true;
+                $pairs[] = [(string) $rp->source, (string) $rp->post_external_id];
+            }
+        }
+
+        if (!$pairs) return;
+
+        // SELECT всех events во всех этих парах. WHERE (source, post_external_id) IN ((..),(..))
+        // через or'd группу условий — Laravel не имеет красивого тапла-IN.
+        $q = DB::table('events as e')
+            ->join('event_sources as es', 'es.event_id', '=', 'e.id')
+            ->join('cities as ct', 'ct.id', '=', 'e.city_id')
+            ->where('ct.status', 'active')
+            ->whereNull('e.deleted_at')
+            ->where('e.status', 'active')
+            ->select([
+                'e.id',
+                'e.title',
+                'e.start_time',
+                'e.start_date',
+                'e.time_precision',
+                'e.time_text',
+                'es.source',
+                'es.post_external_id',
+            ])
+            ->where(function ($w) use ($pairs) {
+                foreach ($pairs as $pair) {
+                    $w->orWhere(function ($x) use ($pair) {
+                        $x->where('es.source', $pair[0])
+                            ->where('es.post_external_id', $pair[1]);
+                    });
+                }
+            });
+
+        $rows = $q->get();
+
+        // Сгруппировать по cluster key.
+        $clusterMap = [];
+        foreach ($rows as $r) {
+            $key = $r->source . '|' . $r->post_external_id;
+            if (!isset($clusterMap[$key])) $clusterMap[$key] = [];
+            $clusterMap[$key][] = $r;
+        }
+
+        // Rep -> список его кластеров.
+        $repToClusterKeys = [];
+        foreach ($repPairs as $rp) {
+            $rid = (int) $rp->event_id;
+            $key = $rp->source . '|' . $rp->post_external_id;
+            if (!isset($repToClusterKeys[$rid])) $repToClusterKeys[$rid] = [];
+            $repToClusterKeys[$rid][] = $key;
+        }
+
+        $events->each(function (Event $e) use ($repToClusterKeys, $clusterMap, $MAX_SIBLINGS) {
+            $rid = (int) $e->id;
+            $keys = $repToClusterKeys[$rid] ?? [];
+            if (!$keys) return;
+
+            // Cross-post: выбираем cluster с максимальным размером.
+            $bestKey = null;
+            $bestSize = 0;
+            foreach ($keys as $key) {
+                $size = isset($clusterMap[$key]) ? count($clusterMap[$key]) : 0;
+                if ($size > $bestSize) {
+                    $bestSize = $size;
+                    $bestKey = $key;
+                }
+            }
+            if ($bestKey === null || $bestSize < 2) return;
+
+            $siblings = [];
+            foreach ($clusterMap[$bestKey] as $r) {
+                if ((int) $r->id === $rid) continue; // self — представитель
+
+                $startAt = null;
+                if (!empty($r->start_time)) {
+                    try {
+                        $startAt = CarbonImmutable::parse($r->start_time)->toISOString();
+                    } catch (\Throwable $ex) {
+                        $startAt = null;
+                    }
+                }
+
+                $siblings[] = [
+                    'id'             => (int) $r->id,
+                    'title'          => (string) ($r->title ?? ''),
+                    'start_at'       => $startAt,
+                    'start_date'     => $r->start_date ? substr((string) $r->start_date, 0, 10) : null,
+                    'time_precision' => (string) ($r->time_precision ?? 'datetime'),
+                    'time_text'      => $r->time_text !== null ? (string) $r->time_text : null,
+                ];
+            }
+
+            // Sort by earliest start (для предсказуемого порядка свайпа)
+            usort($siblings, function ($a, $b) {
+                $aKey = (string) ($a['start_at'] ?? $a['start_date'] ?? '');
+                $bKey = (string) ($b['start_at'] ?? $b['start_date'] ?? '');
+                return strcmp($aKey, $bKey);
+            });
+
+            if (count($siblings) > $MAX_SIBLINGS) {
+                $siblings = array_slice($siblings, 0, $MAX_SIBLINGS);
+            }
+
+            if (!empty($siblings)) {
+                $e->setAttribute('siblings', $siblings);
             }
         });
     }

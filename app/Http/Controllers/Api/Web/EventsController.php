@@ -34,6 +34,7 @@ class EventsController extends Controller
             'free'         => ['sometimes','boolean'],
 
             'grouped'      => ['sometimes','boolean'],
+            'grouped_by_post' => ['sometimes','boolean'],
 
             'kids'         => ['sometimes','boolean'],
 
@@ -127,15 +128,26 @@ class EventsController extends Controller
             unset($v['city']);
         }
 
-        $page = $this->service->listWeb($v, $perPage);
+        $result = $this->service->listWeb($v, $perPage);
+        $page = $result['page'];
+        $totalEvents = $result['totalEvents'];
+
+        $meta = [
+            'current_page' => $page->currentPage(),
+            'per_page'     => $page->perPage(),
+            'total'        => $page->total(),
+            'last_page'    => $page->lastPage(),
+        ];
+
+        // total_events: реальное количество events до схлопывания grouped /
+        // grouped_by_post. Frontend использует это для display-счётчика, а
+        // meta.total — для hasMore-логики (число rep-карточек).
+        if ($totalEvents !== null) {
+            $meta['total_events'] = $totalEvents;
+        }
 
         return response()->json([
-            'meta' => [
-                'current_page' => $page->currentPage(),
-                'per_page'     => $page->perPage(),
-                'total'        => $page->total(),
-                'last_page'    => $page->lastPage(),
-            ],
+            'meta' => $meta,
             'data' => WebEventResource::collection($page->items()),
         ]);
     }
