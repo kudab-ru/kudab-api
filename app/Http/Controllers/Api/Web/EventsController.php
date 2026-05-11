@@ -160,4 +160,106 @@ class EventsController extends Controller
             'data' => (new WebEventDetailResource($event))->toArray(request()),
         ]);
     }
+
+    /**
+     * GET /api/web/events/random
+     * Случайное событие под те же фильтры что /events, для компаса на kudab-frontend.
+     * Без grouped/grouped_by_post — выбор из всех событий (включая siblings).
+     */
+    public function random(Request $request): JsonResponse
+    {
+        $v = validator($request->all(), [
+            'city'         => ['sometimes', 'string', 'max:64', 'regex:/^[a-z0-9-]+$/'],
+            'date_from'    => ['sometimes', 'date'],
+            'date_to'      => ['sometimes', 'date'],
+            'when'         => ['sometimes', Rule::in(['today', 'now', 'weekend'])],
+            'free'         => ['sometimes', 'boolean'],
+            'kids'         => ['sometimes', 'boolean'],
+            'q'            => ['sometimes', 'string', 'max:255'],
+            'community_id' => ['sometimes', 'integer'],
+            'interests'    => ['sometimes', 'array'],
+            'interests.*'  => ['integer'],
+            'priced'       => ['sometimes', 'boolean'],
+            'price_min'    => ['sometimes', 'integer', 'min:0'],
+            'price_max'    => ['sometimes', 'integer', 'min:0'],
+            'tod'          => ['sometimes', Rule::in(['morning', 'day', 'evening', 'night'])],
+            'exclude_ids'  => ['sometimes', 'array', 'max:50'],
+            'exclude_ids.*' => ['integer'],
+        ])->validate();
+
+        if (isset($v['price_min'], $v['price_max'])) {
+            $a = (int) $v['price_min'];
+            $b = (int) $v['price_max'];
+            if ($a > $b) {
+                $v['price_min'] = $b;
+                $v['price_max'] = $a;
+            }
+        }
+
+        if (!empty($v['when']) && empty($v['date_from']) && empty($v['date_to'])) {
+            $now = Carbon::now('Europe/Moscow');
+
+            if ($v['when'] === 'today') {
+                $v['date_from'] = $now->copy()->startOfDay()->toDateTimeString();
+                $v['date_to']   = $now->copy()->endOfDay()->toDateTimeString();
+            } elseif ($v['when'] === 'weekend') {
+                $daysToSat = (Carbon::SATURDAY - $now->dayOfWeek + 7) % 7;
+                $sat = $now->copy()->addDays($daysToSat)->startOfDay();
+                $sun = $sat->copy()->addDay()->endOfDay();
+                $v['date_from'] = $sat->toDateTimeString();
+                $v['date_to']   = $sun->toDateTimeString();
+            } elseif ($v['when'] === 'now') {
+                $v['date_from'] = $now->copy()->subHours(2)->toDateTimeString();
+                $v['date_to']   = $now->copy()->addHours(4)->toDateTimeString();
+            }
+        }
+        unset($v['when']);
+
+        $kids = !empty($v['kids']);
+        unset($v['kids']);
+        if ($kids) {
+            $qVal = trim((string) ($v['q'] ?? ''));
+            if ($qVal === '') {
+                $v['q'] = 'дет';
+            }
+        }
+
+        if (array_key_exists('q', $v)) {
+            $v['q'] = trim((string) $v['q']);
+        }
+
+        $citySlug = trim((string) ($v['city'] ?? ''));
+        if ($citySlug !== '') {
+            $cityId = City::query()
+                ->where('slug', $citySlug)
+                ->where('status', 'active')
+                ->value('id');
+
+            if (!$cityId) {
+                return response()->json([
+                    'data' => null,
+                    'meta' => ['total' => 0],
+                ]);
+            }
+
+            $v['city_id'] = (int) $cityId;
+            unset($v['city']);
+        }
+
+        $result = $this->service->pickRandomWeb($v);
+        $event = $result['event'];
+        $total = (int) $result['total'];
+
+        if ($event === null) {
+            return response()->json([
+                'data' => null,
+                'meta' => ['total' => 0],
+            ]);
+        }
+
+        return response()->json([
+            'data' => (new WebEventResource($event))->toArray($request),
+            'meta' => ['total' => $total],
+        ]);
+    }
 }

@@ -26,6 +26,14 @@ class EventService
         return $this->repo->paginateUpcomingWeb($filters, $perPage);
     }
 
+    /**
+     * @return array{event: Event|null, total: int}
+     */
+    public function pickRandomWeb(array $filters): array
+    {
+        return $this->repo->pickRandomWeb($filters);
+    }
+
     public function get(int $id): Event
     {
         return $this->repo->findWithDetails($id);

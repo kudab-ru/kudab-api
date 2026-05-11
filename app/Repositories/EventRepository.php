@@ -813,6 +813,206 @@ class EventRepository
         return ['page' => $page, 'totalEvents' => $totalEvents];
     }
 
+    /**
+     * Random single event для компаса на странице афиши (kudab-frontend).
+     *
+     * Применяет тот же фильтр-стек что paginateUpcomingWeb, но БЕЗ
+     * grouped/grouped_by_post (компас выбирает из всех событий, не из rep'ов)
+     * и БЕЗ past-окна для отображения (PAST_LOOKBACK_DAYS) — рандом не должен
+     * выдать уже прошедшее событие.
+     *
+     * @param array{
+     *   city_id?: int, date_from?: string, date_to?: string, community_id?: int,
+     *   q?: string, interests?: int[], free?: bool, price_min?: int, price_max?: int,
+     *   priced?: bool, tod?: string, exclude_ids?: int[]
+     * } $filters
+     * @return array{event: Event|null, total: int}
+     */
+    public function pickRandomWeb(array $filters): array
+    {
+        $excludeIds = [];
+        if (!empty($filters['exclude_ids']) && is_array($filters['exclude_ids'])) {
+            $excludeIds = array_values(array_filter(array_map('intval', $filters['exclude_ids'])));
+        }
+
+        $graceHours = (int) self::PAST_GRACE_HOURS;
+        $nowMsk = now('Europe/Moscow');
+        $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
+        $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
+
+        $q = Event::query()
+            ->select('events.*', 'ct.slug as city_slug')
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
+            ->whereNull('events.deleted_at')
+            ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
+                $w->where('events.start_time', '>=', $cutoffTs)
+                    ->orWhere(function ($x) use ($fromDateMsk) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $fromDateMsk);
+                    });
+            });
+
+        // компас не показывает уже прошедшие события
+        $q->whereRaw("NOT (
+            (events.start_time IS NOT NULL AND events.start_time < (now() - interval '{$graceHours} hours'))
+            OR
+            (events.start_time IS NULL AND events.start_date IS NOT NULL AND events.start_date < (now() AT TIME ZONE 'Europe/Moscow')::date)
+        )");
+
+        $this->excludeBlacklistedSources($q);
+
+        if (!empty($filters['city_id'])) {
+            $q->where('events.city_id', (int) $filters['city_id']);
+        }
+
+        if (!empty($filters['date_from'])) {
+            $fromDate = substr((string) $filters['date_from'], 0, 10);
+            $q->where(function ($w) use ($filters, $fromDate) {
+                $w->where('events.start_time', '>=', $filters['date_from'])
+                    ->orWhere(function ($x) use ($fromDate) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $fromDate);
+                    });
+            });
+        }
+
+        if (!empty($filters['date_to'])) {
+            $toDate = substr((string) $filters['date_to'], 0, 10);
+            $q->where(function ($w) use ($filters, $toDate) {
+                $w->where('events.start_time', '<=', $filters['date_to'])
+                    ->orWhere(function ($x) use ($toDate) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '<=', $toDate);
+                    });
+            });
+        }
+
+        if (!empty($filters['community_id'])) {
+            $q->where('events.community_id', (int) $filters['community_id']);
+        }
+
+        $qNorm = $this->normalizeQ($filters['q'] ?? null);
+        if ($qNorm !== null) {
+            $like = '%' . $qNorm . '%';
+            $token = $this->pickFuzzyToken($qNorm);
+            $thr = $this->fuzzyThreshold($token);
+            $fuzzyOn = $this->trgmEnabled()
+                && $this->wordSimEnabled()
+                && mb_strlen($token) >= self::FUZZY_MIN_LEN
+                && mb_strlen($token) >= 4;
+
+            $q->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id')->distinct();
+
+            $q->where(function ($w) use ($like, $token, $thr, $fuzzyOn) {
+                $w->whereRaw("public.ru_normalize(events.title) LIKE ?", [$like])
+                    ->orWhereRaw("public.ru_normalize(events.description) LIKE ?", [$like])
+                    ->orWhereRaw("public.ru_normalize(cm.name) LIKE ?", [$like])
+                    ->orWhereRaw("public.ru_normalize(cm.description) LIKE ?", [$like]);
+                if ($fuzzyOn) {
+                    $w->orWhereRaw(
+                        "word_similarity(?, public.ru_normalize(events.title)) >= ?",
+                        [$token, $thr]
+                    )->orWhereRaw(
+                        "word_similarity(?, public.ru_normalize(cm.name)) >= ?",
+                        [$token, $thr]
+                    );
+                }
+            });
+        }
+
+        if (!empty($filters['interests']) && is_array($filters['interests'])) {
+            $ids = array_filter(array_map('intval', $filters['interests']));
+            if ($ids) {
+                $q->whereHas('interests', function ($w) use ($ids) {
+                    $w->whereIn('interests.id', $ids);
+                });
+            }
+        }
+
+        if (!empty($filters['free'])) {
+            $q->where(function ($w) {
+                $w->where('events.price_status', 'free')
+                    ->orWhere(function ($x) {
+                        $x->where('events.price_min', 0)->whereNull('events.price_max');
+                    });
+            });
+        }
+
+        $priceMin = array_key_exists('price_min', $filters) ? (int) $filters['price_min'] : null;
+        $priceMax = array_key_exists('price_max', $filters) ? (int) $filters['price_max'] : null;
+        $priced = array_key_exists('priced', $filters)
+            ? (filter_var($filters['priced'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) === true)
+            : false;
+
+        $hasRange = ($priceMin !== null) || ($priceMax !== null);
+        $knownPrice = function ($w) {
+            $w->where('events.price_status', 'free')
+                ->orWhereNotNull('events.price_min')
+                ->orWhereNotNull('events.price_max');
+        };
+        $minExpr = "COALESCE(events.price_min, events.price_max, CASE WHEN events.price_status='free' THEN 0 END)";
+        $maxExpr = "COALESCE(events.price_max, events.price_min, CASE WHEN events.price_status='free' THEN 0 END)";
+
+        if ($hasRange) {
+            $q->where(function ($w) use ($knownPrice, $priced, $minExpr, $maxExpr, $priceMin, $priceMax) {
+                $w->where(function ($x) use ($knownPrice, $minExpr, $maxExpr, $priceMin, $priceMax) {
+                    $x->where($knownPrice);
+                    if ($priceMin !== null) $x->whereRaw("$maxExpr >= ?", [$priceMin]);
+                    if ($priceMax !== null) $x->whereRaw("$minExpr <= ?", [$priceMax]);
+                });
+                if (!$priced) {
+                    $w->orWhere(function ($x) {
+                        $x->whereNull('events.price_min')
+                            ->whereNull('events.price_max')
+                            ->whereRaw("COALESCE(events.price_status,'') <> 'free'");
+                    });
+                }
+            });
+        } elseif ($priced) {
+            $q->where($knownPrice);
+        }
+
+        if (!empty($filters['tod'])) {
+            $tod = (string) $filters['tod'];
+            $q->whereNotNull('events.start_time');
+            $hourExpr = "EXTRACT(HOUR FROM (events.start_time AT TIME ZONE 'Europe/Moscow'))";
+            switch ($tod) {
+                case 'morning': $q->whereRaw("{$hourExpr} >= 5 AND {$hourExpr} <= 11"); break;
+                case 'day':     $q->whereRaw("{$hourExpr} >= 12 AND {$hourExpr} <= 16"); break;
+                case 'evening': $q->whereRaw("{$hourExpr} >= 17 AND {$hourExpr} <= 22"); break;
+                case 'night':
+                    $q->where(function ($w) use ($hourExpr) {
+                        $w->whereRaw("{$hourExpr} >= 23")->orWhereRaw("{$hourExpr} <= 4");
+                    });
+                    break;
+            }
+        }
+
+        if ($excludeIds) {
+            $q->whereNotIn('events.id', $excludeIds);
+        }
+
+        $total = (int) (clone $q)->toBase()->getCountForPagination();
+
+        if ($total === 0) {
+            return ['event' => null, 'total' => 0];
+        }
+
+        $q->reorder()->orderByRaw('RANDOM()');
+        /** @var Event|null $event */
+        $event = $q->limit(1)->first();
+
+        if ($event !== null) {
+            $this->hydrateImages(EloquentCollection::make([$event]));
+        }
+
+        return ['event' => $event, 'total' => $total];
+    }
+
     public function findWithDetails(int $id): Event
     {
         $q = Event::query()

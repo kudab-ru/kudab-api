@@ -56,6 +56,7 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
 
     Route::get('ping', fn () => ['ok' => true, 'result' => 'pong']);
     Route::get('events', [WebEventsController::class, 'index']);
+    Route::get('events/random', [WebEventsController::class, 'random']);
     Route::get('event-groups/{id}', [WebEventGroupsController::class, 'show'])->whereNumber('id');
     Route::get('events/{id}', [WebEventsController::class, 'show'])->whereNumber('id');
 
