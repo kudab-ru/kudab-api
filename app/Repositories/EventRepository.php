@@ -799,16 +799,25 @@ class EventRepository
             $this->hydrateGroupDates($events);
         }
 
+        $totalEvents = null;
+        $eligibleEventIds = null;
+        if ($uncollapsedQ !== null) {
+            // Snapshot used both для count (`total_events`) и для siblings —
+            // гарантирует консистентность: события в siblings — subset тех
+            // же, что попали в `total_events`. Без этого siblings могли
+            // содержать events из другого города / категории / blacklisted
+            // source, и фронтенд показывал «84 из 78» (TASKS.md §14).
+            $eligibleEventIds = $uncollapsedQ->toBase()->pluck('events.id')
+                ->map(fn ($v) => (int) $v)
+                ->all();
+            $totalEvents = count($eligibleEventIds);
+        }
+
         if ($groupedByPost) {
-            $this->hydrateSiblings($events);
+            $this->hydrateSiblings($events, $eligibleEventIds);
         }
 
         $page = $paginator->setCollection($events);
-
-        $totalEvents = null;
-        if ($uncollapsedQ !== null) {
-            $totalEvents = (int) $uncollapsedQ->toBase()->getCountForPagination();
-        }
 
         return ['page' => $page, 'totalEvents' => $totalEvents];
     }
@@ -1474,7 +1483,14 @@ class EventRepository
      * (source, post_external_id), выбираем кластер с наибольшим количеством
      * братьев.
      */
-    private function hydrateSiblings(EloquentCollection $events): void
+    /**
+     * @param int[]|null $eligibleEventIds Если задано — siblings выбираются
+     *   ТОЛЬКО среди этих event_ids. Используется для синхронизации с
+     *   `total_events` count'ом (TASKS.md §14): главная не должна показывать
+     *   в карусели events, которые не учтены в counter'е (другой город,
+     *   blacklisted source, past beyond grace и т.п.).
+     */
+    private function hydrateSiblings(EloquentCollection $events, ?array $eligibleEventIds = null): void
     {
         if ($events->isEmpty()) return;
 
@@ -1536,6 +1552,16 @@ class EventRepository
                     });
                 }
             });
+
+        // Ограничение: siblings — только subset eligible events
+        // (тех же, что попали в total_events). Гарантирует консистентность
+        // counter'а на главной (TASKS.md §14).
+        if ($eligibleEventIds !== null) {
+            // Включаем сами rep'ы (на случай если они есть в pool — обычно
+            // да) и всё, что в pool. whereIn по пустому массиву = WHERE 0=1
+            // (Laravel) → siblings пустые, что корректно при пустом pool.
+            $q->whereIn('e.id', $eligibleEventIds);
+        }
 
         $rows = $q->get();
 
