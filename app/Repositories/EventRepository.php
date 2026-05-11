@@ -687,18 +687,15 @@ class EventRepository
         // event_group_id, потому что разные даты одного события = тот же
         // event detail). `meta.total` остаётся rep-count для пагинации.
         //
-        // §13p: snapshot НЕ должен включать past events — иначе
-        // total_events и pool siblings'ов содержат уже прошедшие даты,
-        // которые на UI не показываются (rep кластера выбирается future-
-        // first, past siblings отбрасываются в hydrateSiblings).
-        // Применяем applyOnlyActual к snapshot'у, но НЕ к основному $q
-        // (который продолжает показывать past карточки в архивной части
-        // ленты, отсортированные через __past_rank).
-        $uncollapsedQ = null;
-        if ($groupedByPost) {
-            $uncollapsedQ = clone $q;
-            $this->applyOnlyActual($uncollapsedQ);
-        }
+        // ВАЖНО: snapshot должен включать те же события что и основной $q
+        // (т.е. past+future в окне PAST_LOOKBACK_DAYS). Иначе items на
+        // странице (rep'ы из $q + future siblings) могут превысить
+        // total_events: past соло-rep'ы попадут в items, но не в total.
+        // past siblings отбрасываются позже в hydrateSiblings через
+        // siblingIsFuture — это не противоречит, потому что past siblings
+        // ВСЁ РАВНО присутствуют в pool eligibleEventIds и учитываются
+        // как самостоятельные events на странице.
+        $uncollapsedQ = $groupedByPost ? (clone $q) : null;
 
         if ($groupedByPost) {
             $base = clone $q;
