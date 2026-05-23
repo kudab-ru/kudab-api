@@ -64,7 +64,9 @@ class WebEventResource extends JsonResource
             'title'          => (string) ($this->title ?? ''),
 
             'city_slug'      => $this->getAttribute('city_slug') ?: null,
-            'venue'          => null,
+            'venue'          => $this->relationLoaded('venue') && $this->venue
+                ? (new VenueBadgeResource($this->venue))->toArray($request)
+                : null,
             'address'        => $this->address !== null ? (string) $this->address : null,
 
             'poster'         => $this->poster !== null ? (string) $this->poster : null,

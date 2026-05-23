@@ -174,6 +174,7 @@ class EventRepository
             ->with([
                 'community:id,name,city,avatar_url',
                 'interests:id,name',
+                'venue:id,slug,name,kind',
             ]);
 
         $q->addSelect('events.*');
@@ -1054,6 +1055,7 @@ class EventRepository
             ->with([
                 'community:id,name,city,avatar_url',
                 'interests:id,name',
+                'venue:id,slug,name,kind',
             ]);
 
         $this->addPastFlags($q);
@@ -1081,6 +1083,7 @@ class EventRepository
             ->with([
                 'community:id,name,city,avatar_url',
                 'interests:id,name',
+                'venue:id,slug,name,kind',
                 'eventSources:id,event_id,source,post_external_id,external_url,published_at,images,generated_link,social_link_id',
                 'originalPost:id,text',
             ]);

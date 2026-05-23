@@ -32,6 +32,11 @@ class City extends Model
         return $this->hasMany(\App\Models\Event::class);
     }
 
+    public function venues(): HasMany
+    {
+        return $this->hasMany(\App\Models\Venue::class);
+    }
+
     /**
      * Создать город и сразу записать POINT(lon lat) c SRID=4326
      */

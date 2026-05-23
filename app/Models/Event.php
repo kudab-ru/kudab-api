@@ -20,6 +20,7 @@ class Event extends Model
     protected $fillable = [
         'original_post_id',
         'community_id',
+        'venue_id',
         'title',
         'start_time',
         'end_time',
@@ -134,6 +135,11 @@ class Event extends Model
     public function city(): BelongsTo
     {
         return $this->belongsTo(City::class);
+    }
+
+    public function venue(): BelongsTo
+    {
+        return $this->belongsTo(Venue::class);
     }
 
     public function eventSources()

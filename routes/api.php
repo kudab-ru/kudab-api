@@ -95,6 +95,12 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('cities', [CitiesController::class, 'index']);
     Route::get('telegram/resolve', [TelegramResolveController::class, 'show']);
 
+    // Venues (PR4) — порядок важен: /map ДО /{id} чтобы Laravel routing
+    // не съел "map" как numeric id (whereNumber на show всё равно подстрахует).
+    Route::get('venues', [\App\Http\Controllers\Api\Web\VenuesController::class, 'index']);
+    Route::get('venues/map', [\App\Http\Controllers\Api\Web\VenuesController::class, 'map']);
+    Route::get('venues/{id}', [\App\Http\Controllers\Api\Web\VenuesController::class, 'show'])->whereNumber('id');
+
     Route::post('communities/import', [AdminCommunitiesController::class, 'import']);
     Route::get('communities/{id}', [AdminCommunitiesController::class, 'show'])->whereNumber('id');
     Route::post('communities/{id}/verify', [AdminCommunitiesController::class, 'verify'])->whereNumber('id');

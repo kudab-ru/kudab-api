@@ -55,7 +55,9 @@ class WebEventDetailResource extends JsonResource
             'id' => (int) $this->id,
             'title' => $this->title,
             'city_slug' => $this->city_slug, // безопасно: берётся из select/join в web-репозитории
-            'venue' => $this->venue ?? null, // если у тебя нет поля venue — будет null, это ок
+            'venue' => $this->relationLoaded('venue') && $this->venue
+                ? (new VenueBadgeResource($this->venue))->toArray($request)
+                : null,
             'address' => $this->address,
             'poster' => $poster,
             'images' => $images,
