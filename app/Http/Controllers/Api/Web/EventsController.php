@@ -37,6 +37,7 @@ class EventsController extends Controller
             'grouped_by_post' => ['sometimes','boolean'],
 
             'kids'         => ['sometimes','boolean'],
+            'include_all'  => ['sometimes','boolean'],
 
             'q'            => ['sometimes','string','max:255'],
             'community_id' => ['sometimes','integer'],
@@ -180,6 +181,7 @@ class EventsController extends Controller
             'when'         => ['sometimes', Rule::in(['today', 'now', 'weekend'])],
             'free'         => ['sometimes', 'boolean'],
             'kids'         => ['sometimes', 'boolean'],
+            'include_all'  => ['sometimes', 'boolean'],
             'q'            => ['sometimes', 'string', 'max:255'],
             'community_id' => ['sometimes', 'integer'],
             'interests'    => ['sometimes', 'array'],

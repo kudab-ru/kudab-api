@@ -338,6 +338,91 @@ class WebEventsTest extends TestCase
         $response->assertStatus(422);
     }
 
+    public function test_main_feed_hides_kids_and_family_audience(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $kids   = $this->createEvent($msk->id, $community->id, 'Спектакль для детей', now()->addDay());
+        $family = $this->createEvent($msk->id, $community->id, 'Семейный праздник', now()->addDay());
+        $adult  = $this->createEvent($msk->id, $community->id, 'Концерт для взрослых', now()->addDay());
+
+        $this->setTaxonomy($kids->id,   'kids',    'culture');
+        $this->setTaxonomy($family->id, 'family',  'entertainment');
+        $this->setTaxonomy($adult->id,  'general', 'entertainment');
+
+        $response = $this->getJson('/api/web/events?city=moskva');
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Концерт для взрослых');
+
+        $response->assertJsonMissing(['title' => 'Спектакль для детей']);
+        $response->assertJsonMissing(['title' => 'Семейный праздник']);
+    }
+
+    public function test_main_feed_hides_official_and_other_content_kind(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $entertainment = $this->createEvent($msk->id, $community->id, 'Концерт', now()->addDay());
+        $official      = $this->createEvent($msk->id, $community->id, 'Заседание комиссии', now()->addDay());
+        $other         = $this->createEvent($msk->id, $community->id, 'Церемония награждения', now()->addDay());
+        $religious     = $this->createEvent($msk->id, $community->id, 'Литургия', now()->addDay());
+
+        $this->setTaxonomy($entertainment->id, 'general', 'entertainment');
+        $this->setTaxonomy($official->id,      'general', 'official');
+        $this->setTaxonomy($other->id,         'general', 'other');
+        $this->setTaxonomy($religious->id,     'general', 'religious');
+
+        $response = $this->getJson('/api/web/events?city=moskva');
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Концерт');
+    }
+
+    public function test_main_feed_shows_null_taxonomy_legacy_events(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $this->createEvent($msk->id, $community->id, 'Legacy event без таксономии', now()->addDay());
+
+        $response = $this->getJson('/api/web/events?city=moskva');
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonPath('data.0.title', 'Legacy event без таксономии');
+    }
+
+    public function test_include_all_overrides_taxonomy_filter(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $kids     = $this->createEvent($msk->id, $community->id, 'Детский спектакль', now()->addDay());
+        $official = $this->createEvent($msk->id, $community->id, 'Награждение', now()->addDay());
+        $general  = $this->createEvent($msk->id, $community->id, 'Концерт', now()->addDay());
+
+        $this->setTaxonomy($kids->id,     'kids',    'culture');
+        $this->setTaxonomy($official->id, 'general', 'official');
+        $this->setTaxonomy($general->id,  'general', 'entertainment');
+
+        $response = $this->getJson('/api/web/events?city=moskva&include_all=1');
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('meta.total', 3)
+            ->assertJsonCount(3, 'data');
+    }
+
     /* ===================== helpers ===================== */
 
     private function createInterest(string $name, string $slug, ?int $parentId = null): Interest
@@ -396,5 +481,14 @@ class WebEventsTest extends TestCase
         $event->save();
 
         return $event;
+    }
+
+    private function setTaxonomy(int $eventId, ?string $audience, ?string $contentKind): void
+    {
+        DB::table('events')->where('id', $eventId)->update([
+            'audience'     => $audience,
+            'content_kind' => $contentKind,
+            'updated_at'   => now(),
+        ]);
     }
 }

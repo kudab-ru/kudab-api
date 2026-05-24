@@ -433,6 +433,7 @@ class EventRepository
         $this->addImgRank($q);
 
         $this->excludeBlacklistedSources($q);
+        $this->applyMainFeedTaxonomyFilter($q, $filters);
 
         // приоритет: past -> image -> gray
         $q->orderBy('__past_rank', 'asc')
@@ -974,6 +975,7 @@ class EventRepository
         )");
 
         $this->excludeBlacklistedSources($q);
+        $this->applyMainFeedTaxonomyFilter($q, $filters);
 
         if (!empty($filters['city_id'])) {
             $q->where('events.city_id', (int) $filters['city_id']);
@@ -1461,6 +1463,41 @@ class EventRepository
             )
         )
     ");
+    }
+
+    /**
+     * Скрывает события вне формата «общегородская развлекательная лента»:
+     *  - audience IN ('kids','family') — детский / семейный профиль,
+     *  - content_kind NOT IN базового набора — официально-протокольное,
+     *    патриотические церемонии, религиозный обряд.
+     *
+     * NULL-значения (legacy events до v11/v12 или редкие пропуски LLM) НЕ
+     * скрываем — backwards-compat и защита от data-loss на backlog'е.
+     *
+     * Override: $filters['include_all'] === true (через `?include_all=1`) —
+     * пропускает фильтр целиком. Для админки / dev-режима / специальных
+     * страниц «увидеть всё».
+     */
+    private function applyMainFeedTaxonomyFilter($q, array $filters): void
+    {
+        $includeAll = array_key_exists('include_all', $filters)
+            && filter_var($filters['include_all'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) === true;
+
+        if ($includeAll) {
+            return;
+        }
+
+        $q->where(function ($w) {
+            $w->whereNull('events.audience')
+                ->orWhereNotIn('events.audience', ['kids', 'family']);
+        });
+
+        $q->where(function ($w) {
+            $w->whereNull('events.content_kind')
+                ->orWhereIn('events.content_kind', [
+                    'entertainment', 'culture', 'education', 'sport', 'civic',
+                ]);
+        });
     }
 
     /**
