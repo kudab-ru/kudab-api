@@ -50,6 +50,18 @@ class WebEventDetailResource extends JsonResource
 
         $priceMin = $this->price_min !== null ? (int) $this->price_min : null;
 
+        // interests: всегда array. См. WebEventResource — тот же контракт.
+        $interests = [];
+        if ($this->relationLoaded('interests') && $this->interests) {
+            foreach ($this->interests as $i) {
+                if (!$i->slug) continue;
+                $interests[] = [
+                    'slug' => (string) $i->slug,
+                    'name' => (string) $i->name,
+                ];
+            }
+        }
+
         return [
             // базовый контракт (карточка)
             'id' => (int) $this->id,
@@ -108,6 +120,8 @@ class WebEventDetailResource extends JsonResource
             'sources' => $sources,
 
             'is_past' => (bool) ($this->getAttribute('__is_past') ?? false),
+
+            'interests' => $interests,
         ];
     }
 }

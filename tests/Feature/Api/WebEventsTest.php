@@ -5,6 +5,7 @@ namespace Tests\Feature\Api;
 use App\Models\City;
 use App\Models\Community;
 use App\Models\Event;
+use App\Models\Interest;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -144,6 +145,221 @@ class WebEventsTest extends TestCase
 
         $response->assertJsonMissing([
             'title' => 'Лекция по истории',
+        ]);
+    }
+
+    /* ===================== interests filter (Этап 2) ===================== */
+
+    public function test_filter_by_leaf_slug_returns_only_tagged_events(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $theatre = $this->createInterest('Театр', 'theatre');
+        $jazz    = $this->createInterest('Джаз', 'jazz');
+
+        $theatreEvent = $this->createEvent($msk->id, $community->id, 'Спектакль', now()->addDay());
+        $jazzEvent    = $this->createEvent($msk->id, $community->id, 'Концерт', now()->addDays(2));
+
+        $this->tagEventLeafOnly($theatreEvent->id, $theatre->id);
+        $this->tagEventLeafOnly($jazzEvent->id, $jazz->id);
+
+        $response = $this->getJson('/api/web/events?city=moskva&interests[]=theatre');
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Спектакль');
+
+        $response->assertJsonMissing(['title' => 'Концерт']);
+    }
+
+    /**
+     * Ключевой тест recursive CTE: ?interests[]=music должен вернуть события
+     * с тегом jazz/rock (children of music), даже если самого music-тега у
+     * них нет в pivot. Seed обходит retagger (вставка напрямую в pivot
+     * только leaf-тегов), иначе тест проверял бы retagger, а не CTE.
+     */
+    public function test_parent_slug_unfolds_to_children_via_cte(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $music = $this->createInterest('Музыка', 'music');
+        $jazz  = $this->createInterest('Джаз', 'jazz', $music->id);
+        $rock  = $this->createInterest('Рок', 'rock', $music->id);
+        $theatre = $this->createInterest('Театр', 'theatre');
+
+        $jazzEvent = $this->createEvent($msk->id, $community->id, 'Джаз-концерт', now()->addDay());
+        $rockEvent = $this->createEvent($msk->id, $community->id, 'Рок-фест', now()->addDays(2));
+        $theatreEvent = $this->createEvent($msk->id, $community->id, 'Спектакль', now()->addDays(3));
+
+        // ОНЛИ leaf-тег: проверяем что CTE сам разворачивает music → {jazz,rock},
+        // а не что retagger проставил parent.
+        $this->tagEventLeafOnly($jazzEvent->id, $jazz->id);
+        $this->tagEventLeafOnly($rockEvent->id, $rock->id);
+        $this->tagEventLeafOnly($theatreEvent->id, $theatre->id);
+
+        $response = $this->getJson('/api/web/events?city=moskva&interests[]=music&sort=created_at&dir=asc');
+
+        $titles = collect($response->json('data'))->pluck('title')->all();
+        $this->assertContains('Джаз-концерт', $titles);
+        $this->assertContains('Рок-фест', $titles);
+        $this->assertNotContains('Спектакль', $titles);
+        $this->assertSame(2, $response->json('meta.total'));
+    }
+
+    public function test_nonexistent_slug_returns_empty_result(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $this->createEvent($msk->id, $community->id, 'Любое событие', now()->addDay());
+
+        $response = $this->getJson('/api/web/events?city=moskva&interests[]=nonexistent-slug');
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('meta.total', 0)
+            ->assertJsonCount(0, 'data');
+    }
+
+    public function test_without_interests_filter_returns_all_events(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $jazz = $this->createInterest('Джаз', 'jazz');
+        $taggedEvent = $this->createEvent($msk->id, $community->id, 'Концерт', now()->addDay());
+        $untaggedEvent = $this->createEvent($msk->id, $community->id, 'Без тегов', now()->addDays(2));
+        $this->tagEventLeafOnly($taggedEvent->id, $jazz->id);
+
+        $response = $this->getJson('/api/web/events?city=moskva');
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('meta.total', 2);
+    }
+
+    public function test_event_payload_contains_interests_array(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $jazz = $this->createInterest('Джаз', 'jazz');
+        $taggedEvent = $this->createEvent($msk->id, $community->id, 'С тегом', now()->addDay());
+        $untaggedEvent = $this->createEvent($msk->id, $community->id, 'Без тегов', now()->addDays(2));
+        $this->tagEventLeafOnly($taggedEvent->id, $jazz->id);
+
+        $response = $this->getJson('/api/web/events?city=moskva&sort=created_at&dir=asc');
+
+        $items = $response->json('data');
+        $taggedItem = collect($items)->firstWhere('title', 'С тегом');
+        $untaggedItem = collect($items)->firstWhere('title', 'Без тегов');
+
+        $this->assertIsArray($taggedItem['interests']);
+        $this->assertSame([['slug' => 'jazz', 'name' => 'Джаз']], $taggedItem['interests']);
+
+        $this->assertIsArray($untaggedItem['interests']);
+        $this->assertSame([], $untaggedItem['interests'], 'untagged event must have interests: [] (not null, not omitted)');
+    }
+
+    /* ===== double-write (legacy int + new slug) ===== */
+
+    /**
+     * Legacy фронт продолжает работать пока миграция не закончена: int ID
+     * фильтрует прямым whereIn без CTE (parent НЕ разворачивается — сохраняем
+     * pre-Этап-2 семантику).
+     */
+    public function test_legacy_int_id_filter_still_works(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $jazz = $this->createInterest('Джаз', 'jazz');
+        $theatre = $this->createInterest('Театр', 'theatre');
+
+        $jazzEvent = $this->createEvent($msk->id, $community->id, 'Концерт', now()->addDay());
+        $theatreEvent = $this->createEvent($msk->id, $community->id, 'Спектакль', now()->addDays(2));
+        $this->tagEventLeafOnly($jazzEvent->id, $jazz->id);
+        $this->tagEventLeafOnly($theatreEvent->id, $theatre->id);
+
+        $response = $this->getJson('/api/web/events?city=moskva&interests[]=' . $jazz->id);
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonPath('data.0.title', 'Концерт');
+    }
+
+    /**
+     * Legacy НЕ разворачивает иерархию (parent не цепляет children). Это
+     * сохраняет pre-Этап-2 поведение — фронт мигрируется атомарно через
+     * замену запросов, без сюрпризов в результатах.
+     */
+    public function test_legacy_int_id_filter_does_not_unfold_hierarchy(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $music = $this->createInterest('Музыка', 'music');
+        $jazz = $this->createInterest('Джаз', 'jazz', $music->id);
+
+        $jazzEvent = $this->createEvent($msk->id, $community->id, 'Джаз-концерт', now()->addDay());
+        $this->tagEventLeafOnly($jazzEvent->id, $jazz->id);
+
+        // legacy путь по parent ID не разворачивает в children
+        $response = $this->getJson('/api/web/events?city=moskva&interests[]=' . $music->id);
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('meta.total', 0);
+    }
+
+    public function test_mixed_int_and_slug_returns_422(): void
+    {
+        $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $jazz = $this->createInterest('Джаз', 'jazz');
+
+        $response = $this->getJson('/api/web/events?city=moskva&interests[]=' . $jazz->id . '&interests[]=theatre');
+
+        $response
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['interests']);
+    }
+
+    public function test_invalid_interest_format_returns_422(): void
+    {
+        $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+
+        $response = $this->getJson('/api/web/events?city=moskva&interests[]=Театр');
+
+        $response->assertStatus(422);
+    }
+
+    /* ===================== helpers ===================== */
+
+    private function createInterest(string $name, string $slug, ?int $parentId = null): Interest
+    {
+        return Interest::create([
+            'name'      => $name,
+            'slug'      => $slug,
+            'parent_id' => $parentId,
+        ]);
+    }
+
+    /**
+     * Прямая вставка в pivot — обходит retagger, который проставил бы и
+     * parent-теги. Нужно для теста CTE-разворота parent → children.
+     */
+    private function tagEventLeafOnly(int $eventId, int $interestId): void
+    {
+        DB::table('event_interest')->insert([
+            'event_id'    => $eventId,
+            'interest_id' => $interestId,
+            'created_at'  => now(),
+            'updated_at'  => now(),
         ]);
     }
 

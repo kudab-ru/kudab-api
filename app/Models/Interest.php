@@ -11,8 +11,8 @@ class Interest extends Model
 
     protected $fillable = [
         'name',
+        'slug',
         'parent_id',
-        'is_paid',
     ];
 
     /**

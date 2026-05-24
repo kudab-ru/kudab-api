@@ -21,7 +21,7 @@ class EventsController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $v = validator($request->all(), [
+        $validator = validator($request->all(), [
             'page'         => ['sometimes','integer','min:1'],
             'per_page'     => ['sometimes','integer','min:1'],
 
@@ -41,7 +41,10 @@ class EventsController extends Controller
             'q'            => ['sometimes','string','max:255'],
             'community_id' => ['sometimes','integer'],
             'interests'    => ['sometimes','array'],
-            'interests.*'  => ['integer'],
+            // Double-write для Этапа 2 rollout: legacy фронт шлёт int (ID),
+            // новый — slug. Принимаем оба, но не mixed (см. after-callback).
+            // После миграции фронта закрытым PR убрать legacy int-ветку.
+            'interests.*'  => ['required', $this->interestItemRule()],
 
             'priced'       => ['sometimes','boolean'],
             'price_min'    => ['sometimes','integer','min:0'],
@@ -50,7 +53,9 @@ class EventsController extends Controller
 
             'sort'         => ['sometimes', Rule::in(['start_at','start_date','start_time','created_at','price_min'])],
             'dir'          => ['sometimes', Rule::in(['asc','desc'])],
-        ])->validate();
+        ]);
+        $validator->after(fn ($v) => $this->rejectMixedInterests($request, $v));
+        $v = $validator->validate();
 
         $pageNum = (int) ($v['page'] ?? 1);
 
@@ -168,7 +173,7 @@ class EventsController extends Controller
      */
     public function random(Request $request): JsonResponse
     {
-        $v = validator($request->all(), [
+        $validator = validator($request->all(), [
             'city'         => ['sometimes', 'string', 'max:64', 'regex:/^[a-z0-9-]+$/'],
             'date_from'    => ['sometimes', 'date'],
             'date_to'      => ['sometimes', 'date'],
@@ -178,14 +183,16 @@ class EventsController extends Controller
             'q'            => ['sometimes', 'string', 'max:255'],
             'community_id' => ['sometimes', 'integer'],
             'interests'    => ['sometimes', 'array'],
-            'interests.*'  => ['integer'],
+            'interests.*'  => ['required', $this->interestItemRule()],
             'priced'       => ['sometimes', 'boolean'],
             'price_min'    => ['sometimes', 'integer', 'min:0'],
             'price_max'    => ['sometimes', 'integer', 'min:0'],
             'tod'          => ['sometimes', Rule::in(['morning', 'day', 'evening', 'night'])],
             'exclude_ids'  => ['sometimes', 'array', 'max:50'],
             'exclude_ids.*' => ['integer'],
-        ])->validate();
+        ]);
+        $validator->after(fn ($v) => $this->rejectMixedInterests($request, $v));
+        $v = $validator->validate();
 
         if (isset($v['price_min'], $v['price_max'])) {
             $a = (int) $v['price_min'];
@@ -261,5 +268,46 @@ class EventsController extends Controller
             'data' => (new WebEventResource($event))->toArray($request),
             'meta' => ['total' => $total],
         ]);
+    }
+
+    /**
+     * Polymorphic правило: каждый элемент interests[] — либо положительный int
+     * (legacy ID), либо kebab-slug (Этап 2). Mixed-array режектится отдельно
+     * через rejectMixedInterests(), чтобы upgrade-путь оставался простым:
+     * фронт мигрирует все категории разом, не по одной.
+     */
+    private function interestItemRule(): \Closure
+    {
+        return function (string $attribute, $value, \Closure $fail) {
+            if (is_int($value) || (is_string($value) && ctype_digit($value))) {
+                if ((int) $value > 0) return;
+                $fail("{$attribute}: int must be positive");
+                return;
+            }
+            if (is_string($value) && preg_match('/^[a-z0-9-]+$/', $value) && strlen($value) <= 64) {
+                return;
+            }
+            $fail("{$attribute}: must be positive int (legacy) or kebab-slug");
+        };
+    }
+
+    private function rejectMixedInterests(Request $request, \Illuminate\Validation\Validator $validator): void
+    {
+        $arr = (array) $request->input('interests', []);
+        if (count($arr) < 2) return;
+
+        $hasInt = false;
+        $hasSlug = false;
+        foreach ($arr as $x) {
+            if (is_int($x) || (is_string($x) && ctype_digit($x))) {
+                $hasInt = true;
+            } elseif (is_string($x)) {
+                $hasSlug = true;
+            }
+            if ($hasInt && $hasSlug) break;
+        }
+        if ($hasInt && $hasSlug) {
+            $validator->errors()->add('interests', 'must not mix legacy ints and slugs in one query');
+        }
     }
 }

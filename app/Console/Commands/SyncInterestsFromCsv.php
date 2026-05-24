@@ -5,6 +5,8 @@ namespace App\Console\Commands;
 use App\Models\Interest;
 use App\Models\InterestAlias;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use League\Csv\Reader;
 
 class SyncInterestsFromCsv extends Command
@@ -120,6 +122,23 @@ class SyncInterestsFromCsv extends Command
             $this->info("Aliases imported: +{$added}");
         }
 
+        // Инвалидация кэша /api/web/interests (TTL 10 мин — без forget юзеры
+        // ждали бы новые интересы до 10 минут после sync).
+        $this->invalidateCatalogCache();
+
         return 0;
+    }
+
+    private function invalidateCatalogCache(): void
+    {
+        // Cache::tags недоступен на file/database драйверах, поэтому стираем
+        // ключи по списку. Шаблон ключа должен синхронно меняться с
+        // InterestsController::index().
+        Cache::forget('interests:catalog:all:-:-');
+        $cityIds = DB::table('cities')->pluck('id');
+        foreach ($cityIds as $cityId) {
+            Cache::forget("interests:catalog:{$cityId}:-:-");
+        }
+        $this->info("Catalog cache invalidated (cities: {$cityIds->count()})");
     }
 }

@@ -59,6 +59,20 @@ class WebEventResource extends JsonResource
         $siblings = $this->getAttribute('siblings');
         $siblings = is_array($siblings) && count($siblings) > 0 ? $siblings : null;
 
+        // interests: всегда array (если relation не загружен — пустой массив,
+        // чтобы фронт не проверял null/undefined). Этап 2: parent_slug в payload
+        // event'а не дублируем — фронт строит дерево из /api/web/interests.
+        $interests = [];
+        if ($this->relationLoaded('interests') && $this->interests) {
+            foreach ($this->interests as $i) {
+                if (!$i->slug) continue;
+                $interests[] = [
+                    'slug' => (string) $i->slug,
+                    'name' => (string) $i->name,
+                ];
+            }
+        }
+
         $out = [
             'id'             => (int) $this->id,
             'title'          => (string) ($this->title ?? ''),
@@ -94,6 +108,8 @@ class WebEventResource extends JsonResource
             'is_past' => (bool) ($this->getAttribute('__is_past') ?? false),
 
             'group' => $group,
+
+            'interests' => $interests,
         ];
 
         if ($siblings !== null) {

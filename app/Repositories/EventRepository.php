@@ -14,7 +14,14 @@ class EventRepository
 {
     private const FUZZY_MIN_LEN = 3;
     private const PAST_GRACE_HOURS = 1;
-    private const PAST_LOOKBACK_DAYS = 7;
+    /**
+     * Окно «event ещё актуален» для лент и счётчиков: события могут отображаться
+     * до N дней после старта (юзер видит то, что началось час назад). Public —
+     * чтобы /api/web/interests events_count считал в том же окне что
+     * /api/web/events; иначе chip-counter «(39)» не совпадёт с числом
+     * events в ленте после клика.
+     */
+    public const PAST_LOOKBACK_DAYS = 7;
 
     private ?bool $hasTrgm = null;
     private ?bool $hasWordSim = null;
@@ -321,6 +328,73 @@ class EventRepository
      *   - totalEvents: количество events до схлопывания (для display-счётчика),
      *     либо null если ни grouped, ни grouped_by_post не были запрошены
      */
+    /**
+     * Double-write на время прод-rollout Этапа 2: фронт постепенно мигрирует
+     * с interests[]=ID на interests[]=slug. Validator не пускает mixed, так
+     * что массив гарантированно гомогенный.
+     *
+     * - all numeric → legacy путь, прямой whereIn(id), без иерархии (как было
+     *   до Этапа 2: parent не разворачивался — сохраняем семантику).
+     * - all string → новый путь через recursive CTE.
+     *
+     * Cleanup-PR через 1-2 недели после миграции фронта снесёт legacy-ветку.
+     *
+     * @param array<int|string> $input
+     * @return int[]
+     */
+    private function resolveInterestFilterIds(array $input): array
+    {
+        if (!$input) return [];
+
+        $first = reset($input);
+        $isLegacyInt = is_int($first) || (is_string($first) && ctype_digit($first));
+
+        if ($isLegacyInt) {
+            return array_values(array_filter(array_map('intval', $input)));
+        }
+
+        $strings = array_values(array_filter($input, 'is_string'));
+        return $this->expandInterestSlugsToIds($strings);
+    }
+
+    /**
+     * Раскрывает interest-slugs до полного set id (self + все потомки через
+     * recursive CTE). Используется только web-методами; bot/admin продолжают
+     * принимать interest int[].
+     *
+     * Опечатка в slug → empty result у вызывающего (по плану — это фича, не баг).
+     *
+     * @param string[] $slugs
+     * @return int[]
+     */
+    private function expandInterestSlugsToIds(array $slugs): array
+    {
+        $norm = [];
+        foreach ($slugs as $s) {
+            if (!is_string($s)) continue;
+            $s = mb_strtolower(trim($s));
+            if ($s === '') continue;
+            $norm[] = $s;
+        }
+        if (!$norm) return [];
+
+        // slugs валидированы regex [a-z0-9-]+ в EventsController → запятой
+        // быть не может, безопасно склеить в CSV для string_to_array.
+        $csv = implode(',', array_values(array_unique($norm)));
+
+        $rows = DB::select(
+            "WITH RECURSIVE picked AS (
+                SELECT id FROM interests WHERE slug = ANY(string_to_array(?, ','))
+                UNION
+                SELECT i.id FROM interests i JOIN picked p ON i.parent_id = p.id
+            )
+            SELECT id FROM picked",
+            [$csv]
+        );
+
+        return array_map(fn ($r) => (int) $r->id, $rows);
+    }
+
     public function paginateUpcomingWeb(array $filters, int $perPage = 20): array
     {
         $grouped = array_key_exists('grouped', $filters)
@@ -351,7 +425,8 @@ class EventRepository
                             ->whereNotNull('events.start_date')
                             ->where('events.start_date', '>=', $fromDateMsk);
                     });
-            });
+            })
+            ->with(['interests:id,slug,name']);
 
         $this->addPastFlags($q); // __past_rank + __is_past
         $this->addGrayRank($q);
@@ -442,11 +517,16 @@ class EventRepository
         }
 
         if (!empty($filters['interests']) && is_array($filters['interests'])) {
-            $ids = array_filter(array_map('intval', $filters['interests']));
+            // Double-write: input — либо int[] (legacy), либо slug[] (Этап 2,
+            // CTE разворачивает parent → self+descendants). Validator выше не
+            // пускает mixed-array. Пустой ids → 1=0 (защита от typo в slug).
+            $ids = $this->resolveInterestFilterIds($filters['interests']);
             if ($ids) {
                 $q->whereHas('interests', function ($w) use ($ids) {
                     $w->whereIn('interests.id', $ids);
                 });
+            } else {
+                $q->whereRaw('1 = 0');
             }
         }
 
@@ -854,7 +934,7 @@ class EventRepository
      *
      * @param array{
      *   city_id?: int, date_from?: string, date_to?: string, community_id?: int,
-     *   q?: string, interests?: int[], free?: bool, price_min?: int, price_max?: int,
+     *   q?: string, interests?: array<int|string>, free?: bool, price_min?: int, price_max?: int,
      *   priced?: bool, tod?: string, exclude_ids?: int[]
      * } $filters
      * @return array{event: Event|null, total: int}
@@ -883,7 +963,8 @@ class EventRepository
                             ->whereNotNull('events.start_date')
                             ->where('events.start_date', '>=', $fromDateMsk);
                     });
-            });
+            })
+            ->with(['interests:id,slug,name']);
 
         // компас не показывает уже прошедшие события
         $q->whereRaw("NOT (
@@ -956,11 +1037,14 @@ class EventRepository
         }
 
         if (!empty($filters['interests']) && is_array($filters['interests'])) {
-            $ids = array_filter(array_map('intval', $filters['interests']));
+            // Double-write — см. resolveInterestFilterIds().
+            $ids = $this->resolveInterestFilterIds($filters['interests']);
             if ($ids) {
                 $q->whereHas('interests', function ($w) use ($ids) {
                     $w->whereIn('interests.id', $ids);
                 });
+            } else {
+                $q->whereRaw('1 = 0');
             }
         }
 
@@ -1082,7 +1166,7 @@ class EventRepository
             ->where('events.id', $id)
             ->with([
                 'community:id,name,city,avatar_url',
-                'interests:id,name',
+                'interests:id,slug,name',
                 'venue:id,slug,name,kind',
                 'eventSources:id,event_id,source,post_external_id,external_url,published_at,images,generated_link,social_link_id',
                 'originalPost:id,text',
