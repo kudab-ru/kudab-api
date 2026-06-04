@@ -423,6 +423,148 @@ class WebEventsTest extends TestCase
             ->assertJsonCount(3, 'data');
     }
 
+    /* ===================== related (Interests Этап 3) ===================== */
+
+    public function test_related_ranks_by_shared_interest_count(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $jazz  = $this->createInterest('Джаз', 'jazz');
+        $music = $this->createInterest('Музыка', 'music');
+        $theatre = $this->createInterest('Театр', 'theatre');
+
+        $base = $this->createEvent($msk->id, $community->id, 'База', now()->addDay());
+        $this->tagEventLeafOnly($base->id, $jazz->id);
+        $this->tagEventLeafOnly($base->id, $music->id);
+
+        $two = $this->createEvent($msk->id, $community->id, 'Два общих', now()->addDays(2));
+        $this->tagEventLeafOnly($two->id, $jazz->id);
+        $this->tagEventLeafOnly($two->id, $music->id);
+
+        $one = $this->createEvent($msk->id, $community->id, 'Один общий', now()->addDays(3));
+        $this->tagEventLeafOnly($one->id, $jazz->id);
+
+        $zero = $this->createEvent($msk->id, $community->id, 'Ноль общих', now()->addDays(4));
+        $this->tagEventLeafOnly($zero->id, $theatre->id);
+
+        $response = $this->getJson("/api/web/events/{$base->id}/related");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.0.title', 'Два общих')
+            ->assertJsonPath('data.1.title', 'Один общий');
+
+        $response->assertJsonMissing(['title' => 'Ноль общих']);
+        $response->assertJsonMissing(['title' => 'База']);
+    }
+
+    public function test_related_excludes_self_and_other_city(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $spb = $this->insertCity('Санкт-Петербург', 'spb', 'active', 30.3351, 59.9343);
+        $mc = $this->createCommunity($msk->id, 'Орг Москва');
+        $sc = $this->createCommunity($spb->id, 'Орг Питер');
+
+        $jazz = $this->createInterest('Джаз', 'jazz');
+
+        $base = $this->createEvent($msk->id, $mc->id, 'База', now()->addDay());
+        $this->tagEventLeafOnly($base->id, $jazz->id);
+
+        $sameCity = $this->createEvent($msk->id, $mc->id, 'Тот же город', now()->addDays(2));
+        $this->tagEventLeafOnly($sameCity->id, $jazz->id);
+
+        $otherCity = $this->createEvent($spb->id, $sc->id, 'Другой город', now()->addDays(2));
+        $this->tagEventLeafOnly($otherCity->id, $jazz->id);
+
+        $response = $this->getJson("/api/web/events/{$base->id}/related");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Тот же город');
+
+        $response->assertJsonMissing(['title' => 'База']);
+        $response->assertJsonMissing(['title' => 'Другой город']);
+    }
+
+    public function test_related_respects_main_feed_taxonomy_filter(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $jazz = $this->createInterest('Джаз', 'jazz');
+
+        $base = $this->createEvent($msk->id, $community->id, 'База', now()->addDay());
+        $this->tagEventLeafOnly($base->id, $jazz->id);
+
+        $kids = $this->createEvent($msk->id, $community->id, 'Детское', now()->addDays(2));
+        $this->tagEventLeafOnly($kids->id, $jazz->id);
+        $this->setTaxonomy($kids->id, 'kids', 'culture');
+
+        $adult = $this->createEvent($msk->id, $community->id, 'Взрослое', now()->addDays(2));
+        $this->tagEventLeafOnly($adult->id, $jazz->id);
+        $this->setTaxonomy($adult->id, 'general', 'entertainment');
+
+        $response = $this->getJson("/api/web/events/{$base->id}/related");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Взрослое');
+
+        $response->assertJsonMissing(['title' => 'Детское']);
+    }
+
+    public function test_related_empty_when_event_has_no_interests(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $jazz = $this->createInterest('Джаз', 'jazz');
+
+        $base = $this->createEvent($msk->id, $community->id, 'Без интересов', now()->addDay());
+
+        $other = $this->createEvent($msk->id, $community->id, 'С тегом', now()->addDays(2));
+        $this->tagEventLeafOnly($other->id, $jazz->id);
+
+        $response = $this->getJson("/api/web/events/{$base->id}/related");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(0, 'data');
+    }
+
+    public function test_related_excludes_past_events(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 3, 22, 12, 0, 0, 'Europe/Moscow'));
+
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $jazz = $this->createInterest('Джаз', 'jazz');
+
+        $base = $this->createEvent($msk->id, $community->id, 'База', Carbon::create(2026, 3, 23, 18, 0, 0, 'Europe/Moscow'));
+        $this->tagEventLeafOnly($base->id, $jazz->id);
+
+        // -10 дней от now → вне future-окна (PAST_LOOKBACK_DAYS=7)
+        $past = $this->createEvent($msk->id, $community->id, 'Прошедшее', Carbon::create(2026, 3, 12, 18, 0, 0, 'Europe/Moscow'));
+        $this->tagEventLeafOnly($past->id, $jazz->id);
+
+        $future = $this->createEvent($msk->id, $community->id, 'Будущее', Carbon::create(2026, 3, 24, 18, 0, 0, 'Europe/Moscow'));
+        $this->tagEventLeafOnly($future->id, $jazz->id);
+
+        $response = $this->getJson("/api/web/events/{$base->id}/related");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Будущее');
+
+        $response->assertJsonMissing(['title' => 'Прошедшее']);
+    }
+
     /* ===================== helpers ===================== */
 
     private function createInterest(string $name, string $slug, ?int $parentId = null): Interest

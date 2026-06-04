@@ -45,6 +45,15 @@ class EventService
     }
 
     /**
+     * Web: похожие события по интересам (Interests Этап 3).
+     * Пустая коллекция — штатно (фронт показывает фолбэк города).
+     */
+    public function relatedWeb(int $id, int $limit = 8): EloquentCollection
+    {
+        return $this->repo->relatedByInterests($id, $limit);
+    }
+
+    /**
      * Web: получить группу целиком (ленивая подгрузка для карусели).
      * Возвращаем items в том же формате, что /web/events (через WebEventResource на контроллере).
      */

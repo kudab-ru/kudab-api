@@ -273,6 +273,24 @@ class EventsController extends Controller
     }
 
     /**
+     * GET /api/web/events/{id}/related
+     * Похожие события по интересам (Interests Этап 3). Тот же формат карточки
+     * что /events. Пустой список — штатно: фронт показывает фолбэк города.
+     * Несуществующий id отдаёт пустой data (не 404) — блок просто скрывается.
+     */
+    public function related(int $id, Request $request): JsonResponse
+    {
+        $limit = (int) $request->input('limit', 8);
+        $limit = max(1, min($limit, 24));
+
+        $items = $this->service->relatedWeb($id, $limit);
+
+        return response()->json([
+            'data' => WebEventResource::collection($items),
+        ]);
+    }
+
+    /**
      * Polymorphic правило: каждый элемент interests[] — либо положительный int
      * (legacy ID), либо kebab-slug (Этап 2). Mixed-array режектится отдельно
      * через rejectMixedInterests(), чтобы upgrade-путь оставался простым:

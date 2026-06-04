@@ -1188,6 +1188,108 @@ class EventRepository
         return $event;
     }
 
+    /**
+     * Похожие события по интересам (Interests Этап 3).
+     *
+     * Берёт интересы события $eventId и ищет другие события того же города
+     * с пересечением по event_interest, ранжируя по числу общих интересов
+     * (DESC), затем тем же приоритетом что лента (не-past → с картинкой →
+     * не-gray → ближе по дате).
+     *
+     * Видимость — ровно как у /web/events: cities.active, не-deleted,
+     * future-окно (PAST_LOOKBACK_DAYS), excludeBlacklistedSources,
+     * applyMainFeedTaxonomyFilter (kids/family + official/religious скрыты).
+     * include_all сюда не пробрасываем — related всегда в формате ленты.
+     *
+     * Пустой результат (у события нет интересов / нет пересечений) штатен:
+     * вызывающий фронт показывает фолбэк «другие события города».
+     */
+    public function relatedByInterests(int $eventId, int $limit = 8): EloquentCollection
+    {
+        $limit = max(1, min($limit, 24));
+
+        $base = Event::query()
+            ->whereNull('deleted_at')
+            ->select('id', 'city_id')
+            ->find($eventId);
+
+        if ($base === null) {
+            return new EloquentCollection();
+        }
+
+        $interestIds = DB::table('event_interest')
+            ->where('event_id', $eventId)
+            ->pluck('interest_id')
+            ->map(fn ($v) => (int) $v)
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+
+        if (empty($interestIds)) {
+            return new EloquentCollection();
+        }
+
+        $nowMsk = now('Europe/Moscow');
+        $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
+        $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
+
+        // $interestIds — int[] после cast, безопасно инлайнить в коррелированный
+        // count (он же — ключ сортировки по силе пересечения).
+        $idsList = implode(',', $interestIds);
+        $sharedSql = "(SELECT COUNT(*) FROM event_interest ei
+            WHERE ei.event_id = events.id AND ei.interest_id IN ($idsList))";
+
+        $q = Event::query()
+            ->select('events.*', 'ct.slug as city_slug')
+            ->selectRaw("$sharedSql as __shared_interests")
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
+            ->whereNull('events.deleted_at')
+            ->where('events.city_id', (int) $base->city_id)
+            ->where('events.id', '<>', $eventId)
+            ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
+                $w->where('events.start_time', '>=', $cutoffTs)
+                    ->orWhere(function ($x) use ($fromDateMsk) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $fromDateMsk);
+                    });
+            })
+            ->whereHas('interests', function ($w) use ($interestIds) {
+                $w->whereIn('interests.id', $interestIds);
+            })
+            ->with([
+                'interests:id,slug,name',
+                'venue:id,slug,name,kind',
+            ]);
+
+        $this->addPastFlags($q);
+        $this->addGrayRank($q);
+        $this->addImgRank($q);
+
+        $this->excludeBlacklistedSources($q);
+        $this->applyMainFeedTaxonomyFilter($q, []);
+
+        $q->orderByRaw('__shared_interests desc')
+            ->orderBy('__past_rank', 'asc')
+            ->orderBy('__img_rank', 'asc')
+            ->orderBy('__gray_rank', 'asc')
+            ->orderByRaw('events.start_date asc nulls last')
+            ->orderByRaw('events.start_time asc nulls last')
+            ->orderBy('events.id', 'asc');
+
+        $events = $q->limit($limit)->get();
+
+        $this->hydrateImages($events);
+
+        $events->each(function ($e) {
+            $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__shared_interests']);
+        });
+
+        return $events;
+    }
+
     private function hydrateImages(EloquentCollection $events): void
     {
         if ($events->isEmpty()) return;
