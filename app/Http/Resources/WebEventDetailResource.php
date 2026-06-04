@@ -88,6 +88,7 @@ class WebEventDetailResource extends JsonResource
 
             // цена
             'price_status' => $this->price_status,
+            'tickets_status' => (string) ($this->tickets_status ?? 'unknown'),
             'price_min' => $this->price_min !== null ? (int) $this->price_min : null,
             'price_max' => $this->price_max !== null ? (int) $this->price_max : null,
             'price_currency' => $this->price_currency,

@@ -97,6 +97,7 @@ class WebEventResource extends JsonResource
             'time_precision' => (string) ($this->time_precision ?? 'datetime'),
 
             'price_status'   => (string) ($this->price_status ?? 'unknown'),
+            'tickets_status' => (string) ($this->tickets_status ?? 'unknown'),
             'price_min'      => $this->price_min !== null ? (int) $this->price_min : null,
             'price_max'      => $this->price_max !== null ? (int) $this->price_max : null,
             'price_text'     => $this->price_text !== null ? (string) $this->price_text : null,
