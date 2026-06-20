@@ -136,6 +136,37 @@ class TelegramChatController extends Controller
     ]);
 }
 
+    /**
+     * POST /api/bot/telegram-chats/set-city
+     *
+     * Задать городу канала (для автопостинга). Без города enqueue-due пропускает канал.
+     * Body: { "telegram_id": 123, "telegram_chat_id": -100..., "city": "voronezh" }
+     */
+    public function setCity(Request $request): JsonResponse
+    {
+        $v = validator($request->all(), [
+            'telegram_id'      => ['required', 'integer'],
+            'telegram_chat_id' => ['required', 'integer'],
+            'city'             => ['required', 'string', 'max:64'],
+        ])->validate();
+
+        try {
+            $chat = $this->service->setChatCity(
+                (int) $v['telegram_id'],
+                (int) $v['telegram_chat_id'],
+                (string) $v['city'],
+            );
+        } catch (\RuntimeException $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+        }
+
+        return response()->json([
+            'ok'        => true,
+            'chat'      => $this->serializeChat($chat),
+            'city_id'   => $chat->city_id,
+            'city_name' => optional($chat->city)->name,
+        ]);
+    }
 
     private function serializeChat(TelegramChat $chat): array
     {

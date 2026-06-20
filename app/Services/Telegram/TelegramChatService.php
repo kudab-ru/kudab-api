@@ -5,6 +5,7 @@ namespace App\Services\Telegram;
 use App\Contracts\Telegram\BotRoleServiceInterface;
 use App\Contracts\Telegram\TelegramChatRepositoryInterface;
 use App\Contracts\Telegram\TelegramUserRepositoryInterface;
+use App\Models\City;
 use App\Models\TelegramChat;
 use Illuminate\Support\Collection;
 use RuntimeException;
@@ -92,4 +93,64 @@ class TelegramChatService
         });
     }
 
+    /**
+     * Задать городу канала (для автопостинга): по telegram_id владельца.
+     * Без города enqueue-due пропускает канал — это обязательный шаг настройки.
+     *
+     * @param string $cityRef slug ('voronezh') или id ('14').
+     */
+    public function setChatCity(int $telegramId, int $telegramChatId, string $cityRef): TelegramChat
+    {
+        $this->assertCanManageChats($telegramId);
+
+        $telegramUser = $this->telegramUserRepository->findByTelegramId($telegramId);
+        if (!$telegramUser) {
+            throw new RuntimeException('Telegram-пользователь не найден в БД');
+        }
+
+        $chat = $this->chatRepository->findByTelegramChatId($telegramChatId);
+        if (!$chat) {
+            throw new RuntimeException('Чат не найден в БД: ' . $telegramChatId);
+        }
+
+        // Город может менять владелец чата (или admin/superadmin).
+        $role = $this->botRoleService->getRoleByTelegramId($telegramId);
+        if ($chat->telegram_user_id !== $telegramUser->id
+            && !in_array($role, ['admin', 'superadmin'], true)) {
+            throw new RuntimeException('Этот чат не привязан к текущему пользователю');
+        }
+
+        return $this->forceSetChatCity($chat, $cityRef);
+    }
+
+    /**
+     * Системно задать город каналу (без проверки прав) — для CLI/деплой-операций.
+     */
+    public function forceSetChatCity(TelegramChat $chat, string $cityRef): TelegramChat
+    {
+        $city = $this->resolveCity($cityRef);
+        if (!$city) {
+            throw new RuntimeException('Город не найден или не активен: ' . $cityRef);
+        }
+
+        $chat->city_id = $city->id; // city_id вне fillable — ставим напрямую
+        $chat->save();
+
+        return $chat->refresh();
+    }
+
+    /** Резолв города по slug или id (только активные). */
+    private function resolveCity(string $ref): ?City
+    {
+        $ref = trim($ref);
+        if ($ref === '') {
+            return null;
+        }
+
+        $query = City::query()->where('status', 'active');
+
+        return ctype_digit($ref)
+            ? $query->where('id', (int) $ref)->first()
+            : $query->whereRaw('LOWER(slug) = ?', [strtolower($ref)])->first();
+    }
 }

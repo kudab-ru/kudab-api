@@ -121,6 +121,7 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     Route::get('/telegram-chats/by-telegram/{telegram_id}', [TelegramChatController::class, 'listByTelegram']);
     Route::post('/telegram-chats/link',   [TelegramChatController::class, 'link']);
     Route::post('/telegram-chats/unlink', [TelegramChatController::class, 'unlink']);
+    Route::post('/telegram-chats/set-city', [TelegramChatController::class, 'setCity']);
 
     Route::post('/broadcast/get', [TelegramChatBroadcastController::class, 'getBroadcast']);
     Route::post('/broadcast/update', [TelegramChatBroadcastController::class, 'updateBroadcast']);
