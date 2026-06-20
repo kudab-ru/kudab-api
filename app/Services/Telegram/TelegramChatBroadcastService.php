@@ -11,18 +11,23 @@ use App\Models\Event;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
+use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use Carbon\Carbon;
 use DateTimeInterface;
 use RuntimeException;
 
 class TelegramChatBroadcastService
 {
+    /** Кап кандидатного пула под скоринг (на канал — события одного города). */
+    private const SCORING_CANDIDATE_LIMIT = 100;
+
     public function __construct(
         private readonly TelegramUserRepositoryInterface              $telegramUserRepository,
         private readonly TelegramChatRepositoryInterface              $chatRepository,
         private readonly TelegramChatBroadcastRepositoryInterface     $broadcastRepository,
         private readonly TelegramChatBroadcastItemRepositoryInterface $broadcastItemRepository,
         private readonly BotRoleServiceInterface                      $botRoleService,
+        private readonly EventBroadcastScorer                         $scorer,
     ) {}
 
     // ---------------------------------------------------------------------
@@ -518,13 +523,30 @@ class TelegramChatBroadcastService
             })
             ->whereHas('community', function ($q) use ($chat) {
                 $q->where('city_id', $chat->city_id);
+            })
+            // Жёсткие фильтры (NULL-safe): не распроданное, не официоз/религия.
+            ->where(function ($q) {
+                $q->whereNull('tickets_status')
+                    ->orWhere('tickets_status', '!=', 'sold_out');
+            })
+            ->where(function ($q) {
+                $q->whereNull('content_kind')
+                    ->orWhereNotIn('content_kind', ['official', 'religious']);
             });
 
         if (!empty($excludeEventIds)) {
             $query->whereNotIn('id', array_values(array_unique(array_map('intval', $excludeEventIds))));
         }
 
-        return $query->orderBy('start_time')->first()?->id;
+        // Кандидатный пул — ближайшие, кап; качество выбираем скорингом в PHP.
+        $candidates = $query
+            ->with(['sources:id,event_id,images,published_at'])
+            ->withCount('interests')
+            ->orderBy('start_time')
+            ->limit(self::SCORING_CANDIDATE_LIMIT)
+            ->get();
+
+        return $this->scorer->pickBest($candidates)?->id;
     }
 
     /**

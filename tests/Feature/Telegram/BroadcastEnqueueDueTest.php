@@ -104,6 +104,41 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertSame(0, TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->count());
     }
 
+    public function test_does_not_pick_sold_out_event(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $e = $this->createEvent($city->id, $community->id, 'Распродано', now()->addDay());
+        $e->tickets_status = 'sold_out';
+        $e->save();
+
+        $chat = $this->createChannelChat($city->id, -1007);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+
+        $summary = $this->service()->enqueueDueForAllChannels(now());
+
+        $this->assertSame(1, $summary['no_candidate']);
+        $this->assertSame(0, $summary['enqueued']);
+        $this->assertSame(0, TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->count());
+    }
+
+    public function test_does_not_pick_official_content_kind(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $e = $this->createEvent($city->id, $community->id, 'Официальное', now()->addDay());
+        $e->content_kind = 'official';
+        $e->save();
+
+        $chat = $this->createChannelChat($city->id, -1008);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+
+        $summary = $this->service()->enqueueDueForAllChannels(now());
+
+        $this->assertSame(1, $summary['no_candidate']);
+        $this->assertSame(0, $summary['enqueued']);
+    }
+
     public function test_not_due_when_period_off(): void
     {
         $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
