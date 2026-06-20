@@ -38,6 +38,10 @@ return [
     'bot' => [
         'shared_token' => env('BOT_SHARED_TOKEN'),
 
+        // Telegram-id супер-админа (= ADMIN_CHAT_ID бота). При первой проверке прав
+        // BotRoleService само-провижит его в БД, если записи нет (bootstrap из env).
+        'superadmin_telegram_id' => (int) env('BOT_SUPERADMIN_TELEGRAM_ID', 0),
+
         // P0.5 approve-in-DM: ревью-гейт автопостинга. Default OFF — автонаполнение
         // кладёт pending (как сейчас); ON — pending_review + превью владельцу в ЛС +
         // авто-пост по таймауту. Включать на проде после деплоя бота с веткой по type.

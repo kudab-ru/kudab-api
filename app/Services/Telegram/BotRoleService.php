@@ -8,7 +8,8 @@ use App\Contracts\Telegram\TelegramUserRepositoryInterface;
 class BotRoleService implements BotRoleServiceInterface
 {
     public function __construct(
-        private readonly TelegramUserRepositoryInterface $telegramUserRepository
+        private readonly TelegramUserRepositoryInterface $telegramUserRepository,
+        private readonly SuperAdminProvisioner $superAdminProvisioner,
     ) {}
 
     /** Порядок приоритета (чем выше число — тем выше права) */
@@ -24,6 +25,14 @@ class BotRoleService implements BotRoleServiceInterface
     {
         $user = $this->telegramUserRepository->getBoundUserByTelegramId($telegramId);
         if (!$user) {
+            // Bootstrap env-суперадмина: заявленный в BOT_SUPERADMIN_TELEGRAM_ID аккаунт
+            // получает права сразу, даже если он ещё не /start'ил бота и не в БД.
+            $superId = (int) config('services.bot.superadmin_telegram_id', 0);
+            if ($superId > 0 && $telegramId === $superId) {
+                $this->superAdminProvisioner->ensure($telegramId);
+                return 'superadmin';
+            }
+
             return 'guest';
         }
 
