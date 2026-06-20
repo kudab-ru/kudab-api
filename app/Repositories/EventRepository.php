@@ -243,6 +243,10 @@ class EventRepository
             $q->where('events.community_id', (int) $filters['community_id']);
         }
 
+        if (!empty($filters['venue_id'])) {
+            $q->where('events.venue_id', (int) $filters['venue_id']);
+        }
+
         $qNorm = $this->normalizeQ($filters['q'] ?? null);
 
         if ($qNorm !== null) {
@@ -475,6 +479,10 @@ class EventRepository
 
         if (!empty($filters['community_id'])) {
             $q->where('events.community_id', (int) $filters['community_id']);
+        }
+
+        if (!empty($filters['venue_id'])) {
+            $q->where('events.venue_id', (int) $filters['venue_id']);
         }
 
         $qNorm = $this->normalizeQ($filters['q'] ?? null);
@@ -934,7 +942,7 @@ class EventRepository
      * выдать уже прошедшее событие.
      *
      * @param array{
-     *   city_id?: int, date_from?: string, date_to?: string, community_id?: int,
+     *   city_id?: int, date_from?: string, date_to?: string, community_id?: int, venue_id?: int,
      *   q?: string, interests?: array<int|string>, free?: bool, price_min?: int, price_max?: int,
      *   priced?: bool, tod?: string, exclude_ids?: int[]
      * } $filters
@@ -1007,6 +1015,10 @@ class EventRepository
 
         if (!empty($filters['community_id'])) {
             $q->where('events.community_id', (int) $filters['community_id']);
+        }
+
+        if (!empty($filters['venue_id'])) {
+            $q->where('events.venue_id', (int) $filters['venue_id']);
         }
 
         $qNorm = $this->normalizeQ($filters['q'] ?? null);

@@ -41,6 +41,7 @@ class EventsController extends Controller
 
             'q'            => ['sometimes','string','max:255'],
             'community_id' => ['sometimes','integer'],
+            'venue_id'     => ['sometimes','integer','min:1'],
             'interests'    => ['sometimes','array'],
             // Double-write для Этапа 2 rollout: legacy фронт шлёт int (ID),
             // новый — slug. Принимаем оба, но не mixed (см. after-callback).
@@ -184,6 +185,7 @@ class EventsController extends Controller
             'include_all'  => ['sometimes', 'boolean'],
             'q'            => ['sometimes', 'string', 'max:255'],
             'community_id' => ['sometimes', 'integer'],
+            'venue_id'     => ['sometimes', 'integer', 'min:1'],
             'interests'    => ['sometimes', 'array'],
             'interests.*'  => ['required', $this->interestItemRule()],
             'priced'       => ['sometimes', 'boolean'],
