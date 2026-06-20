@@ -134,4 +134,38 @@ interface TelegramChatBroadcastItemRepositoryInterface
         int $broadcastId,
         DateTimeInterface $now,
     ): ?TelegramChatBroadcastItem;
+
+    /**
+     * Активный (в полёте) элемент канала: pending/planned/pending_review/approved/
+     * auto_approved. pending/planned уважают planned_at; ревью-статусы готовы сразу.
+     */
+    public function findActiveForBroadcast(
+        int $broadcastId,
+        DateTimeInterface $now,
+    ): ?TelegramChatBroadcastItem;
+
+    public function findById(int $itemId): ?TelegramChatBroadcastItem;
+
+    public function setReviewMessageId(
+        TelegramChatBroadcastItem $item,
+        int $messageId,
+    ): TelegramChatBroadcastItem;
+
+    /**
+     * Применить решение ревью атомарно (guard WHERE status=pending_review):
+     * status (approved/rejected) + reviewed_at + review_action.
+     * @return bool true если переход состоялся (item был ещё pending_review).
+     */
+    public function applyReviewDecision(
+        TelegramChatBroadcastItem $item,
+        string $newStatus,
+        string $action,
+        DateTimeInterface $now,
+    ): bool;
+
+    /**
+     * Авто-одобрить просроченные pending_review (review_deadline_at <= now).
+     * @return int число затронутых элементов
+     */
+    public function autoApproveExpiredReviews(DateTimeInterface $now): int;
 }

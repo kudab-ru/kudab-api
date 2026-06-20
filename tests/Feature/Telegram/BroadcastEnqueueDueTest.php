@@ -307,6 +307,126 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertSame(0, TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->count(), 'dry-run не пишет');
     }
 
+    // ===== P0.5b: poll type-branching + decideReview + sweeper =====
+
+    public function test_poll_returns_review_task_for_pending_review(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Событие', now()->addDay());
+
+        $chat = $this->createChannelChat($city->id, -1014, 555111);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeReviewItem($broadcast->id, $event->id, 555111, now()->addHours(2));
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks);
+        $this->assertSame('review', $tasks[0]['type']);
+        $this->assertSame($item->id, $tasks[0]['item_id']);
+        $this->assertSame(555111, $tasks[0]['reviewer_telegram_id']);
+        $this->assertSame($event->id, $tasks[0]['event_id']);
+    }
+
+    public function test_poll_skips_pending_review_with_preview_already_sent(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Событие', now()->addDay());
+
+        $chat = $this->createChannelChat($city->id, -1015, 555111);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        // превью уже отправлено (review_message_id) → poll не должен возвращать задачу
+        $this->makeReviewItem($broadcast->id, $event->id, 555111, now()->addHours(2), 99999);
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(0, $tasks);
+    }
+
+    public function test_poll_returns_publish_task_for_approved_item(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Событие', now()->addDay());
+
+        $chat = $this->createChannelChat($city->id, -1016, 555222);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_APPROVED);
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks);
+        $this->assertSame('publish', $tasks[0]['type']);
+        $this->assertSame(555222, $tasks[0]['telegram_id']);
+        $this->assertSame($event->id, $tasks[0]['event_id']);
+    }
+
+    public function test_decide_review_approve_sets_approved(): void
+    {
+        $item = $this->makeStandaloneReviewItem(555333);
+
+        $this->service()->decideReview(555333, $item->id, true);
+
+        $item->refresh();
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_APPROVED, $item->status);
+        $this->assertSame('approve', $item->review_action);
+        $this->assertNotNull($item->reviewed_at);
+    }
+
+    public function test_decide_review_reject_sets_rejected(): void
+    {
+        $item = $this->makeStandaloneReviewItem(555333);
+
+        $this->service()->decideReview(555333, $item->id, false);
+
+        $item->refresh();
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_REJECTED, $item->status);
+        $this->assertSame('reject', $item->review_action);
+    }
+
+    public function test_decide_review_rejects_wrong_reviewer(): void
+    {
+        $item = $this->makeStandaloneReviewItem(555333);
+
+        $this->expectException(\RuntimeException::class);
+        $this->service()->decideReview(999999, $item->id, true);
+    }
+
+    public function test_decide_review_is_idempotent_when_already_decided(): void
+    {
+        $item = $this->makeStandaloneReviewItem(555333);
+        $item->status = TelegramChatBroadcastItem::STATUS_APPROVED;
+        $item->save();
+
+        // повторное решение по уже-решённому — no-op, не падает
+        $this->service()->decideReview(555333, $item->id, false);
+
+        $item->refresh();
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_APPROVED, $item->status);
+    }
+
+    public function test_auto_approve_expired_reviews(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $e1 = $this->createEvent($city->id, $community->id, 'Просрочено', now()->addDay());
+        $e2 = $this->createEvent($city->id, $community->id, 'Ещё ждёт', now()->addDays(2));
+
+        $chat = $this->createChannelChat($city->id, -1017, 555444);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+
+        $expired = $this->makeReviewItem($broadcast->id, $e1->id, 555444, now()->subMinute());
+        $fresh   = $this->makeReviewItem($broadcast->id, $e2->id, 555444, now()->addHours(2));
+
+        $count = $this->service()->autoApproveExpiredReviews(now());
+
+        $this->assertSame(1, $count);
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_AUTO_APPROVED, $expired->refresh()->status);
+        $this->assertSame('timeout', $expired->review_action);
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING_REVIEW, $fresh->refresh()->status);
+    }
+
     // ----------------------------------------------------------------
     // helpers (по образцу WebEventsTest + telegram-сущности)
     // ----------------------------------------------------------------
@@ -382,6 +502,34 @@ class BroadcastEnqueueDueTest extends TestCase
         $item->save();
 
         return $item;
+    }
+
+    private function makeReviewItem(int $broadcastId, int $eventId, int $reviewerTelegramId, Carbon $deadline, ?int $messageId = null): TelegramChatBroadcastItem
+    {
+        $item = new TelegramChatBroadcastItem();
+        $item->broadcast_id = $broadcastId;
+        $item->event_id = $eventId;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING_REVIEW;
+        $item->review_reviewer_telegram_id = $reviewerTelegramId;
+        $item->review_deadline_at = $deadline;
+        if ($messageId !== null) {
+            $item->review_message_id = $messageId;
+        }
+        $item->save();
+
+        return $item;
+    }
+
+    /** Самодостаточный pending_review item (со своим city/community/event/chat/broadcast). */
+    private function makeStandaloneReviewItem(int $reviewerTelegramId): TelegramChatBroadcastItem
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Событие', now()->addDay());
+        $chat = $this->createChannelChat($city->id, -1099, $reviewerTelegramId);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+
+        return $this->makeReviewItem($broadcast->id, $event->id, $reviewerTelegramId, now()->addHours(2));
     }
 
     private function createEventGroup(int $communityId, ?int $cityId, string $groupKey, string $titleNorm): int

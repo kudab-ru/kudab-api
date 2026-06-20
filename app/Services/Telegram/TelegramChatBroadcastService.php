@@ -314,15 +314,14 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * Собрать список «запланированных запусков» одиночной рассылки
-     * на текущий момент.
+     * Собрать пачку задач одиночной рассылки на текущий момент (pull для bot-cron).
      *
-     * Каждый элемент = [
-     *   'telegram_id'      => int,  // владелец/админ, от имени которого считаем права
-     *   'telegram_chat_id' => int,  // сам канал/чат
-     *   'event_id'         => int,
-     *   'template_code'    => string,
-     * ]
+     * Каждая задача помечена 'type':
+     *  - 'publish' — pending/planned/approved/auto_approved → постить в канал.
+     *    [type, item_id, telegram_id(owner), telegram_chat_id, event_id, template_code]
+     *  - 'review'  — pending_review без review_message_id → превью ревьюеру в ЛС.
+     *    [type, item_id, reviewer_telegram_id, telegram_chat_id, event_id, template_code, review_deadline_at]
+     *  pending_review с уже отправленным превью пропускается (ждём решения/таймаута).
      */
     public function collectDueSingleRuns(
         Carbon $now,
@@ -340,33 +339,50 @@ class TelegramChatBroadcastService
                 continue;
             }
 
-            // Ищем следующий элемент очереди для этого канала
-            $item = $this->broadcastItemRepository
-                ->findNextDueForBroadcast($broadcast->id, $now);
-
-            if (!$item) {
-                // очередь пустая или всё ещё рано по planned_at
-                continue;
-            }
-
             $chat = $broadcast->chat;
             if (!$chat instanceof TelegramChat || !$chat->telegram_chat_id) {
                 continue;
             }
 
-            // Владелец канала (telegram_id пользователя, который привязал чат)
-            $ownerTelegramId = $chat->owner?->telegram_id ?? null;
-            if (!$ownerTelegramId) {
-                // Если владельца не знаем — безопаснее пропустить
+            // Активный (в полёте) элемент канала — pending/planned/pending_review/approved/auto_approved.
+            $item = $this->broadcastItemRepository->findActiveForBroadcast($broadcast->id, $now);
+            if (!$item) {
                 continue;
             }
 
-            $tasks[] = [
-                'telegram_id'      => (int) $ownerTelegramId,
+            $ownerTelegramId = $chat->owner?->telegram_id ?? null;
+
+            $base = [
+                'item_id'          => (int) $item->id,
                 'telegram_chat_id' => (int) $chat->telegram_chat_id,
                 'event_id'         => (int) $item->event_id,
                 'template_code'    => (string) $broadcast->template_code,
             ];
+
+            if ($item->status === TelegramChatBroadcastItem::STATUS_PENDING_REVIEW) {
+                // Превью ещё не отправлено → review-задача; уже отправлено → ждём решения/таймаута.
+                if ($item->review_message_id) {
+                    continue;
+                }
+                $reviewerTelegramId = (int) ($item->review_reviewer_telegram_id ?? $ownerTelegramId ?? 0);
+                if (!$reviewerTelegramId) {
+                    continue;
+                }
+                $tasks[] = $base + [
+                    'type'                 => 'review',
+                    'reviewer_telegram_id' => $reviewerTelegramId,
+                    'review_deadline_at'   => optional($item->review_deadline_at)?->toIso8601String(),
+                ];
+            } else {
+                // pending/planned/approved/auto_approved → публикуем в канал.
+                if (!$ownerTelegramId) {
+                    continue;
+                }
+                $tasks[] = $base + [
+                    'type'        => 'publish',
+                    'telegram_id' => (int) $ownerTelegramId,
+                ];
+            }
 
             if (\count($tasks) >= $limit) {
                 break;
@@ -464,6 +480,58 @@ class TelegramChatBroadcastService
         }
 
         return $summary;
+    }
+
+    /**
+     * P0.5: отметить, что превью ревью отправлено в ЛС (персист message_id, чтобы
+     * не слать повторно на следующем poll-тике).
+     */
+    public function markReviewPreviewSent(int $itemId, int $messageId): void
+    {
+        $item = $this->broadcastItemRepository->findById($itemId);
+        if (!$item) {
+            throw new RuntimeException('Элемент очереди не найден.');
+        }
+
+        $this->broadcastItemRepository->setReviewMessageId($item, $messageId);
+    }
+
+    /**
+     * P0.5: решение ревьюера по pending_review (approve/reject). Идемпотентно: если
+     * решение уже принято (статус ≠ pending_review) — no-op. Решать может только
+     * адресат превью (snapshot review_reviewer_telegram_id).
+     */
+    public function decideReview(int $telegramId, int $itemId, bool $approve): void
+    {
+        $item = $this->broadcastItemRepository->findById($itemId);
+        if (!$item) {
+            throw new RuntimeException('Элемент очереди не найден.');
+        }
+
+        if ($item->status !== TelegramChatBroadcastItem::STATUS_PENDING_REVIEW) {
+            return; // уже решено/уехало дальше — идемпотентно ok
+        }
+
+        // fail-closed: без снапшота reviewer (===0) решать нельзя.
+        $reviewer = (int) ($item->review_reviewer_telegram_id ?? 0);
+        if ($reviewer === 0 || $reviewer !== $telegramId) {
+            throw new RuntimeException('Это превью адресовано другому пользователю.');
+        }
+
+        $this->broadcastItemRepository->applyReviewDecision(
+            $item,
+            $approve ? TelegramChatBroadcastItem::STATUS_APPROVED : TelegramChatBroadcastItem::STATUS_REJECTED,
+            $approve ? 'approve' : 'reject',
+            now(),
+        );
+    }
+
+    /**
+     * P0.5: авто-одобрить просроченные pending_review. Возвращает число затронутых.
+     */
+    public function autoApproveExpiredReviews(Carbon $now): int
+    {
+        return $this->broadcastItemRepository->autoApproveExpiredReviews($now);
     }
 
     // ---------------------------------------------------------------------

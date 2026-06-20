@@ -14,3 +14,8 @@ Artisan::command('inspire', function () {
 Schedule::command('broadcast:enqueue-due')
     ->everyFiveMinutes()
     ->withoutOverlapping();
+
+// P0.5 approve-in-DM: авто-пост просроченных pending_review по таймауту.
+Schedule::command('broadcast:approve-timeouts')
+    ->everyMinute()
+    ->withoutOverlapping();

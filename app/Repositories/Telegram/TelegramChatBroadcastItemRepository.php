@@ -220,4 +220,89 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
             ->orderByRaw('COALESCE(planned_at, created_at) ASC')
             ->first();
     }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function findActiveForBroadcast(int $broadcastId, DateTimeInterface $now): ?TelegramChatBroadcastItem
+    {
+        return TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                TelegramChatBroadcastItem::STATUS_APPROVED,
+                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+            ])
+            ->where(function ($q) use ($now) {
+                // pending/planned ждут planned_at; ревью-статусы готовы сразу.
+                $q->whereNotIn('status', [
+                    TelegramChatBroadcastItem::STATUS_PENDING,
+                    TelegramChatBroadcastItem::STATUS_PLANNED,
+                ])
+                    ->orWhereNull('planned_at')
+                    ->orWhere('planned_at', '<=', $now);
+            })
+            ->orderByRaw('COALESCE(planned_at, created_at) ASC')
+            ->first();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function findById(int $itemId): ?TelegramChatBroadcastItem
+    {
+        return TelegramChatBroadcastItem::query()->find($itemId);
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function setReviewMessageId(TelegramChatBroadcastItem $item, int $messageId): TelegramChatBroadcastItem
+    {
+        $item->review_message_id = $messageId;
+        $item->save();
+
+        return $item->refresh();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function applyReviewDecision(
+        TelegramChatBroadcastItem $item,
+        string $newStatus,
+        string $action,
+        DateTimeInterface $now,
+    ): bool {
+        // Атомарный guard по status: если timeout-sweeper / другой запрос уже увёл item
+        // из pending_review — наш UPDATE его не тронет (0 затронутых), решение не теряется.
+        $affected = TelegramChatBroadcastItem::query()
+            ->where('id', $item->id)
+            ->where('status', TelegramChatBroadcastItem::STATUS_PENDING_REVIEW)
+            ->update([
+                'status'        => $newStatus,
+                'review_action' => $action,
+                'reviewed_at'   => $now,
+            ]);
+
+        return $affected > 0;
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function autoApproveExpiredReviews(DateTimeInterface $now): int
+    {
+        return TelegramChatBroadcastItem::query()
+            ->where('status', TelegramChatBroadcastItem::STATUS_PENDING_REVIEW)
+            ->whereNotNull('review_deadline_at')
+            ->where('review_deadline_at', '<=', $now)
+            ->update([
+                'status'        => TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+                'review_action' => 'timeout',
+                'reviewed_at'   => $now,
+            ]);
+    }
 }

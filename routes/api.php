@@ -139,4 +139,9 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     );
 
     Route::get('/broadcast/templates', [TelegramChatBroadcastController::class, 'listTemplates']);
+
+    // P0.5 approve-in-DM: ревью-гейт автопостинга
+    Route::post('/broadcast/review/preview-sent', [TelegramChatBroadcastController::class, 'reviewPreviewSent']);
+    Route::post('/broadcast/review/approve', [TelegramChatBroadcastController::class, 'reviewApprove']);
+    Route::post('/broadcast/review/reject', [TelegramChatBroadcastController::class, 'reviewReject']);
 });

@@ -581,4 +581,78 @@ class TelegramChatBroadcastController extends Controller
             ]);
         }
     }
+
+    /**
+     * Бот сообщил, что превью ревью отправлено в ЛС (персист message_id).
+     *
+     * POST /api/bot/broadcast/review/preview-sent
+     * Body: { "item_id": 987, "message_id": 12345 }
+     */
+    public function reviewPreviewSent(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'item_id'    => ['required', 'integer'],
+            'message_id' => ['required', 'integer'],
+        ]);
+
+        try {
+            $this->broadcastService->markReviewPreviewSent(
+                (int) $validated['item_id'],
+                (int) $validated['message_id'],
+            );
+
+            return response()->json(['ok' => true]);
+        } catch (RuntimeException $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()]);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json(['ok' => false, 'error' => 'Не удалось сохранить превью ревью.']);
+        }
+    }
+
+    /**
+     * Ревьюер одобрил пост (callback rev:ok).
+     *
+     * POST /api/bot/broadcast/review/approve
+     * Body: { "telegram_id": 123, "item_id": 987 }
+     */
+    public function reviewApprove(Request $request): JsonResponse
+    {
+        return $this->decideReview($request, true);
+    }
+
+    /**
+     * Ревьюер отклонил пост (callback rev:no).
+     *
+     * POST /api/bot/broadcast/review/reject
+     */
+    public function reviewReject(Request $request): JsonResponse
+    {
+        return $this->decideReview($request, false);
+    }
+
+    private function decideReview(Request $request, bool $approve): JsonResponse
+    {
+        $validated = $request->validate([
+            'telegram_id' => ['required', 'integer'],
+            'item_id'     => ['required', 'integer'],
+        ]);
+
+        try {
+            $this->broadcastService->decideReview(
+                (int) $validated['telegram_id'],
+                (int) $validated['item_id'],
+                $approve,
+            );
+
+            return response()->json(['ok' => true]);
+        } catch (RuntimeException $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()]);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json(['ok' => false, 'error' => 'Не удалось применить решение ревью.']);
+        }
+    }
 }
