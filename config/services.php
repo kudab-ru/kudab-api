@@ -37,6 +37,12 @@ return [
 
     'bot' => [
         'shared_token' => env('BOT_SHARED_TOKEN'),
+
+        // P0.5 approve-in-DM: ревью-гейт автопостинга. Default OFF — автонаполнение
+        // кладёт pending (как сейчас); ON — pending_review + превью владельцу в ЛС +
+        // авто-пост по таймауту. Включать на проде после деплоя бота с веткой по type.
+        'broadcast_review_gate' => (bool) env('BROADCAST_REVIEW_GATE_ENABLED', false),
+        'broadcast_review_timeout_minutes' => (int) env('BROADCAST_REVIEW_TIMEOUT_MINUTES', 120),
     ],
 
     'vk' => [

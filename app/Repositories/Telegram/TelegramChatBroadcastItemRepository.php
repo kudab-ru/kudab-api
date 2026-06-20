@@ -68,6 +68,31 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
     /**
      * {@inheritdoc}
      */
+    public function enqueueForReview(
+        int $broadcastId,
+        int $eventId,
+        int $reviewerTelegramId,
+        DateTimeInterface $deadlineAt,
+    ): TelegramChatBroadcastItem {
+        $existing = $this->findByBroadcastAndEvent($broadcastId, $eventId);
+        if ($existing) {
+            return $existing;
+        }
+
+        $item = new TelegramChatBroadcastItem();
+        $item->broadcast_id = $broadcastId;
+        $item->event_id     = $eventId;
+        $item->status       = TelegramChatBroadcastItem::STATUS_PENDING_REVIEW;
+        $item->review_reviewer_telegram_id = $reviewerTelegramId;
+        $item->review_deadline_at = $deadlineAt;
+        $item->save();
+
+        return $item->refresh();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
     public function findNextPlannedForBroadcast(
         int $broadcastId,
         ?DateTimeInterface $before = null,

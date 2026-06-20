@@ -8,6 +8,7 @@ use App\Models\Event;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
+use App\Models\TelegramUser;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -217,6 +218,48 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertSame($newConcert->id, (int) $picked->event_id);
     }
 
+    public function test_review_gate_enqueues_pending_review_with_reviewer_and_deadline(): void
+    {
+        config([
+            'services.bot.broadcast_review_gate' => true,
+            'services.bot.broadcast_review_timeout_minutes' => 120,
+        ]);
+
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $this->createEvent($city->id, $community->id, 'Событие', now()->addDay());
+
+        $chat = $this->createChannelChat($city->id, -1012, 555000);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+
+        $summary = $this->service()->enqueueDueForAllChannels(now());
+
+        $this->assertSame(1, $summary['enqueued']);
+        $item = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->first();
+        $this->assertNotNull($item);
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING_REVIEW, $item->status);
+        $this->assertSame(555000, (int) $item->review_reviewer_telegram_id);
+        $this->assertTrue($item->review_deadline_at->equalTo(now()->addMinutes(120)));
+    }
+
+    public function test_review_gate_skips_channel_without_owner(): void
+    {
+        config(['services.bot.broadcast_review_gate' => true]);
+
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $this->createEvent($city->id, $community->id, 'Событие', now()->addDay());
+
+        $chat = $this->createChannelChat($city->id, -1013); // без owner
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+
+        $summary = $this->service()->enqueueDueForAllChannels(now());
+
+        $this->assertSame(1, $summary['skipped_no_reviewer']);
+        $this->assertSame(0, $summary['enqueued']);
+        $this->assertSame(0, TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->count());
+    }
+
     public function test_not_due_when_period_off(): void
     {
         $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
@@ -303,7 +346,7 @@ class BroadcastEnqueueDueTest extends TestCase
         return $event;
     }
 
-    private function createChannelChat(?int $cityId, int $telegramChatId): TelegramChat
+    private function createChannelChat(?int $cityId, int $telegramChatId, ?int $ownerTelegramId = null): TelegramChat
     {
         $chat = new TelegramChat();
         $chat->telegram_chat_id = $telegramChatId;
@@ -311,6 +354,10 @@ class BroadcastEnqueueDueTest extends TestCase
         $chat->is_active = true;
         if ($cityId !== null) {
             $chat->city_id = $cityId; // не в fillable — ставим напрямую
+        }
+        if ($ownerTelegramId !== null) {
+            $owner = TelegramUser::create(['telegram_id' => $ownerTelegramId]);
+            $chat->telegram_user_id = $owner->id;
         }
         $chat->save();
 

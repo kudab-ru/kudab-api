@@ -387,17 +387,18 @@ class TelegramChatBroadcastService
      * НЕ трогаем здесь — его двигает фактический пост; пока он не сдвинулся, isSingleRunDue
      * остаётся true, поэтому защищаемся «одно событие в полёте» (queue_busy).
      *
-     * @return array{checked:int,due:int,enqueued:int,skipped_no_city:int,skipped_queue_busy:int,no_candidate:int}
+     * @return array{checked:int,due:int,enqueued:int,skipped_no_city:int,skipped_queue_busy:int,no_candidate:int,skipped_no_reviewer:int}
      */
     public function enqueueDueForAllChannels(Carbon $now, bool $dryRun = false): array
     {
         $summary = [
-            'checked'           => 0,
-            'due'               => 0,
-            'enqueued'          => 0,
-            'skipped_no_city'   => 0,
-            'skipped_queue_busy' => 0,
-            'no_candidate'      => 0,
+            'checked'             => 0,
+            'due'                 => 0,
+            'enqueued'            => 0,
+            'skipped_no_city'     => 0,
+            'skipped_queue_busy'  => 0,
+            'no_candidate'        => 0,
+            'skipped_no_reviewer' => 0,
         ];
 
         $broadcasts = $this->broadcastRepository->listEnabledWithSchedule();
@@ -416,10 +417,14 @@ class TelegramChatBroadcastService
                 continue;
             }
 
-            // Одно событие в полёте: если в очереди уже есть незакрытый item — не плодим.
+            // Одно событие в полёте: если в очереди уже есть незакрытый item — не плодим
+            // (ревью-статусы тоже «в полёте» до фактического поста).
             $open = $this->broadcastItemRepository->countForBroadcast($broadcast->id, [
                 TelegramChatBroadcastItem::STATUS_PENDING,
                 TelegramChatBroadcastItem::STATUS_PLANNED,
+                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                TelegramChatBroadcastItem::STATUS_APPROVED,
+                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
             ]);
             if ($open > 0) {
                 $summary['skipped_queue_busy']++;
@@ -432,9 +437,29 @@ class TelegramChatBroadcastService
                 continue;
             }
 
-            if (!$dryRun) {
+            // Ревью-гейт (P0.5, флаг services.bot.broadcast_review_gate): кладём
+            // pending_review + адресат превью (owner) + дедлайн авто-постинга.
+            if ((bool) config('services.bot.broadcast_review_gate')) {
+                $reviewerTelegramId = $chat->owner?->telegram_id;
+                if (!$reviewerTelegramId) {
+                    $summary['skipped_no_reviewer']++;
+                    continue;
+                }
+                if (!$dryRun) {
+                    $deadline = $now->copy()->addMinutes(
+                        (int) config('services.bot.broadcast_review_timeout_minutes', 120),
+                    );
+                    $this->broadcastItemRepository->enqueueForReview(
+                        $broadcast->id,
+                        $eventId,
+                        (int) $reviewerTelegramId,
+                        $deadline,
+                    );
+                }
+            } elseif (!$dryRun) {
                 $this->broadcastItemRepository->enqueue($broadcast->id, $eventId, null);
             }
+
             $summary['enqueued']++;
         }
 
@@ -515,6 +540,12 @@ class TelegramChatBroadcastService
             TelegramChatBroadcastItem::STATUS_PLANNED,
             TelegramChatBroadcastItem::STATUS_POSTED,
             TelegramChatBroadcastItem::STATUS_SKIPPED,
+            // ревью-гейт: уже в работе / отклонённое не предлагаем повторно
+            // (error — НЕ включаем: отправку можно ретраить).
+            TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+            TelegramChatBroadcastItem::STATUS_APPROVED,
+            TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+            TelegramChatBroadcastItem::STATUS_REJECTED,
         ];
 
         $query = Event::query()

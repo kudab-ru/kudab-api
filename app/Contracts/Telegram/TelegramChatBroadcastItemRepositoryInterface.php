@@ -48,6 +48,18 @@ interface TelegramChatBroadcastItemRepositoryInterface
     ): TelegramChatBroadcastItem;
 
     /**
+     * Поставить событие в очередь под ревью-гейт (P0.5): status=pending_review,
+     * snapshot reviewer-telegram-id и дедлайн авто-постинга. Идемпотентно по
+     * (broadcast_id, event_id) — существующий элемент возвращается как есть.
+     */
+    public function enqueueForReview(
+        int $broadcastId,
+        int $eventId,
+        int $reviewerTelegramId,
+        DateTimeInterface $deadlineAt,
+    ): TelegramChatBroadcastItem;
+
+    /**
      * Найти следующий элемент для отправки для конкретного broadcast'а.
      *
      * Логика v1:
