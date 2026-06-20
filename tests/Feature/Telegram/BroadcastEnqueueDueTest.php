@@ -139,6 +139,84 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertSame(0, $summary['enqueued']);
     }
 
+    public function test_does_not_pick_event_from_already_used_group(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $groupId = $this->createEventGroup($community->id, $city->id, 'grp-key-1', 'концерт');
+
+        // A — то же событие из источника 1 (уже постнуто), B — из источника 2 (та же группа).
+        $a = $this->createEvent($city->id, $community->id, 'Концерт (источник 1)', now()->addDay());
+        $a->event_group_id = $groupId;
+        $a->save();
+        $b = $this->createEvent($city->id, $community->id, 'Концерт (источник 2)', now()->addDays(2));
+        $b->event_group_id = $groupId;
+        $b->save();
+
+        $chat = $this->createChannelChat($city->id, -1009);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $this->makeItem($broadcast->id, $a->id, TelegramChatBroadcastItem::STATUS_POSTED);
+
+        $summary = $this->service()->enqueueDueForAllChannels(now());
+
+        // A исключён Layer 1 (уже постнут), B — Layer 2 (группа занята) ⇒ нет кандидата.
+        $this->assertSame(1, $summary['no_candidate']);
+        $this->assertSame(0, $summary['enqueued']);
+    }
+
+    public function test_cross_time_prefers_title_not_recently_posted(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+
+        // Недавно постнутый «Концерт» в канале (в окне cross-time).
+        $postedConcert = $this->createEvent($city->id, $community->id, 'Концерт', now()->addDays(2));
+        $chat = $this->createChannelChat($city->id, -1010);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $postedConcert->id, TelegramChatBroadcastItem::STATUS_POSTED);
+        $item->posted_at = now()->subDays(2);
+        $item->save();
+
+        // Кандидаты с равным score: «Концерт» ближе (по tie-break выиграл бы), но title
+        // недавно постился → cross-time должен предпочесть «Лекцию».
+        $this->createEvent($city->id, $community->id, 'Концерт', now()->addDay());
+        $lecture = $this->createEvent($city->id, $community->id, 'Лекция', now()->addDays(2));
+
+        $summary = $this->service()->enqueueDueForAllChannels(now());
+
+        $this->assertSame(1, $summary['enqueued']);
+        $picked = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('status', TelegramChatBroadcastItem::STATUS_PENDING)
+            ->first();
+        $this->assertSame($lecture->id, (int) $picked->event_id, 'cross-time: свежий заголовок предпочтительнее');
+    }
+
+    public function test_cross_time_still_posts_when_all_titles_recent(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+
+        $postedConcert = $this->createEvent($city->id, $community->id, 'Концерт', now()->addDays(2));
+        $chat = $this->createChannelChat($city->id, -1011);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $postedConcert->id, TelegramChatBroadcastItem::STATUS_POSTED);
+        $item->posted_at = now()->subDays(1);
+        $item->save();
+
+        // Единственный кандидат — тоже «Концерт» (title недавно постился) ⇒ fallback: всё равно постим.
+        $newConcert = $this->createEvent($city->id, $community->id, 'Концерт', now()->addDay());
+
+        $summary = $this->service()->enqueueDueForAllChannels(now());
+
+        $this->assertSame(1, $summary['enqueued']);
+        $picked = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('status', TelegramChatBroadcastItem::STATUS_PENDING)
+            ->first();
+        $this->assertSame($newConcert->id, (int) $picked->event_id);
+    }
+
     public function test_not_due_when_period_off(): void
     {
         $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
@@ -257,5 +335,17 @@ class BroadcastEnqueueDueTest extends TestCase
         $item->save();
 
         return $item;
+    }
+
+    private function createEventGroup(int $communityId, ?int $cityId, string $groupKey, string $titleNorm): int
+    {
+        return (int) DB::table('event_groups')->insertGetId([
+            'community_id' => $communityId,
+            'city_id'      => $cityId,
+            'group_key'    => $groupKey,
+            'title_norm'   => $titleNorm,
+            'created_at'   => now(),
+            'updated_at'   => now(),
+        ]);
     }
 }

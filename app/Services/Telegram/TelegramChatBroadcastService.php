@@ -21,6 +21,9 @@ class TelegramChatBroadcastService
     /** Кап кандидатного пула под скоринг (на канал — события одного города). */
     private const SCORING_CANDIDATE_LIMIT = 100;
 
+    /** Окно cross-time анти-дубля: не повторять тот же заголовок в канале N дней. */
+    private const CROSS_TIME_WINDOW_DAYS = 14;
+
     public function __construct(
         private readonly TelegramUserRepositoryInterface              $telegramUserRepository,
         private readonly TelegramChatRepositoryInterface              $chatRepository,
@@ -532,6 +535,19 @@ class TelegramChatBroadcastService
             ->where(function ($q) {
                 $q->whereNull('content_kind')
                     ->orWhereNotIn('content_kind', ['official', 'religious']);
+            })
+            // Анти-дубль по группе (Layer 2): не предлагать событие, чья event_group
+            // уже занята в этом канале (другой источник того же события).
+            ->where(function ($q) use ($broadcastId, $usedStatuses) {
+                $q->whereNull('events.event_group_id')
+                    ->orWhereNotExists(function ($sub) use ($broadcastId, $usedStatuses) {
+                        $sub->selectRaw('1')
+                            ->from('telegram.chat_broadcast_items as i')
+                            ->join('events as e2', 'e2.id', '=', 'i.event_id')
+                            ->where('i.broadcast_id', $broadcastId)
+                            ->whereIn('i.status', $usedStatuses)
+                            ->whereColumn('e2.event_group_id', 'events.event_group_id');
+                    });
             });
 
         if (!empty($excludeEventIds)) {
@@ -546,7 +562,68 @@ class TelegramChatBroadcastService
             ->limit(self::SCORING_CANDIDATE_LIMIT)
             ->get();
 
-        return $this->scorer->pickBest($candidates)?->id;
+        if ($candidates->isEmpty()) {
+            return null;
+        }
+
+        // Анти-дубль cross-time (Layer 3): предпочитаем события, чей заголовок не
+        // постился в канале за окно (ловит повторяющиеся: один title, разные даты =
+        // разные группы). Soft — если свежих по заголовку нет, постим из общего пула.
+        $recentTitles = $this->recentlyPostedTitleNorms(
+            $broadcastId,
+            now()->subDays(self::CROSS_TIME_WINDOW_DAYS),
+        );
+
+        $pool = $candidates;
+        if (!empty($recentTitles)) {
+            $fresh = $candidates->reject(
+                fn (Event $e) => in_array($this->normalizeTitle($e->title), $recentTitles, true),
+            );
+            if ($fresh->isNotEmpty()) {
+                $pool = $fresh;
+            }
+        }
+
+        return $this->scorer->pickBest($pool)?->id;
+    }
+
+    /**
+     * Нормализованные заголовки событий, ПОСТНУТЫХ в этом канале за окно $since..now.
+     * Для cross-time анти-дубля повторяющихся событий.
+     *
+     * @return string[]
+     */
+    private function recentlyPostedTitleNorms(int $broadcastId, Carbon $since): array
+    {
+        $titles = TelegramChatBroadcastItem::query()
+            ->from('telegram.chat_broadcast_items as i')
+            ->join('events as e', 'e.id', '=', 'i.event_id')
+            ->where('i.broadcast_id', $broadcastId)
+            ->where('i.status', TelegramChatBroadcastItem::STATUS_POSTED)
+            ->where('i.posted_at', '>=', $since)
+            ->pluck('e.title');
+
+        return $titles
+            ->map(fn ($t) => $this->normalizeTitle($t))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Лёгкая нормализация заголовка для сравнения «тот же title» (lowercase, без
+     * хэштегов/пунктуации, схлопнутые пробелы). НЕ обязана совпадать с парсерным
+     * EventGroupKey — нужна лишь чтобы ловить повтор заголовка в одном канале.
+     */
+    private function normalizeTitle(?string $title): string
+    {
+        $s = mb_strtolower(trim((string) $title));
+        $s = preg_replace('/#\S+/u', ' ', $s);
+        $s = preg_replace('/[^\p{L}\p{N}\s]+/u', ' ', (string) $s);
+        $s = preg_replace('/\s+/u', ' ', (string) $s);
+
+        return trim((string) $s);
     }
 
     /**
