@@ -368,6 +368,71 @@ class TelegramChatBroadcastService
         return $tasks;
     }
 
+    /**
+     * P0 автопостинг, фаза 1 — автонаполнение очереди.
+     *
+     * Для каждого enabled+due city-канала (расписание в settings.period), у которого
+     * очередь пуста, подбирает одно событие города и кладёт в очередь (status=pending).
+     * Сам постинг — существующий bot-cron (collectDueSingleRuns → poll → send → mark-sent).
+     *
+     * Идёт из Laravel scheduler (broadcast:enqueue-due, withoutOverlapping). last_run_at
+     * НЕ трогаем здесь — его двигает фактический пост; пока он не сдвинулся, isSingleRunDue
+     * остаётся true, поэтому защищаемся «одно событие в полёте» (queue_busy).
+     *
+     * @return array{checked:int,due:int,enqueued:int,skipped_no_city:int,skipped_queue_busy:int,no_candidate:int}
+     */
+    public function enqueueDueForAllChannels(Carbon $now, bool $dryRun = false): array
+    {
+        $summary = [
+            'checked'           => 0,
+            'due'               => 0,
+            'enqueued'          => 0,
+            'skipped_no_city'   => 0,
+            'skipped_queue_busy' => 0,
+            'no_candidate'      => 0,
+        ];
+
+        $broadcasts = $this->broadcastRepository->listEnabledWithSchedule();
+
+        foreach ($broadcasts as $broadcast) {
+            $summary['checked']++;
+
+            if (!$this->isSingleRunDue($broadcast, $now)) {
+                continue;
+            }
+            $summary['due']++;
+
+            $chat = $broadcast->chat;
+            if (!$chat instanceof TelegramChat || !$chat->city_id || !$chat->telegram_chat_id) {
+                $summary['skipped_no_city']++;
+                continue;
+            }
+
+            // Одно событие в полёте: если в очереди уже есть незакрытый item — не плодим.
+            $open = $this->broadcastItemRepository->countForBroadcast($broadcast->id, [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+            ]);
+            if ($open > 0) {
+                $summary['skipped_queue_busy']++;
+                continue;
+            }
+
+            $eventId = $this->pickBestEventIdForChat($chat, $broadcast->id);
+            if (!$eventId) {
+                $summary['no_candidate']++;
+                continue;
+            }
+
+            if (!$dryRun) {
+                $this->broadcastItemRepository->enqueue($broadcast->id, $eventId, null);
+            }
+            $summary['enqueued']++;
+        }
+
+        return $summary;
+    }
+
     // ---------------------------------------------------------------------
     // Внутренние помощники
     // ---------------------------------------------------------------------
@@ -421,6 +486,45 @@ class TelegramChatBroadcastService
         [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
 
         return $chat;
+    }
+
+    /**
+     * Автономный подбор события для канала (без проверки прав и markPreview).
+     *
+     * Отличие от pickSingleEventId (ручной флоу): фильтр города через
+     * community.city_id == chat.city_id (надёжнее строкового LOWER(city)=name) и
+     * без user-контекста. Phase 1: top-1 по start_time; контент-скоринг — P0.3.
+     *
+     * @param int[] $excludeEventIds
+     */
+    private function pickBestEventIdForChat(
+        TelegramChat $chat,
+        int $broadcastId,
+        array $excludeEventIds = [],
+    ): ?int {
+        $usedStatuses = [
+            TelegramChatBroadcastItem::STATUS_PENDING,
+            TelegramChatBroadcastItem::STATUS_PLANNED,
+            TelegramChatBroadcastItem::STATUS_POSTED,
+            TelegramChatBroadcastItem::STATUS_SKIPPED,
+        ];
+
+        $query = Event::query()
+            ->active()
+            ->upcoming()
+            ->whereDoesntHave('broadcastItems', function ($q) use ($broadcastId, $usedStatuses) {
+                $q->where('broadcast_id', $broadcastId)
+                    ->whereIn('status', $usedStatuses);
+            })
+            ->whereHas('community', function ($q) use ($chat) {
+                $q->where('city_id', $chat->city_id);
+            });
+
+        if (!empty($excludeEventIds)) {
+            $query->whereNotIn('id', array_values(array_unique(array_map('intval', $excludeEventIds))));
+        }
+
+        return $query->orderBy('start_time')->first()?->id;
     }
 
     /**
