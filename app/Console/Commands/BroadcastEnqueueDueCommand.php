@@ -37,6 +37,12 @@ class BroadcastEnqueueDueCommand extends Command
             $s['skipped_no_reviewer'],
         ));
 
+        // Голодание: due-каналы, которые должны были опубликовать, но не смогли.
+        $starved = $s['skipped_no_city'] + $s['no_candidate'] + $s['skipped_no_reviewer'];
+        if ($starved > 0) {
+            $this->warn("⚠ {$starved} due-канал(ов) не опубликовали (см. broadcast.enqueue.* в логах: no_city/no_candidate/no_reviewer)");
+        }
+
         return self::SUCCESS;
     }
 }

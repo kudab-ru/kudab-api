@@ -13,6 +13,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
 use DateTimeInterface;
 use RuntimeException;
 
@@ -430,6 +431,11 @@ class TelegramChatBroadcastService
             $chat = $broadcast->chat;
             if (!$chat instanceof TelegramChat || !$chat->city_id || !$chat->telegram_chat_id) {
                 $summary['skipped_no_city']++;
+                Log::warning('broadcast.enqueue.skipped_no_city', [
+                    'broadcast_id' => $broadcast->id,
+                    'telegram_chat_id' => $chat?->telegram_chat_id,
+                    'hint' => 'у канала не задан город — задай telegram:chat:set-city',
+                ]);
                 continue;
             }
 
@@ -450,6 +456,13 @@ class TelegramChatBroadcastService
             $eventId = $this->pickBestEventIdForChat($chat, $broadcast->id);
             if (!$eventId) {
                 $summary['no_candidate']++;
+                // Канал «созрел», но нет подходящего события — голодание (мониторим).
+                Log::warning('broadcast.enqueue.no_candidate', [
+                    'broadcast_id' => $broadcast->id,
+                    'telegram_chat_id' => $chat->telegram_chat_id,
+                    'city_id' => $chat->city_id,
+                    'hint' => 'нет active+upcoming события города (нужного качества / не дубль / не sold_out)',
+                ]);
                 continue;
             }
 
@@ -459,6 +472,11 @@ class TelegramChatBroadcastService
                 $reviewerTelegramId = $chat->owner?->telegram_id;
                 if (!$reviewerTelegramId) {
                     $summary['skipped_no_reviewer']++;
+                    Log::warning('broadcast.enqueue.no_reviewer', [
+                        'broadcast_id' => $broadcast->id,
+                        'telegram_chat_id' => $chat->telegram_chat_id,
+                        'hint' => 'ревью-гейт включён, но у канала нет owner для превью',
+                    ]);
                     continue;
                 }
                 if (!$dryRun) {
