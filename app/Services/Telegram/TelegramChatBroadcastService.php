@@ -2,19 +2,19 @@
 
 namespace App\Services\Telegram;
 
+use App\Contracts\Telegram\BotRoleServiceInterface;
 use App\Contracts\Telegram\TelegramChatBroadcastItemRepositoryInterface;
 use App\Contracts\Telegram\TelegramChatBroadcastRepositoryInterface;
 use App\Contracts\Telegram\TelegramChatRepositoryInterface;
 use App\Contracts\Telegram\TelegramUserRepositoryInterface;
-use App\Contracts\Telegram\BotRoleServiceInterface;
 use App\Models\Event;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use Carbon\Carbon;
-use Illuminate\Support\Facades\Log;
 use DateTimeInterface;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 class TelegramChatBroadcastService
@@ -25,13 +25,19 @@ class TelegramChatBroadcastService
     /** Окно cross-time анти-дубля: не повторять тот же заголовок в канале N дней. */
     private const CROSS_TIME_WINDOW_DAYS = 14;
 
+    /**
+     * Lease claim'а на публикацию (сек). ≫ времени поста (тик поллера 60с) —
+     * за это окно зависший claim реклеймится, но активный пост не перехватят.
+     */
+    public const CLAIM_LEASE_SECONDS = 300;
+
     public function __construct(
-        private readonly TelegramUserRepositoryInterface              $telegramUserRepository,
-        private readonly TelegramChatRepositoryInterface              $chatRepository,
-        private readonly TelegramChatBroadcastRepositoryInterface     $broadcastRepository,
+        private readonly TelegramUserRepositoryInterface $telegramUserRepository,
+        private readonly TelegramChatRepositoryInterface $chatRepository,
+        private readonly TelegramChatBroadcastRepositoryInterface $broadcastRepository,
         private readonly TelegramChatBroadcastItemRepositoryInterface $broadcastItemRepository,
-        private readonly BotRoleServiceInterface                      $botRoleService,
-        private readonly EventBroadcastScorer                         $scorer,
+        private readonly BotRoleServiceInterface $botRoleService,
+        private readonly EventBroadcastScorer $scorer,
     ) {}
 
     // ---------------------------------------------------------------------
@@ -119,12 +125,12 @@ class TelegramChatBroadcastService
             ->with('community')
             ->find($eventId);
 
-        if (!$event) {
+        if (! $event) {
             throw new RuntimeException('Событие не найдено.');
         }
 
         $eventCityId = $event->community?->city_id;
-        $chatCityId  = $chat->city_id;
+        $chatCityId = $chat->city_id;
 
         if ($chatCityId && $eventCityId && $chatCityId !== $eventCityId) {
             throw new RuntimeException('Это событие относится к другому городу.');
@@ -148,6 +154,7 @@ class TelegramChatBroadcastService
         int $telegramChatId,
         int $eventId,
         ?DateTimeInterface $moment = null,
+        ?string $claimToken = null,
     ): void {
         [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
 
@@ -156,7 +163,7 @@ class TelegramChatBroadcastService
         $item = $this->broadcastItemRepository
             ->findByBroadcastAndEvent($broadcast->id, $eventId);
 
-        if (!$item) {
+        if (! $item) {
             $item = $this->broadcastItemRepository->enqueue(
                 $broadcast->id,
                 $eventId,
@@ -164,7 +171,19 @@ class TelegramChatBroadcastService
             );
         }
 
-        $this->broadcastItemRepository->markPosted($item, $moment);
+        if ($claimToken !== null) {
+            // claim-guarded путь: помечаем posted ТОЛЬКО при совпадении токена.
+            // Не совпал (lease истёк, айтем реклеймил другой поллер) → не двигаем
+            // last_run за чужой пост.
+            $ok = $this->broadcastItemRepository->markPostedIfClaimed($item->id, $claimToken, $moment);
+            if (! $ok) {
+                return;
+            }
+        } else {
+            // backward-compat (старый бот без токена) — прежнее поведение.
+            $this->broadcastItemRepository->markPosted($item, $moment);
+        }
+
         $this->broadcastRepository->touchLastRunAt($chat->id, $moment);
     }
 
@@ -178,10 +197,10 @@ class TelegramChatBroadcastService
      *  - если у чата есть city_id — берём события, где events.city совпадает по имени,
      *  - можно дополнительно исключить конкретные event_id (excludeEventIds).
      *
-     * @param int    $telegramId       Telegram ID пользователя (из лички)
-     * @param int    $telegramChatId   telegram_chat_id канала/чата
-     * @param string $mode             'preview' | 'run' и т.п. (на будущее, пока не используется)
-     * @param array  $excludeEventIds  Список event_id, которые нельзя предлагать
+     * @param  int  $telegramId  Telegram ID пользователя (из лички)
+     * @param  int  $telegramChatId  telegram_chat_id канала/чата
+     * @param  string  $mode  'preview' | 'run' и т.п. (на будущее, пока не используется)
+     * @param  array  $excludeEventIds  Список event_id, которые нельзя предлагать
      */
     public function pickSingleEventId(
         int $telegramId,
@@ -218,7 +237,7 @@ class TelegramChatBroadcastService
             });
 
         // Исключить конкретные id (для кнопки "следующее")
-        if (!empty($excludeEventIds)) {
+        if (! empty($excludeEventIds)) {
             $query->whereNotIn('id', $excludeEventIds);
         }
 
@@ -238,7 +257,6 @@ class TelegramChatBroadcastService
 
         return $event?->id;
     }
-
 
     /**
      * Список элементов очереди для заданного Telegram-чата.
@@ -303,7 +321,7 @@ class TelegramChatBroadcastService
             $eventId,
         );
 
-        if (!$item) {
+        if (! $item) {
             // Тихо выходим — ничего в очереди не было
             return;
         }
@@ -336,28 +354,28 @@ class TelegramChatBroadcastService
         $tasks = [];
 
         foreach ($broadcasts as $broadcast) {
-            if (!$this->isSingleRunDue($broadcast, $now)) {
+            if (! $this->isSingleRunDue($broadcast, $now)) {
                 continue;
             }
 
             $chat = $broadcast->chat;
-            if (!$chat instanceof TelegramChat || !$chat->telegram_chat_id) {
+            if (! $chat instanceof TelegramChat || ! $chat->telegram_chat_id) {
                 continue;
             }
 
             // Активный (в полёте) элемент канала — pending/planned/pending_review/approved/auto_approved.
             $item = $this->broadcastItemRepository->findActiveForBroadcast($broadcast->id, $now);
-            if (!$item) {
+            if (! $item) {
                 continue;
             }
 
             $ownerTelegramId = $chat->owner?->telegram_id ?? null;
 
             $base = [
-                'item_id'          => (int) $item->id,
+                'item_id' => (int) $item->id,
                 'telegram_chat_id' => (int) $chat->telegram_chat_id,
-                'event_id'         => (int) $item->event_id,
-                'template_code'    => (string) $broadcast->template_code,
+                'event_id' => (int) $item->event_id,
+                'template_code' => (string) $broadcast->template_code,
             ];
 
             if ($item->status === TelegramChatBroadcastItem::STATUS_PENDING_REVIEW) {
@@ -366,22 +384,34 @@ class TelegramChatBroadcastService
                     continue;
                 }
                 $reviewerTelegramId = (int) ($item->review_reviewer_telegram_id ?? $ownerTelegramId ?? 0);
-                if (!$reviewerTelegramId) {
+                if (! $reviewerTelegramId) {
                     continue;
                 }
                 $tasks[] = $base + [
-                    'type'                 => 'review',
+                    'type' => 'review',
                     'reviewer_telegram_id' => $reviewerTelegramId,
-                    'review_deadline_at'   => optional($item->review_deadline_at)?->toIso8601String(),
+                    'review_deadline_at' => optional($item->review_deadline_at)?->toIso8601String(),
                 ];
             } else {
                 // pending/planned/approved/auto_approved → публикуем в канал.
-                if (!$ownerTelegramId) {
+                if (! $ownerTelegramId) {
+                    continue;
+                }
+                // claim-before-post: атомарно клеймим айтем, чтобы параллельный
+                // поллер / повторный poll после краша не запостил его дважды.
+                // Не заклеймили (уже в полёте у другого) — пропускаем.
+                $claimToken = $this->broadcastItemRepository->claimForPublish(
+                    (int) $item->id,
+                    $now,
+                    self::CLAIM_LEASE_SECONDS,
+                );
+                if ($claimToken === null) {
                     continue;
                 }
                 $tasks[] = $base + [
-                    'type'        => 'publish',
+                    'type' => 'publish',
                     'telegram_id' => (int) $ownerTelegramId,
+                    'claim_token' => $claimToken,
                 ];
             }
 
@@ -409,12 +439,12 @@ class TelegramChatBroadcastService
     public function enqueueDueForAllChannels(Carbon $now, bool $dryRun = false): array
     {
         $summary = [
-            'checked'             => 0,
-            'due'                 => 0,
-            'enqueued'            => 0,
-            'skipped_no_city'     => 0,
-            'skipped_queue_busy'  => 0,
-            'no_candidate'        => 0,
+            'checked' => 0,
+            'due' => 0,
+            'enqueued' => 0,
+            'skipped_no_city' => 0,
+            'skipped_queue_busy' => 0,
+            'no_candidate' => 0,
             'skipped_no_reviewer' => 0,
         ];
 
@@ -423,19 +453,20 @@ class TelegramChatBroadcastService
         foreach ($broadcasts as $broadcast) {
             $summary['checked']++;
 
-            if (!$this->isSingleRunDue($broadcast, $now)) {
+            if (! $this->isSingleRunDue($broadcast, $now)) {
                 continue;
             }
             $summary['due']++;
 
             $chat = $broadcast->chat;
-            if (!$chat instanceof TelegramChat || !$chat->city_id || !$chat->telegram_chat_id) {
+            if (! $chat instanceof TelegramChat || ! $chat->city_id || ! $chat->telegram_chat_id) {
                 $summary['skipped_no_city']++;
                 Log::warning('broadcast.enqueue.skipped_no_city', [
                     'broadcast_id' => $broadcast->id,
                     'telegram_chat_id' => $chat?->telegram_chat_id,
                     'hint' => 'у канала не задан город — задай telegram:chat:set-city',
                 ]);
+
                 continue;
             }
 
@@ -450,11 +481,12 @@ class TelegramChatBroadcastService
             ]);
             if ($open > 0) {
                 $summary['skipped_queue_busy']++;
+
                 continue;
             }
 
             $eventId = $this->pickBestEventIdForChat($chat, $broadcast->id);
-            if (!$eventId) {
+            if (! $eventId) {
                 $summary['no_candidate']++;
                 // Канал «созрел», но нет подходящего события — голодание (мониторим).
                 Log::warning('broadcast.enqueue.no_candidate', [
@@ -463,6 +495,7 @@ class TelegramChatBroadcastService
                     'city_id' => $chat->city_id,
                     'hint' => 'нет active+upcoming события города (нужного качества / не дубль / не sold_out)',
                 ]);
+
                 continue;
             }
 
@@ -470,16 +503,17 @@ class TelegramChatBroadcastService
             // pending_review + адресат превью (owner) + дедлайн авто-постинга.
             if ((bool) config('services.bot.broadcast_review_gate')) {
                 $reviewerTelegramId = $chat->owner?->telegram_id;
-                if (!$reviewerTelegramId) {
+                if (! $reviewerTelegramId) {
                     $summary['skipped_no_reviewer']++;
                     Log::warning('broadcast.enqueue.no_reviewer', [
                         'broadcast_id' => $broadcast->id,
                         'telegram_chat_id' => $chat->telegram_chat_id,
                         'hint' => 'ревью-гейт включён, но у канала нет owner для превью',
                     ]);
+
                     continue;
                 }
-                if (!$dryRun) {
+                if (! $dryRun) {
                     $deadline = $now->copy()->addMinutes(
                         (int) config('services.bot.broadcast_review_timeout_minutes', 120),
                     );
@@ -490,7 +524,7 @@ class TelegramChatBroadcastService
                         $deadline,
                     );
                 }
-            } elseif (!$dryRun) {
+            } elseif (! $dryRun) {
                 $this->broadcastItemRepository->enqueue($broadcast->id, $eventId, null);
             }
 
@@ -507,7 +541,7 @@ class TelegramChatBroadcastService
     public function markReviewPreviewSent(int $itemId, int $messageId): void
     {
         $item = $this->broadcastItemRepository->findById($itemId);
-        if (!$item) {
+        if (! $item) {
             throw new RuntimeException('Элемент очереди не найден.');
         }
 
@@ -522,7 +556,7 @@ class TelegramChatBroadcastService
     public function decideReview(int $telegramId, int $itemId, bool $approve): void
     {
         $item = $this->broadcastItemRepository->findById($itemId);
-        if (!$item) {
+        if (! $item) {
             throw new RuntimeException('Элемент очереди не найден.');
         }
 
@@ -568,24 +602,24 @@ class TelegramChatBroadcastService
         $role = $this->botRoleService->getRoleByTelegramId($telegramId);
 
         // Кто вообще может управлять чатами
-        if (!in_array($role, ['user', 'moderator', 'admin', 'superadmin'], true)) {
+        if (! in_array($role, ['user', 'moderator', 'admin', 'superadmin'], true)) {
             throw new RuntimeException('Недостаточно прав для управления связанными чатами');
         }
 
         $telegramUser = $this->telegramUserRepository->findByTelegramId($telegramId);
-        if (!$telegramUser) {
+        if (! $telegramUser) {
             throw new RuntimeException('Telegram-пользователь не найден в БД');
         }
 
         $telegramChat = $this->chatRepository->findByTelegramChatId($telegramChatId);
-        if (!$telegramChat) {
+        if (! $telegramChat) {
             throw new RuntimeException('Чат не найден в БД: '.$telegramChatId);
         }
 
         // Базовое ограничение: чат должен принадлежать этому пользователю.
         if ($telegramChat->telegram_user_id !== $telegramUser->id) {
             // Разрешаем superadmin/admin управлять любыми чатами (опционально).
-            if (!in_array($role, ['admin', 'superadmin'], true)) {
+            if (! in_array($role, ['admin', 'superadmin'], true)) {
                 throw new RuntimeException('Этот чат не привязан к текущему пользователю');
             }
         }
@@ -614,7 +648,7 @@ class TelegramChatBroadcastService
      * community.city_id == chat.city_id (надёжнее строкового LOWER(city)=name) и
      * без user-контекста. Phase 1: top-1 по start_time; контент-скоринг — P0.3.
      *
-     * @param int[] $excludeEventIds
+     * @param  int[]  $excludeEventIds
      */
     private function pickBestEventIdForChat(
         TelegramChat $chat,
@@ -667,7 +701,7 @@ class TelegramChatBroadcastService
                     });
             });
 
-        if (!empty($excludeEventIds)) {
+        if (! empty($excludeEventIds)) {
             $query->whereNotIn('id', array_values(array_unique(array_map('intval', $excludeEventIds))));
         }
 
@@ -692,7 +726,7 @@ class TelegramChatBroadcastService
         );
 
         $pool = $candidates;
-        if (!empty($recentTitles)) {
+        if (! empty($recentTitles)) {
             $fresh = $candidates->reject(
                 fn (Event $e) => in_array($this->normalizeTitle($e->title), $recentTitles, true),
             );
@@ -755,7 +789,7 @@ class TelegramChatBroadcastService
         TelegramChatBroadcast $broadcast,
         Carbon $now,
     ): bool {
-        if (!$broadcast->enabled) {
+        if (! $broadcast->enabled) {
             return false;
         }
 
@@ -781,14 +815,14 @@ class TelegramChatBroadcastService
             }
 
             // нужно отработать, если мы ещё ни разу не запускались после этого окна
-            return !$lastRun || $lastRun->lt($candidate);
+            return ! $lastRun || $lastRun->lt($candidate);
         }
 
         // weekly_<dow>_<HH>  (пример: weekly_fri_12)
         if (str_starts_with($period, 'weekly_')) {
-            $parts   = explode('_', $period); // [weekly, fri, 12]
+            $parts = explode('_', $period); // [weekly, fri, 12]
             $dowCode = $parts[1] ?? 'fri';
-            $hour    = isset($parts[2]) ? (int) $parts[2] : 12;
+            $hour = isset($parts[2]) ? (int) $parts[2] : 12;
 
             $dowMap = [
                 'mon' => Carbon::MONDAY,
@@ -809,7 +843,7 @@ class TelegramChatBroadcastService
                 $candidate->subDay();
             }
 
-            return !$lastRun || $lastRun->lt($candidate);
+            return ! $lastRun || $lastRun->lt($candidate);
         }
 
         // неизвестный period — игнорируем

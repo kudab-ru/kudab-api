@@ -417,7 +417,7 @@ class BroadcastEnqueueDueTest extends TestCase
         $broadcast = $this->createBroadcast($chat->id, 'daily_10');
 
         $expired = $this->makeReviewItem($broadcast->id, $e1->id, 555444, now()->subMinute());
-        $fresh   = $this->makeReviewItem($broadcast->id, $e2->id, 555444, now()->addHours(2));
+        $fresh = $this->makeReviewItem($broadcast->id, $e2->id, 555444, now()->addHours(2));
 
         $count = $this->service()->autoApproveExpiredReviews(now());
 
@@ -427,9 +427,121 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING_REVIEW, $fresh->refresh()->status);
     }
 
+    // ===== Надёжность поллера, Часть 1: claim-before-post =====
+
+    public function test_poll_claims_publish_item_and_returns_token(): void
+    {
+        [$broadcast] = $this->seedPublishItem(-2001, 556001, TelegramChatBroadcastItem::STATUS_APPROVED);
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks);
+        $this->assertSame('publish', $tasks[0]['type']);
+        $this->assertArrayHasKey('claim_token', $tasks[0]);
+        $this->assertNotEmpty($tasks[0]['claim_token']);
+
+        $item = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->first();
+        $this->assertNotNull($item->claimed_at, 'claimed_at проставлен');
+        $this->assertSame($tasks[0]['claim_token'], $item->claim_token);
+    }
+
+    public function test_second_poll_does_not_reclaim_within_lease(): void
+    {
+        $this->seedPublishItem(-2002, 556002, TelegramChatBroadcastItem::STATUS_APPROVED);
+
+        $first = $this->service()->collectDueSingleRuns(now());
+        $this->assertCount(1, $first);
+
+        // Второй poll в пределах lease — айтем заклеймлен, publish-задачи нет (анти-дубль).
+        $second = $this->service()->collectDueSingleRuns(now());
+        $this->assertCount(0, $second);
+    }
+
+    public function test_stale_claim_is_reclaimed_after_lease(): void
+    {
+        [$broadcast] = $this->seedPublishItem(-2003, 556003, TelegramChatBroadcastItem::STATUS_APPROVED);
+
+        $item = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->first();
+        $item->claimed_at = now()->subSeconds(TelegramChatBroadcastService::CLAIM_LEASE_SECONDS + 60);
+        $item->claim_token = 'stale-token';
+        $item->save();
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks, 'протухший claim реклеймится');
+        $this->assertNotSame('stale-token', $tasks[0]['claim_token'], 'выдан новый токен');
+    }
+
+    public function test_mark_sent_with_matching_token_posts_and_moves_last_run(): void
+    {
+        [$broadcast, $event] = $this->seedPublishItem(-2004, 556004, TelegramChatBroadcastItem::STATUS_APPROVED);
+        config(['services.bot.superadmin_telegram_id' => 556004]); // владелец-superadmin проходит role-guard mark-пути
+        $item = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->first();
+
+        $token = $this->itemRepo()->claimForPublish($item->id, now(), 300);
+        $this->assertNotNull($token);
+
+        $this->service()->markSingleEventSentForChat(556004, -2004, $event->id, null, $token);
+
+        $item->refresh();
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_POSTED, $item->status);
+        $this->assertNull($item->claim_token, 'claim очищен после поста');
+        $this->assertNotNull($broadcast->fresh()->last_run_at, 'last_run сдвинут');
+    }
+
+    public function test_mark_sent_with_wrong_token_is_noop(): void
+    {
+        [$broadcast, $event] = $this->seedPublishItem(-2005, 556005, TelegramChatBroadcastItem::STATUS_APPROVED);
+        config(['services.bot.superadmin_telegram_id' => 556005]); // владелец-superadmin проходит role-guard mark-пути
+        $item = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->first();
+
+        $this->itemRepo()->claimForPublish($item->id, now(), 300);
+
+        // Чужой токен (stale-claim другого поллера) — не постит, last_run не двигаем.
+        $this->service()->markSingleEventSentForChat(556005, -2005, $event->id, null, 'wrong-token');
+
+        $item->refresh();
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_APPROVED, $item->status, 'чужой токен не постит');
+        $this->assertNull($broadcast->fresh()->last_run_at, 'last_run не двигается за чужой пост');
+    }
+
+    public function test_mark_sent_without_token_is_backward_compatible(): void
+    {
+        [$broadcast, $event] = $this->seedPublishItem(-2006, 556006, TelegramChatBroadcastItem::STATUS_APPROVED);
+        config(['services.bot.superadmin_telegram_id' => 556006]); // владелец-superadmin проходит role-guard mark-пути
+
+        // Старый бот без токена — прежнее поведение: постит.
+        $this->service()->markSingleEventSentForChat(556006, -2006, $event->id, null, null);
+
+        $item = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->first();
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_POSTED, $item->status);
+    }
+
     // ----------------------------------------------------------------
     // helpers (по образцу WebEventsTest + telegram-сущности)
     // ----------------------------------------------------------------
+
+    private function itemRepo(): \App\Contracts\Telegram\TelegramChatBroadcastItemRepositoryInterface
+    {
+        return app(\App\Contracts\Telegram\TelegramChatBroadcastItemRepositoryInterface::class);
+    }
+
+    /**
+     * Сидит publish-айтем (city/community/event/chat+owner/broadcast/item).
+     *
+     * @return array{0: TelegramChatBroadcast, 1: Event, 2: TelegramChat, 3: TelegramChatBroadcastItem}
+     */
+    private function seedPublishItem(int $tgChatId, int $ownerTgId, string $status): array
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Событие', now()->addDay());
+        $chat = $this->createChannelChat($city->id, $tgChatId, $ownerTgId);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $event->id, $status);
+
+        return [$broadcast, $event, $chat, $item];
+    }
 
     private function insertCity(string $name, string $slug, string $status, float $lng, float $lat): City
     {
@@ -447,14 +559,14 @@ class BroadcastEnqueueDueTest extends TestCase
     private function createCommunity(int $cityId, string $name): Community
     {
         return Community::create([
-            'name'    => $name,
+            'name' => $name,
             'city_id' => $cityId,
         ]);
     }
 
     private function createEvent(int $cityId, int $communityId, string $title, Carbon $startTime): Event
     {
-        $event = new Event();
+        $event = new Event;
         $event->community_id = $communityId;
         $event->title = $title;
         $event->status = 'active';
@@ -468,7 +580,7 @@ class BroadcastEnqueueDueTest extends TestCase
 
     private function createChannelChat(?int $cityId, int $telegramChatId, ?int $ownerTelegramId = null): TelegramChat
     {
-        $chat = new TelegramChat();
+        $chat = new TelegramChat;
         $chat->telegram_chat_id = $telegramChatId;
         $chat->chat_type = 'channel';
         $chat->is_active = true;
@@ -487,15 +599,15 @@ class BroadcastEnqueueDueTest extends TestCase
     private function createBroadcast(int $chatId, string $period): TelegramChatBroadcast
     {
         return TelegramChatBroadcast::create([
-            'chat_id'  => $chatId,
-            'enabled'  => true,
+            'chat_id' => $chatId,
+            'enabled' => true,
             'settings' => ['period' => $period, 'template_code' => 'basic'],
         ]);
     }
 
     private function makeItem(int $broadcastId, int $eventId, string $status): TelegramChatBroadcastItem
     {
-        $item = new TelegramChatBroadcastItem();
+        $item = new TelegramChatBroadcastItem;
         $item->broadcast_id = $broadcastId;
         $item->event_id = $eventId;
         $item->status = $status;
@@ -506,7 +618,7 @@ class BroadcastEnqueueDueTest extends TestCase
 
     private function makeReviewItem(int $broadcastId, int $eventId, int $reviewerTelegramId, Carbon $deadline, ?int $messageId = null): TelegramChatBroadcastItem
     {
-        $item = new TelegramChatBroadcastItem();
+        $item = new TelegramChatBroadcastItem;
         $item->broadcast_id = $broadcastId;
         $item->event_id = $eventId;
         $item->status = TelegramChatBroadcastItem::STATUS_PENDING_REVIEW;
@@ -536,11 +648,11 @@ class BroadcastEnqueueDueTest extends TestCase
     {
         return (int) DB::table('event_groups')->insertGetId([
             'community_id' => $communityId,
-            'city_id'      => $cityId,
-            'group_key'    => $groupKey,
-            'title_norm'   => $titleNorm,
-            'created_at'   => now(),
-            'updated_at'   => now(),
+            'city_id' => $cityId,
+            'group_key' => $groupKey,
+            'title_norm' => $titleNorm,
+            'created_at' => now(),
+            'updated_at' => now(),
         ]);
     }
 }

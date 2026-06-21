@@ -34,26 +34,36 @@ class TelegramChatBroadcastItem extends Model
         'review_deadline_at',
         'reviewed_at',
         'review_action',
+        'claimed_at',
+        'claim_token',
     ];
 
     protected $casts = [
         'planned_at' => 'datetime',
-        'posted_at'  => 'datetime',
+        'posted_at' => 'datetime',
         'review_deadline_at' => 'datetime',
-        'reviewed_at'        => 'datetime',
+        'reviewed_at' => 'datetime',
+        'claimed_at' => 'datetime',
     ];
 
     public const STATUS_PENDING = 'pending'; // создано, но ещё не запланировано
+
     public const STATUS_PLANNED = 'planned'; // стоит в очереди на отправку
-    public const STATUS_POSTED  = 'posted';  // успешно отправлено
+
+    public const STATUS_POSTED = 'posted';  // успешно отправлено
+
     public const STATUS_SKIPPED = 'skipped'; // пропущено (дубль/устарело)
-    public const STATUS_ERROR   = 'error';   // была ошибка при отправке
+
+    public const STATUS_ERROR = 'error';   // была ошибка при отправке
 
     // P0.5 approve-in-DM (статусы ревью-гейта; лезут в status varchar(32)):
     public const STATUS_PENDING_REVIEW = 'pending_review'; // ждёт решения ревьюера в ЛС
-    public const STATUS_APPROVED       = 'approved';       // ревьюер одобрил
-    public const STATUS_REJECTED       = 'rejected';       // ревьюер отклонил
-    public const STATUS_AUTO_APPROVED  = 'auto_approved';  // авто-одобрено по таймауту
+
+    public const STATUS_APPROVED = 'approved';       // ревьюер одобрил
+
+    public const STATUS_REJECTED = 'rejected';       // ревьюер отклонил
+
+    public const STATUS_AUTO_APPROVED = 'auto_approved';  // авто-одобрено по таймауту
 
     /**
      * Настройки рассылки для чата.

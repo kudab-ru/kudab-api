@@ -7,6 +7,7 @@ use App\Models\TelegramChatBroadcastItem;
 use Carbon\Carbon;
 use DateTimeInterface;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
 
 class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRepositoryInterface
 {
@@ -49,12 +50,12 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
             return $existing;
         }
 
-        $item = new TelegramChatBroadcastItem();
+        $item = new TelegramChatBroadcastItem;
         $item->broadcast_id = $broadcastId;
-        $item->event_id     = $eventId;
+        $item->event_id = $eventId;
 
         if ($plannedAt) {
-            $item->status     = TelegramChatBroadcastItem::STATUS_PLANNED;
+            $item->status = TelegramChatBroadcastItem::STATUS_PLANNED;
             $item->planned_at = $plannedAt;
         } else {
             $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
@@ -79,10 +80,10 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
             return $existing;
         }
 
-        $item = new TelegramChatBroadcastItem();
+        $item = new TelegramChatBroadcastItem;
         $item->broadcast_id = $broadcastId;
-        $item->event_id     = $eventId;
-        $item->status       = TelegramChatBroadcastItem::STATUS_PENDING_REVIEW;
+        $item->event_id = $eventId;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING_REVIEW;
         $item->review_reviewer_telegram_id = $reviewerTelegramId;
         $item->review_deadline_at = $deadlineAt;
         $item->save();
@@ -115,13 +116,81 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         TelegramChatBroadcastItem $item,
         ?DateTimeInterface $moment = null,
     ): TelegramChatBroadcastItem {
-        $item->status    = TelegramChatBroadcastItem::STATUS_POSTED;
+        $item->status = TelegramChatBroadcastItem::STATUS_POSTED;
         $item->posted_at = $moment ?: now();
         // planned_at оставляем как есть (может пригодиться для анализа)
         $item->error_message = null;
+        $item->claimed_at = null;
+        $item->claim_token = null;
         $item->save();
 
         return $item->refresh();
+    }
+
+    /**
+     * Атомарно клеймит publish-айтем на публикацию (time-lease).
+     *
+     * UPDATE … WHERE id AND status∈publishable AND (claimed_at IS NULL OR
+     * claimed_at < now−lease). Возвращает claim_token при успехе (1 строка),
+     * иначе null — айтем уже заклеймлен другим поллером в пределах lease.
+     * Так параллельный поллер / повторный poll после краша не берёт айтем дважды.
+     */
+    public function claimForPublish(int $itemId, DateTimeInterface $now, int $leaseSeconds): ?string
+    {
+        $nowCarbon = $now instanceof Carbon ? $now->copy() : Carbon::instance($now);
+        $cutoff = $nowCarbon->copy()->subSeconds(max(1, $leaseSeconds));
+        $token = (string) Str::uuid();
+
+        $affected = TelegramChatBroadcastItem::query()
+            ->where('id', $itemId)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+                TelegramChatBroadcastItem::STATUS_APPROVED,
+                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+            ])
+            ->where(function ($q) use ($cutoff) {
+                $q->whereNull('claimed_at')->orWhere('claimed_at', '<', $cutoff);
+            })
+            ->update([
+                'claimed_at' => $nowCarbon,
+                'claim_token' => $token,
+                'updated_at' => $nowCarbon,
+            ]);
+
+        return $affected === 1 ? $token : null;
+    }
+
+    /**
+     * Помечает айтем posted ТОЛЬКО если claim_token совпадает (атомарно).
+     *
+     * Защита от stale-claim: если lease истёк и айтем реклеймил другой поллер,
+     * наш токен не совпадёт → 0 строк → false (не двигаем last_run за чужой пост).
+     * Возвращает true при успехе.
+     */
+    public function markPostedIfClaimed(int $itemId, string $claimToken, ?DateTimeInterface $moment = null): bool
+    {
+        $affected = TelegramChatBroadcastItem::query()
+            ->where('id', $itemId)
+            ->where('claim_token', $claimToken)
+            // status-guard: помечаем posted только из публикуемого статуса — не
+            // флипаем уже skipped/error/posted айтем, даже если токен совпал.
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+                TelegramChatBroadcastItem::STATUS_APPROVED,
+                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+            ])
+            ->update([
+                'status' => TelegramChatBroadcastItem::STATUS_POSTED,
+                'posted_at' => $moment ?: now(),
+                'error_message' => null,
+                'claimed_at' => null,
+                'claim_token' => null,
+                'updated_at' => now(),
+            ]);
+
+        return $affected === 1;
     }
 
     /**
@@ -131,7 +200,7 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         TelegramChatBroadcastItem $item,
         ?string $reason = null,
     ): TelegramChatBroadcastItem {
-        $item->status        = TelegramChatBroadcastItem::STATUS_SKIPPED;
+        $item->status = TelegramChatBroadcastItem::STATUS_SKIPPED;
         $item->error_message = $reason;
         $item->save();
 
@@ -145,7 +214,7 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         TelegramChatBroadcastItem $item,
         string $errorMessage,
     ): TelegramChatBroadcastItem {
-        $item->status        = TelegramChatBroadcastItem::STATUS_ERROR;
+        $item->status = TelegramChatBroadcastItem::STATUS_ERROR;
         $item->error_message = $errorMessage;
         $item->save();
 
@@ -178,7 +247,7 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         $query = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcastId);
 
-        if (!empty($statuses)) {
+        if (! empty($statuses)) {
             $query->whereIn('status', $statuses);
         }
 
@@ -198,7 +267,7 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         $query = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcastId);
 
-        if (!empty($statuses)) {
+        if (! empty($statuses)) {
             $query->whereIn('status', $statuses);
         }
 
@@ -282,9 +351,9 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
             ->where('id', $item->id)
             ->where('status', TelegramChatBroadcastItem::STATUS_PENDING_REVIEW)
             ->update([
-                'status'        => $newStatus,
+                'status' => $newStatus,
                 'review_action' => $action,
-                'reviewed_at'   => $now,
+                'reviewed_at' => $now,
             ]);
 
         return $affected > 0;
@@ -300,9 +369,9 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
             ->whereNotNull('review_deadline_at')
             ->where('review_deadline_at', '<=', $now)
             ->update([
-                'status'        => TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+                'status' => TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
                 'review_action' => 'timeout',
-                'reviewed_at'   => $now,
+                'reviewed_at' => $now,
             ]);
     }
 }

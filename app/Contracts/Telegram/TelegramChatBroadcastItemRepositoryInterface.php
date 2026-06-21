@@ -82,6 +82,18 @@ interface TelegramChatBroadcastItemRepositoryInterface
     ): TelegramChatBroadcastItem;
 
     /**
+     * Атомарно заклеймить publish-айтем на публикацию (time-lease).
+     * Возвращает claim_token при успехе, null — если уже заклеймлен в пределах lease.
+     */
+    public function claimForPublish(int $itemId, DateTimeInterface $now, int $leaseSeconds): ?string;
+
+    /**
+     * Пометить posted только при совпадении claim_token (защита от stale-claim).
+     * Возвращает true при успехе (1 строка).
+     */
+    public function markPostedIfClaimed(int $itemId, string $claimToken, ?DateTimeInterface $moment = null): bool;
+
+    /**
      * Отметить элемент как пропущенный (например, дубль или устарело).
      * status = skipped, error_message (опционально — причина).
      */
@@ -109,10 +121,8 @@ interface TelegramChatBroadcastItemRepositoryInterface
      * Список элементов очереди для одного broadcast'а
      * по заданным статусам (обычно pending/planned).
      *
-     * @param int   $broadcastId
-     * @param array $statuses  Список строк-статусов
-     * @param int   $limit     Максимальное количество элементов
-     *
+     * @param  array  $statuses  Список строк-статусов
+     * @param  int  $limit  Максимальное количество элементов
      * @return Collection<int, TelegramChatBroadcastItem>
      */
     public function listForBroadcast(
@@ -154,6 +164,7 @@ interface TelegramChatBroadcastItemRepositoryInterface
     /**
      * Применить решение ревью атомарно (guard WHERE status=pending_review):
      * status (approved/rejected) + reviewed_at + review_action.
+     *
      * @return bool true если переход состоялся (item был ещё pending_review).
      */
     public function applyReviewDecision(
@@ -165,6 +176,7 @@ interface TelegramChatBroadcastItemRepositoryInterface
 
     /**
      * Авто-одобрить просроченные pending_review (review_deadline_at <= now).
+     *
      * @return int число затронутых элементов
      */
     public function autoApproveExpiredReviews(DateTimeInterface $now): int;

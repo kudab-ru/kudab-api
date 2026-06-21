@@ -3,10 +3,10 @@
 namespace App\Http\Controllers\Bot;
 
 use App\Http\Controllers\Controller;
+use App\Models\TelegramChatBroadcastItem;
 use App\Models\TelegramMessageTemplate;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Services\Telegram\TelegramMessageTemplateService;
-use App\Models\TelegramChatBroadcastItem;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -34,11 +34,11 @@ class TelegramChatBroadcastController extends Controller
     public function getBroadcast(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'telegram_id'      => ['required', 'integer'],
+            'telegram_id' => ['required', 'integer'],
             'telegram_chat_id' => ['required', 'integer'],
         ]);
 
-        $telegramId     = (int) $validated['telegram_id'];
+        $telegramId = (int) $validated['telegram_id'];
         $telegramChatId = (int) $validated['telegram_chat_id'];
 
         try {
@@ -48,26 +48,26 @@ class TelegramChatBroadcastController extends Controller
             );
 
             return response()->json([
-                'ok'   => true,
+                'ok' => true,
                 'data' => [
-                    'enabled'        => (bool) $broadcast->enabled,
-                    'period'         => $broadcast->period,         // аксессор
-                    'template_code'  => $broadcast->template_code,  // аксессор
-                    'last_run_at'    => optional($broadcast->last_run_at)?->toIso8601String(),
-                    'last_preview_at'=> optional($broadcast->last_preview_at)?->toIso8601String(),
+                    'enabled' => (bool) $broadcast->enabled,
+                    'period' => $broadcast->period,         // аксессор
+                    'template_code' => $broadcast->template_code,  // аксессор
+                    'last_run_at' => optional($broadcast->last_run_at)?->toIso8601String(),
+                    'last_preview_at' => optional($broadcast->last_preview_at)?->toIso8601String(),
                 ],
             ]);
         } catch (RuntimeException $e) {
             // бизнес-ошибка: права, не тот чат и т.п.
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => $e->getMessage(),
             ]);
         } catch (Throwable $e) {
             report($e);
 
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => 'Не удалось получить настройки рассылки',
             ]);
         }
@@ -92,19 +92,19 @@ class TelegramChatBroadcastController extends Controller
     public function updateBroadcast(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'telegram_id'      => ['required', 'integer'],
+            'telegram_id' => ['required', 'integer'],
             'telegram_chat_id' => ['required', 'integer'],
-            'enabled'          => ['required', 'boolean'],
-            'period'           => ['nullable', 'string', 'max:64'],
-            'template_code'    => ['nullable', 'string', 'max:64'],
+            'enabled' => ['required', 'boolean'],
+            'period' => ['nullable', 'string', 'max:64'],
+            'template_code' => ['nullable', 'string', 'max:64'],
         ]);
 
-        $telegramId     = (int) $validated['telegram_id'];
+        $telegramId = (int) $validated['telegram_id'];
         $telegramChatId = (int) $validated['telegram_chat_id'];
-        $enabled        = (bool) $validated['enabled'];
+        $enabled = (bool) $validated['enabled'];
 
         // period / template_code могут не прийти → оставляем null
-        $period       = $validated['period'] ?? null;
+        $period = $validated['period'] ?? null;
         $templateCode = $validated['template_code'] ?? null;
 
         try {
@@ -117,25 +117,25 @@ class TelegramChatBroadcastController extends Controller
             );
 
             return response()->json([
-                'ok'   => true,
+                'ok' => true,
                 'data' => [
-                    'enabled'        => (bool) $broadcast->enabled,
-                    'period'         => $broadcast->period,
-                    'template_code'  => $broadcast->template_code,
-                    'last_run_at'    => optional($broadcast->last_run_at)?->toIso8601String(),
-                    'last_preview_at'=> optional($broadcast->last_preview_at)?->toIso8601String(),
+                    'enabled' => (bool) $broadcast->enabled,
+                    'period' => $broadcast->period,
+                    'template_code' => $broadcast->template_code,
+                    'last_run_at' => optional($broadcast->last_run_at)?->toIso8601String(),
+                    'last_preview_at' => optional($broadcast->last_preview_at)?->toIso8601String(),
                 ],
             ]);
         } catch (RuntimeException $e) {
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => $e->getMessage(),
             ]);
         } catch (Throwable $e) {
             report($e);
 
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => 'Не удалось сохранить настройки рассылки',
             ]);
         }
@@ -171,24 +171,23 @@ class TelegramChatBroadcastController extends Controller
             ->listSingleTemplates($locale)
             ->map(function (TelegramMessageTemplate $tpl) {
                 return [
-                    'code'        => $tpl->code,
-                    'name'        => $tpl->name,
+                    'code' => $tpl->code,
+                    'name' => $tpl->name,
                     'description' => $tpl->description,
-                    'locale'      => $tpl->locale,
+                    'locale' => $tpl->locale,
                     'show_images' => (bool) $tpl->show_images,
-                    'max_images'  => (int) $tpl->max_images,
-                    'body'        => $tpl->body,
+                    'max_images' => (int) $tpl->max_images,
+                    'body' => $tpl->body,
                 ];
             })
             ->values();
 
         return response()->json([
-            'ok'        => true,
-            'locale'    => $locale,
+            'ok' => true,
+            'locale' => $locale,
             'templates' => $templates,
         ]);
     }
-
 
     /**
      * Подбор одного события для предпросмотра / ручной отправки.
@@ -211,19 +210,19 @@ class TelegramChatBroadcastController extends Controller
     public function pickSingle(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'telegram_id'       => ['required', 'integer'],
-            'telegram_chat_id'  => ['required', 'integer'],
-            'mode'              => ['nullable', 'string', 'in:preview,publish'],
+            'telegram_id' => ['required', 'integer'],
+            'telegram_chat_id' => ['required', 'integer'],
+            'mode' => ['nullable', 'string', 'in:preview,publish'],
             'exclude_event_ids' => ['sometimes', 'array'],
             'exclude_event_ids.*' => ['integer'],
         ]);
 
-        $telegramId     = (int) $validated['telegram_id'];
+        $telegramId = (int) $validated['telegram_id'];
         $telegramChatId = (int) $validated['telegram_chat_id'];
-        $mode           = (string) ($validated['mode'] ?? 'preview');
+        $mode = (string) ($validated['mode'] ?? 'preview');
 
         $excludeIds = [];
-        if (!empty($validated['exclude_event_ids']) && is_array($validated['exclude_event_ids'])) {
+        if (! empty($validated['exclude_event_ids']) && is_array($validated['exclude_event_ids'])) {
             // нормализуем: int + uniq
             $excludeIds = array_values(array_unique(array_map('intval', $validated['exclude_event_ids'])));
         }
@@ -236,27 +235,27 @@ class TelegramChatBroadcastController extends Controller
                 excludeEventIds: $excludeIds,
             );
 
-            if (!$eventId) {
+            if (! $eventId) {
                 return response()->json([
-                    'ok'    => false,
+                    'ok' => false,
                     'error' => 'Подходящих событий пока нет.',
                 ]);
             }
 
             return response()->json([
-                'ok'       => true,
+                'ok' => true,
                 'event_id' => (string) $eventId,
             ]);
         } catch (RuntimeException $e) {
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => $e->getMessage(),
             ]);
         } catch (Throwable $e) {
             report($e);
 
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => 'Не удалось подобрать событие для рассылки.',
             ]);
         }
@@ -281,16 +280,18 @@ class TelegramChatBroadcastController extends Controller
     public function markSingleSent(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'telegram_id'      => ['required', 'integer'],
+            'telegram_id' => ['required', 'integer'],
             'telegram_chat_id' => ['required', 'integer'],
-            'event_id'         => ['required', 'integer'],
-            'posted_at'        => ['nullable', 'string'], // парсим сами
+            'event_id' => ['required', 'integer'],
+            'posted_at' => ['nullable', 'string'], // парсим сами
+            'claim_token' => ['nullable', 'string', 'max:40'], // claim-before-post (опц. для backward-compat)
         ]);
 
-        $telegramId     = (int) $validated['telegram_id'];
+        $telegramId = (int) $validated['telegram_id'];
         $telegramChatId = (int) $validated['telegram_chat_id'];
-        $eventId        = (int) $validated['event_id'];
-        $postedAtRaw    = $validated['posted_at'] ?? null;
+        $eventId = (int) $validated['event_id'];
+        $postedAtRaw = $validated['posted_at'] ?? null;
+        $claimToken = $validated['claim_token'] ?? null;
 
         $moment = null;
         if ($postedAtRaw) {
@@ -308,6 +309,7 @@ class TelegramChatBroadcastController extends Controller
                 $telegramChatId,
                 $eventId,
                 $moment,
+                $claimToken,
             );
 
             return response()->json([
@@ -315,14 +317,14 @@ class TelegramChatBroadcastController extends Controller
             ]);
         } catch (RuntimeException $e) {
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => $e->getMessage(),
             ]);
         } catch (Throwable $e) {
             report($e);
 
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => 'Не удалось отметить событие как опубликованное.',
             ]);
         }
@@ -356,16 +358,16 @@ class TelegramChatBroadcastController extends Controller
     public function enqueueSingle(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'telegram_id'      => ['required', 'integer'],
+            'telegram_id' => ['required', 'integer'],
             'telegram_chat_id' => ['required', 'integer'],
-            'event_id'         => ['required', 'integer'],
-            'planned_at'       => ['nullable', 'string'],
+            'event_id' => ['required', 'integer'],
+            'planned_at' => ['nullable', 'string'],
         ]);
 
-        $telegramId     = (int) $validated['telegram_id'];
+        $telegramId = (int) $validated['telegram_id'];
         $telegramChatId = (int) $validated['telegram_chat_id'];
-        $eventId        = (int) $validated['event_id'];
-        $plannedAtRaw   = $validated['planned_at'] ?? null;
+        $eventId = (int) $validated['event_id'];
+        $plannedAtRaw = $validated['planned_at'] ?? null;
 
         $plannedAt = null;
         if ($plannedAtRaw) {
@@ -386,25 +388,25 @@ class TelegramChatBroadcastController extends Controller
             );
 
             return response()->json([
-                'ok'         => true,
+                'ok' => true,
                 'queue_item' => [
-                    'id'         => $item->id,
-                    'status'     => $item->status,
-                    'event_id'   => $item->event_id,
+                    'id' => $item->id,
+                    'status' => $item->status,
+                    'event_id' => $item->event_id,
                     'planned_at' => optional($item->planned_at)?->toIso8601String(),
                     'created_at' => optional($item->created_at)?->toIso8601String(),
                 ],
             ]);
         } catch (RuntimeException $e) {
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => $e->getMessage(),
             ]);
         } catch (Throwable $e) {
             report($e);
 
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => 'Не удалось поставить событие в очередь.',
             ]);
         }
@@ -441,14 +443,14 @@ class TelegramChatBroadcastController extends Controller
     public function listQueue(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'telegram_id'      => ['required', 'integer'],
+            'telegram_id' => ['required', 'integer'],
             'telegram_chat_id' => ['required', 'integer'],
-            'limit'            => ['nullable', 'integer', 'min:1', 'max:50'],
+            'limit' => ['nullable', 'integer', 'min:1', 'max:50'],
         ]);
 
-        $telegramId     = (int) $validated['telegram_id'];
+        $telegramId = (int) $validated['telegram_id'];
         $telegramChatId = (int) $validated['telegram_chat_id'];
-        $limit          = isset($validated['limit'])
+        $limit = isset($validated['limit'])
             ? (int) $validated['limit']
             : 5;
 
@@ -464,29 +466,29 @@ class TelegramChatBroadcastController extends Controller
 
             $itemsPayload = $items->map(function (TelegramChatBroadcastItem $item) {
                 return [
-                    'id'         => $item->id,
-                    'status'     => $item->status,
-                    'event_id'   => $item->event_id,
+                    'id' => $item->id,
+                    'status' => $item->status,
+                    'event_id' => $item->event_id,
                     'planned_at' => optional($item->planned_at)?->toIso8601String(),
                     'created_at' => optional($item->created_at)?->toIso8601String(),
                 ];
             })->values()->all();
 
             return response()->json([
-                'ok'    => true,
+                'ok' => true,
                 'items' => $itemsPayload,
                 'total' => $total,
             ]);
         } catch (RuntimeException $e) {
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => $e->getMessage(),
             ]);
         } catch (Throwable $e) {
             report($e);
 
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => 'Не удалось получить очередь для канала.',
             ]);
         }
@@ -508,16 +510,16 @@ class TelegramChatBroadcastController extends Controller
     public function skipSingleFromQueue(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'telegram_id'      => ['required', 'integer'],
+            'telegram_id' => ['required', 'integer'],
             'telegram_chat_id' => ['required', 'integer'],
-            'event_id'         => ['required', 'integer'],
-            'reason'           => ['nullable', 'string', 'max:255'],
+            'event_id' => ['required', 'integer'],
+            'reason' => ['nullable', 'string', 'max:255'],
         ]);
 
-        $telegramId     = (int) $validated['telegram_id'];
+        $telegramId = (int) $validated['telegram_id'];
         $telegramChatId = (int) $validated['telegram_chat_id'];
-        $eventId        = (int) $validated['event_id'];
-        $reason         = $validated['reason'] ?? null;
+        $eventId = (int) $validated['event_id'];
+        $reason = $validated['reason'] ?? null;
 
         try {
             $this->broadcastService->skipSingleEventForChat(
@@ -530,14 +532,14 @@ class TelegramChatBroadcastController extends Controller
             return response()->json(['ok' => true]);
         } catch (RuntimeException $e) {
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => $e->getMessage(),
             ]);
         } catch (Throwable $e) {
             report($e);
 
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => 'Не удалось убрать событие из очереди.',
             ]);
         }
@@ -564,18 +566,18 @@ class TelegramChatBroadcastController extends Controller
             : 50;
 
         try {
-            $now   = Carbon::now();
+            $now = Carbon::now();
             $items = $this->broadcastService->collectDueSingleRuns($now, $limit);
 
             return response()->json([
-                'ok'    => true,
+                'ok' => true,
                 'items' => $items,
             ]);
         } catch (\Throwable $e) {
             report($e);
 
             return response()->json([
-                'ok'    => false,
+                'ok' => false,
                 'error' => 'Не удалось собрать задачи рассылки.',
                 'items' => [],
             ]);
@@ -591,7 +593,7 @@ class TelegramChatBroadcastController extends Controller
     public function reviewPreviewSent(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'item_id'    => ['required', 'integer'],
+            'item_id' => ['required', 'integer'],
             'message_id' => ['required', 'integer'],
         ]);
 
@@ -636,7 +638,7 @@ class TelegramChatBroadcastController extends Controller
     {
         $validated = $request->validate([
             'telegram_id' => ['required', 'integer'],
-            'item_id'     => ['required', 'integer'],
+            'item_id' => ['required', 'integer'],
         ]);
 
         try {
