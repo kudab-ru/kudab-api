@@ -6,6 +6,7 @@ use App\Models\City;
 use App\Models\Community;
 use App\Models\Event;
 use App\Models\Interest;
+use App\Models\Venue;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -113,7 +114,7 @@ class WebEventsTest extends TestCase
         $this->createEvent($msk->id, $wantedCommunity->id, 'Нужное событие', now()->addDay());
         $this->createEvent($msk->id, $otherCommunity->id, 'Чужое событие', now()->addDay());
 
-        $response = $this->getJson('/api/web/events?city=moskva&community_id=' . $wantedCommunity->id);
+        $response = $this->getJson('/api/web/events?city=moskva&community_id='.$wantedCommunity->id);
 
         $response
             ->assertOk()
@@ -124,6 +125,30 @@ class WebEventsTest extends TestCase
         $response->assertJsonMissing([
             'title' => 'Чужое событие',
         ]);
+    }
+
+    public function test_web_events_can_be_filtered_by_venue_id(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $wantedVenue = $this->createVenue($msk->id, 'Нужная площадка', 'nuzhnaya-ploshchadka');
+        $otherVenue = $this->createVenue($msk->id, 'Другая площадка', 'drugaya-ploshchadka');
+
+        $this->createEvent($msk->id, $community->id, 'Событие на нужной', now()->addDay(), $wantedVenue->id);
+        $this->createEvent($msk->id, $community->id, 'Событие на другой', now()->addDay(), $otherVenue->id);
+        $this->createEvent($msk->id, $community->id, 'Событие без площадки', now()->addDay());
+
+        $response = $this->getJson('/api/web/events?city=moskva&venue_id='.$wantedVenue->id);
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Событие на нужной');
+
+        $response->assertJsonMissing(['title' => 'Событие на другой']);
+        $response->assertJsonMissing(['title' => 'Событие без площадки']);
     }
 
     public function test_web_events_can_be_found_by_q_in_title(): void
@@ -156,10 +181,10 @@ class WebEventsTest extends TestCase
         $community = $this->createCommunity($msk->id, 'Организатор');
 
         $theatre = $this->createInterest('Театр', 'theatre');
-        $jazz    = $this->createInterest('Джаз', 'jazz');
+        $jazz = $this->createInterest('Джаз', 'jazz');
 
         $theatreEvent = $this->createEvent($msk->id, $community->id, 'Спектакль', now()->addDay());
-        $jazzEvent    = $this->createEvent($msk->id, $community->id, 'Концерт', now()->addDays(2));
+        $jazzEvent = $this->createEvent($msk->id, $community->id, 'Концерт', now()->addDays(2));
 
         $this->tagEventLeafOnly($theatreEvent->id, $theatre->id);
         $this->tagEventLeafOnly($jazzEvent->id, $jazz->id);
@@ -187,8 +212,8 @@ class WebEventsTest extends TestCase
         $community = $this->createCommunity($msk->id, 'Организатор');
 
         $music = $this->createInterest('Музыка', 'music');
-        $jazz  = $this->createInterest('Джаз', 'jazz', $music->id);
-        $rock  = $this->createInterest('Рок', 'rock', $music->id);
+        $jazz = $this->createInterest('Джаз', 'jazz', $music->id);
+        $rock = $this->createInterest('Рок', 'rock', $music->id);
         $theatre = $this->createInterest('Театр', 'theatre');
 
         $jazzEvent = $this->createEvent($msk->id, $community->id, 'Джаз-концерт', now()->addDay());
@@ -285,7 +310,7 @@ class WebEventsTest extends TestCase
         $this->tagEventLeafOnly($jazzEvent->id, $jazz->id);
         $this->tagEventLeafOnly($theatreEvent->id, $theatre->id);
 
-        $response = $this->getJson('/api/web/events?city=moskva&interests[]=' . $jazz->id);
+        $response = $this->getJson('/api/web/events?city=moskva&interests[]='.$jazz->id);
 
         $response
             ->assertOk()
@@ -310,7 +335,7 @@ class WebEventsTest extends TestCase
         $this->tagEventLeafOnly($jazzEvent->id, $jazz->id);
 
         // legacy путь по parent ID не разворачивает в children
-        $response = $this->getJson('/api/web/events?city=moskva&interests[]=' . $music->id);
+        $response = $this->getJson('/api/web/events?city=moskva&interests[]='.$music->id);
 
         $response
             ->assertOk()
@@ -322,7 +347,7 @@ class WebEventsTest extends TestCase
         $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
         $jazz = $this->createInterest('Джаз', 'jazz');
 
-        $response = $this->getJson('/api/web/events?city=moskva&interests[]=' . $jazz->id . '&interests[]=theatre');
+        $response = $this->getJson('/api/web/events?city=moskva&interests[]='.$jazz->id.'&interests[]=theatre');
 
         $response
             ->assertStatus(422)
@@ -343,13 +368,13 @@ class WebEventsTest extends TestCase
         $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
         $community = $this->createCommunity($msk->id, 'Организатор');
 
-        $kids   = $this->createEvent($msk->id, $community->id, 'Спектакль для детей', now()->addDay());
+        $kids = $this->createEvent($msk->id, $community->id, 'Спектакль для детей', now()->addDay());
         $family = $this->createEvent($msk->id, $community->id, 'Семейный праздник', now()->addDay());
-        $adult  = $this->createEvent($msk->id, $community->id, 'Концерт для взрослых', now()->addDay());
+        $adult = $this->createEvent($msk->id, $community->id, 'Концерт для взрослых', now()->addDay());
 
-        $this->setTaxonomy($kids->id,   'kids',    'culture');
-        $this->setTaxonomy($family->id, 'family',  'entertainment');
-        $this->setTaxonomy($adult->id,  'general', 'entertainment');
+        $this->setTaxonomy($kids->id, 'kids', 'culture');
+        $this->setTaxonomy($family->id, 'family', 'entertainment');
+        $this->setTaxonomy($adult->id, 'general', 'entertainment');
 
         $response = $this->getJson('/api/web/events?city=moskva');
 
@@ -369,14 +394,14 @@ class WebEventsTest extends TestCase
         $community = $this->createCommunity($msk->id, 'Организатор');
 
         $entertainment = $this->createEvent($msk->id, $community->id, 'Концерт', now()->addDay());
-        $official      = $this->createEvent($msk->id, $community->id, 'Заседание комиссии', now()->addDay());
-        $other         = $this->createEvent($msk->id, $community->id, 'Церемония награждения', now()->addDay());
-        $religious     = $this->createEvent($msk->id, $community->id, 'Литургия', now()->addDay());
+        $official = $this->createEvent($msk->id, $community->id, 'Заседание комиссии', now()->addDay());
+        $other = $this->createEvent($msk->id, $community->id, 'Церемония награждения', now()->addDay());
+        $religious = $this->createEvent($msk->id, $community->id, 'Литургия', now()->addDay());
 
         $this->setTaxonomy($entertainment->id, 'general', 'entertainment');
-        $this->setTaxonomy($official->id,      'general', 'official');
-        $this->setTaxonomy($other->id,         'general', 'other');
-        $this->setTaxonomy($religious->id,     'general', 'religious');
+        $this->setTaxonomy($official->id, 'general', 'official');
+        $this->setTaxonomy($other->id, 'general', 'other');
+        $this->setTaxonomy($religious->id, 'general', 'religious');
 
         $response = $this->getJson('/api/web/events?city=moskva');
 
@@ -407,13 +432,13 @@ class WebEventsTest extends TestCase
         $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
         $community = $this->createCommunity($msk->id, 'Организатор');
 
-        $kids     = $this->createEvent($msk->id, $community->id, 'Детский спектакль', now()->addDay());
+        $kids = $this->createEvent($msk->id, $community->id, 'Детский спектакль', now()->addDay());
         $official = $this->createEvent($msk->id, $community->id, 'Награждение', now()->addDay());
-        $general  = $this->createEvent($msk->id, $community->id, 'Концерт', now()->addDay());
+        $general = $this->createEvent($msk->id, $community->id, 'Концерт', now()->addDay());
 
-        $this->setTaxonomy($kids->id,     'kids',    'culture');
+        $this->setTaxonomy($kids->id, 'kids', 'culture');
         $this->setTaxonomy($official->id, 'general', 'official');
-        $this->setTaxonomy($general->id,  'general', 'entertainment');
+        $this->setTaxonomy($general->id, 'general', 'entertainment');
 
         $response = $this->getJson('/api/web/events?city=moskva&include_all=1');
 
@@ -430,7 +455,7 @@ class WebEventsTest extends TestCase
         $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
         $community = $this->createCommunity($msk->id, 'Организатор');
 
-        $jazz  = $this->createInterest('Джаз', 'jazz');
+        $jazz = $this->createInterest('Джаз', 'jazz');
         $music = $this->createInterest('Музыка', 'music');
         $theatre = $this->createInterest('Театр', 'theatre');
 
@@ -570,8 +595,8 @@ class WebEventsTest extends TestCase
     private function createInterest(string $name, string $slug, ?int $parentId = null): Interest
     {
         return Interest::create([
-            'name'      => $name,
-            'slug'      => $slug,
+            'name' => $name,
+            'slug' => $slug,
             'parent_id' => $parentId,
         ]);
     }
@@ -583,10 +608,10 @@ class WebEventsTest extends TestCase
     private function tagEventLeafOnly(int $eventId, int $interestId): void
     {
         DB::table('event_interest')->insert([
-            'event_id'    => $eventId,
+            'event_id' => $eventId,
             'interest_id' => $interestId,
-            'created_at'  => now(),
-            'updated_at'  => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
         ]);
     }
 
@@ -611,26 +636,37 @@ class WebEventsTest extends TestCase
         ]);
     }
 
-    private function createEvent(int $cityId, int $communityId, string $title, Carbon $startTime): Event
+    private function createEvent(int $cityId, int $communityId, string $title, Carbon $startTime, ?int $venueId = null): Event
     {
-        $event = new Event();
+        $event = new Event;
         $event->community_id = $communityId;
         $event->title = $title;
         $event->status = 'active';
         $event->city_id = $cityId;
         $event->start_time = $startTime;
         $event->start_date = $startTime->toDateString();
+        $event->venue_id = $venueId;
         $event->save();
 
         return $event;
     }
 
+    private function createVenue(int $cityId, string $name, string $slug): Venue
+    {
+        return Venue::create([
+            'city_id' => $cityId,
+            'name' => $name,
+            'slug' => $slug,
+            'status' => 'active',
+        ]);
+    }
+
     private function setTaxonomy(int $eventId, ?string $audience, ?string $contentKind): void
     {
         DB::table('events')->where('id', $eventId)->update([
-            'audience'     => $audience,
+            'audience' => $audience,
             'content_kind' => $contentKind,
-            'updated_at'   => now(),
+            'updated_at' => now(),
         ]);
     }
 }
