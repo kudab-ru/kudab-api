@@ -83,6 +83,7 @@ Route::prefix('admin')
 
         // error-logs (просмотрщик ошибок «где и какие» + пометка «решено»)
         Route::get('/error-logs', [AdminErrorLogsController::class, 'index']);
+        Route::post('/error-logs/resolve-all', [AdminErrorLogsController::class, 'resolveAll']);
         Route::post('/error-logs/{id}/resolve', [AdminErrorLogsController::class, 'resolve']);
 
         // dashboard

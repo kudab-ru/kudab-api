@@ -87,6 +87,40 @@ class AdminErrorLogsController extends Controller
     }
 
     /**
+     * Массово пометить решёнными ВСЕ нерешённые по текущему фильтру (type/job/q/days).
+     * Один UPDATE — для бэклога в сотни тысяч. Затрагивает только resolved=false.
+     */
+    public function resolveAll(IndexRequest $request): JsonResponse
+    {
+        $data = $request->validated();
+
+        $query = ErrorLog::query()->where('resolved', false);
+
+        if (! empty($data['type'])) {
+            $query->where('type', $data['type']);
+        }
+        if (! empty($data['job'])) {
+            $query->where('job', $data['job']);
+        }
+        if (! empty($data['q'])) {
+            $query->where('error_text', 'ilike', '%'.$data['q'].'%');
+        }
+        if (! empty($data['days'])) {
+            $query->where('logged_at', '>=', now()->subDays((int) $data['days']));
+        }
+
+        $count = $query->update(['resolved' => true, 'updated_at' => now()]);
+
+        Log::info('admin:error-log:resolve-all', [
+            'actor_id' => $request->user()?->id,
+            'count' => $count,
+            'filters' => array_intersect_key($data, array_flip(['type', 'job', 'q', 'days'])),
+        ]);
+
+        return response()->json(['data' => ['resolved_count' => $count]]);
+    }
+
+    /**
      * Сводка по нерешённым: всего + разбивка по типам (для шапки страницы).
      *
      * @return array{total_unresolved: int, by_type: array<string,int>}

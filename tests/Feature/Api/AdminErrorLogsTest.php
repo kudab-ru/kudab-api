@@ -99,4 +99,33 @@ class AdminErrorLogsTest extends TestCase
         $this->actingAsRole('admin');
         $this->postJson('/api/admin/error-logs/999999/resolve')->assertStatus(404);
     }
+
+    public function test_resolve_all_marks_unresolved_by_filter(): void
+    {
+        $this->actingAsRole('admin');
+        $this->seedLog('general', false);
+        $this->seedLog('general', false);
+        $this->seedLog('vk_api', false);  // другой тип — не трогаем при type=general
+        $this->seedLog('general', true);  // уже решённая
+
+        $this->postJson('/api/admin/error-logs/resolve-all', ['type' => 'general'])
+            ->assertOk()
+            ->assertJsonPath('data.resolved_count', 2);
+
+        $this->assertSame(0, ErrorLog::where('type', 'general')->where('resolved', false)->count());
+        $this->assertSame(1, ErrorLog::where('type', 'vk_api')->where('resolved', false)->count());
+    }
+
+    public function test_resolve_all_without_filter_resolves_everything(): void
+    {
+        $this->actingAsRole('admin');
+        $this->seedLog('general', false);
+        $this->seedLog('vk_api', false);
+
+        $this->postJson('/api/admin/error-logs/resolve-all', [])
+            ->assertOk()
+            ->assertJsonPath('data.resolved_count', 2);
+
+        $this->assertSame(0, ErrorLog::where('resolved', false)->count());
+    }
 }
