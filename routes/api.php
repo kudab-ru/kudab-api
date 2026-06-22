@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\Admin\AdminSelectController;
+use App\Http\Controllers\Api\Admin\AdminYandexAfishaController;
 use App\Http\Controllers\Api\CityController;
 use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Api\Web\CitiesController;
@@ -81,6 +82,16 @@ Route::prefix('admin')
 
         // dashboard
         Route::get('/dashboard/stats', [AdminDashboardController::class, 'stats']);
+    });
+
+// Управление источником Я.Афиша — ТОЛЬКО суперадмин (отдельная группа, НЕ
+// role:admin|superadmin выше). Пишет source_configs, parser читает свежим.
+Route::prefix('admin/sources/yandex-afisha')
+    ->middleware(['auth:sanctum', 'role:superadmin'])
+    ->group(function () {
+        Route::get('config', [AdminYandexAfishaController::class, 'config']);
+        Route::put('config', [AdminYandexAfishaController::class, 'updateConfig']);
+        Route::get('status', [AdminYandexAfishaController::class, 'status']);
     });
 
 Route::prefix('web')->middleware(['throttle:web'])->group(function () {
