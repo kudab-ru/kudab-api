@@ -652,6 +652,39 @@ class WebEventsTest extends TestCase
         );
     }
 
+    public function test_sort_top_collapses_same_event_group_into_one_card(): void
+    {
+        // Регресс «задвоенной ленты»: sort=top без grouped=1 (v2-виджеты главной)
+        // раньше возвращал каждый сеанс одной event_group отдельной карточкой.
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Тест');
+        $when = Carbon::now()->addDays(5);
+
+        // Два сеанса одной экскурсии (один event_group_id) — должна быть ОДНА карточка.
+        $a = $this->createEvent($city->id, $community->id, 'Экскурсия', $when->copy()->setTime(9, 0));
+        $b = $this->createEvent($city->id, $community->id, 'Экскурсия', $when->copy()->setTime(11, 30));
+        $gid = DB::table('event_groups')->insertGetId([
+            'community_id' => $community->id,
+            'city_id' => $city->id,
+            'group_key' => 'test-excursion-grp',
+            'title_norm' => 'экскурсия',
+            'current_event_id' => $a->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('events')->whereIn('id', [$a->id, $b->id])->update(['event_group_id' => $gid]);
+
+        $data = $this->getJson("/api/web/events?city_id={$city->id}&sort=top")
+            ->assertOk()->json('data');
+
+        $sameGroup = array_filter($data, fn ($e) => ($e['title'] ?? '') === 'Экскурсия');
+        $this->assertCount(
+            1,
+            $sameGroup,
+            'sort=top должен схлопывать сеансы одной event_group в одну карточку',
+        );
+    }
+
     private function insertCity(string $name, string $slug, string $status, float $lng, float $lat): City
     {
         $now = now();

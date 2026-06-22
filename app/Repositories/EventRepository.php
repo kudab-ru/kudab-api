@@ -413,6 +413,14 @@ class EventRepository
             ? (filter_var($filters['grouped_by_post'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) === true)
             : false;
 
+        // sort=top ОБЯЗАН схлопывать одинаковые события в одну карточку, как grouped=1.
+        // v2-главная (hero / «Куда на выходных» / «Событие дня») шлёт sort=top БЕЗ grouped=1,
+        // а ранжирование без группировки выдаёт каждый сеанс/групп-дубль отдельной карточкой
+        // (баг «задвоенной ленты» после выкатки ранжирования). Axis A (event_group_id) ниже
+        // включается для grouped ИЛИ sort=top; с grouped_by_post (axis B) композируется.
+        $sortTop = (($filters['sort'] ?? null) === 'top');
+        $collapseGroups = $grouped || $sortTop;
+
         $nowMsk = now('Europe/Moscow');
         $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
         $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
@@ -439,10 +447,11 @@ class EventRepository
         $this->excludeBlacklistedSources($q);
         $this->applyMainFeedTaxonomyFilter($q, $filters);
 
-        if (($filters['sort'] ?? null) === 'top') {
+        if ($sortTop) {
             // Ранжированная лента: будущее первее, внутри — по «интересности»
-            // (__top_score, порт EventBroadcastScorer). Группировку не трогает —
-            // представитель выбирается отдельным row_number-окном ниже.
+            // (__top_score, порт EventBroadcastScorer). Группы схлопываются ниже
+            // через $collapseGroups (axis A) — представитель остаётся канонический,
+            // а ORDER BY __top_score ранжирует уже представителей групп.
             $this->addTopScore($q);
             $q->orderBy('__past_rank', 'asc')
                 ->orderByRaw('__top_score desc')
@@ -717,7 +726,7 @@ class EventRepository
                 ->orderBy('events.id', 'asc');
         }
 
-        if ($grouped) {
+        if ($collapseGroups) {
             $base = clone $q;
 
             try {
@@ -919,7 +928,7 @@ class EventRepository
             ]);
         });
 
-        if ($grouped) {
+        if ($collapseGroups) {
             $this->hydrateGroupDates($events);
         }
 
