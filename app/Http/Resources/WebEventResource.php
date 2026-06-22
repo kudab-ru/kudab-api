@@ -96,6 +96,9 @@ class WebEventResource extends JsonResource
             'start_date'     => $this->start_date ? substr((string) $this->start_date, 0, 10) : null,
             'time_precision' => (string) ($this->time_precision ?? 'datetime'),
 
+            // content_kind — для цветного kind-бейджа на карточке (визуальное разнообразие)
+            'content_kind'   => $this->content_kind ?: null,
+
             'price_status'   => (string) ($this->price_status ?? 'unknown'),
             'tickets_status' => (string) ($this->tickets_status ?? 'unknown'),
             'price_min'      => $this->price_min !== null ? (int) $this->price_min : null,

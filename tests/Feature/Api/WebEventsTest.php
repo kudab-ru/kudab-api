@@ -722,6 +722,61 @@ class WebEventsTest extends TestCase
         $this->assertSame(2, (int) ($fest[0]['group']['count'] ?? 0), 'group.count считается по всей федерации');
     }
 
+    public function test_sort_top_freshness_bonus_lifts_recently_added(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Тест');
+        $when = Carbon::now()->addDays(4)->setTime(19, 0);
+
+        // Идентичные события, отличается только created_at → свежесть-бонус решает.
+        // created_at выставляем через Postgres now() (тот же now(), что в addTopScore SQL),
+        // иначе Carbon-время теста рассинхронено с wall-clock БД.
+        $stale = $this->createEvent($city->id, $community->id, 'Старое', $when->copy());
+        $fresh = $this->createEvent($city->id, $community->id, 'Свежее', $when->copy());
+        DB::table('events')->where('id', $stale->id)->update(['created_at' => DB::raw("now() - interval '20 days'")]);
+        DB::table('events')->where('id', $fresh->id)->update(['created_at' => DB::raw('now()')]);
+
+        $titles = array_column(
+            $this->getJson("/api/web/events?city_id={$city->id}&sort=top")->assertOk()->json('data'),
+            'title',
+        );
+
+        $this->assertLessThan(
+            array_search('Старое', $titles),
+            array_search('Свежее', $titles),
+            'свежее событие должно стоять выше идентичного, но давно добавленного',
+        );
+    }
+
+    public function test_sort_top_diversifies_content_kind(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Тест');
+        $when = Carbon::now()->addDays(4)->setTime(19, 0);
+
+        // 3 entertainment + 2 culture одинакового веса: без diversity шли бы
+        // 3 entertainment подряд. Должно перемешаться (≤2 подряд одного kind).
+        $kinds = ['entertainment', 'entertainment', 'entertainment', 'culture', 'culture'];
+        foreach ($kinds as $i => $ck) {
+            $e = $this->createEvent($city->id, $community->id, "Событие $i", $when->copy());
+            $this->setTaxonomy($e->id, 'general', $ck);
+        }
+
+        $data = $this->getJson("/api/web/events?city_id={$city->id}&sort=top&per_page=10")
+            ->assertOk()->json('data');
+
+        $kindSeq = array_map(fn ($e) => $e['content_kind'] ?? null, $data);
+        $maxRun = 1;
+        $run = 1;
+        for ($i = 1; $i < count($kindSeq); $i++) {
+            $run = ($kindSeq[$i] !== null && $kindSeq[$i] === $kindSeq[$i - 1]) ? $run + 1 : 1;
+            $maxRun = max($maxRun, $run);
+        }
+        $this->assertLessThanOrEqual(2, $maxRun, 'не должно быть >2 подряд одного content_kind');
+        $this->assertContains('culture', $kindSeq);
+        $this->assertContains('entertainment', $kindSeq);
+    }
+
     private function insertCity(string $name, string $slug, string $status, float $lng, float $lat): City
     {
         $now = now();

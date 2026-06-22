@@ -679,7 +679,10 @@ class EventRepository
         $dir = strtolower((string) ($filters['dir'] ?? 'asc'));
         $dir = $dir === 'desc' ? 'desc' : 'asc';
 
-        if ($sort) {
+        // sort=top уже получил свой порядок выше (past → __top_score → дата); этот
+        // блок (явные sort=start_at/price_min/…) НЕ должен его перетирать через
+        // reorder() — иначе ранжирование схлопывается в хронологию (past→img→gray→id).
+        if ($sort && $sort !== 'top') {
             $q->reorder()
                 ->orderBy('__past_rank', 'asc');
 
@@ -969,6 +972,13 @@ class EventRepository
 
         if ($groupedByPost) {
             $this->hydrateSiblings($events, $eligibleEventIds);
+        }
+
+        // Diversity: в ранжированной ленте не даём >2 карточек одного content_kind
+        // подряд (иначе сверху 5 спектаклей + 4 выставки). Пост-сортировка, score
+        // сохраняется максимально (жадно сдвигаем только нарушителей).
+        if ($sortTop) {
+            $events = $this->diversifyByContentKind($events);
         }
 
         $page = $paginator->setCollection($events);
@@ -1561,6 +1571,13 @@ class EventRepository
             + CASE WHEN events.price_status IN ('free','priced') OR events.price_min IS NOT NULL THEN 5 ELSE 0 END
             + CASE WHEN char_length(coalesce(events.description, '')) >= 120 THEN 10 ELSE 0 END
             + CASE WHEN events.time_precision = 'datetime' THEN 5 ELSE 0 END
+            -- свежесть-бонус: только что спарсенные события поднимаются над «висящими»
+            -- (умеренно — не перебивает крупные события; ротация новых VK-постов в топ)
+            + CASE
+                WHEN events.created_at >= now() - interval '3 days' THEN 10
+                WHEN events.created_at >= now() - interval '7 days' THEN 5
+                ELSE 0
+              END
             + CASE
                 WHEN coalesce(events.start_time::date, events.start_date) IS NULL THEN -25
                 WHEN coalesce(events.start_time::date, events.start_date) <= (now()::date + 2) THEN 0
@@ -1705,6 +1722,43 @@ class EventRepository
      * - group_dates: [{id,start_at,start_date,time_precision,time_text}, ...]
      * - group_count: int (реальный размер группы по “видимым” событиям)
      */
+    /**
+     * Жадная диверсификация: переставляет события так, чтобы не было >2 подряд
+     * одного content_kind, минимально нарушая исходный (score) порядок. События
+     * без content_kind не считаются «одинаковыми» (пустой kind не группирует).
+     */
+    private function diversifyByContentKind(EloquentCollection $events): EloquentCollection
+    {
+        if ($events->count() < 3) {
+            return $events;
+        }
+
+        $kindOf = fn ($e) => (string) ($e->content_kind ?? '');
+        $pool = $events->all(); // в score-порядке
+        $result = [];
+
+        while ($pool) {
+            $pickIdx = 0;
+            $n = count($result);
+            // если последние два уже одного непустого kind — берём первого с другим
+            if ($n >= 2) {
+                $last = $kindOf($result[$n - 1]);
+                if ($last !== '' && $last === $kindOf($result[$n - 2])) {
+                    foreach ($pool as $i => $cand) {
+                        if ($kindOf($cand) !== $last) {
+                            $pickIdx = $i;
+                            break;
+                        }
+                    }
+                }
+            }
+            $result[] = $pool[$pickIdx];
+            array_splice($pool, $pickIdx, 1);
+        }
+
+        return new EloquentCollection($result);
+    }
+
     private function hydrateGroupDates(EloquentCollection $events): void
     {
         if ($events->isEmpty()) return;
