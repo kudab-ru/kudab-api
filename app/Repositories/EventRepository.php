@@ -80,11 +80,29 @@ class EventRepository
     }
 
     /**
+     * Federation-ключ группы: COALESCE(federation_id, id). Если группа не
+     * федерирована (federation_id NULL) — возвращает сам $groupId (no-op).
+     * Позволяет /web/event-groups/{id} отдавать события ВСЕЙ федерации.
+     */
+    private function federationKeyOf(int $groupId): int
+    {
+        $fk = DB::table('event_groups')
+            ->where('id', $groupId)
+            ->selectRaw('COALESCE(federation_id, id) as fk')
+            ->value('fk');
+
+        return $fk !== null ? (int) $fk : $groupId;
+    }
+
+    /**
      * Web: количество событий в группе (для "count" в ответе).
      * Считаем по тем же правилам, что /web/events (active city + not deleted + not blacklisted + lookback window).
+     * Federation-aware: считает по всей федерации запрошенной группы.
      */
     public function countWebGroup(int $groupId): int
     {
+        $fedKey = $this->federationKeyOf($groupId);
+
         $nowMsk = now('Europe/Moscow');
         $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
         $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
@@ -95,7 +113,7 @@ class EventRepository
             ->whereNull('eg.deleted_at')
             ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')
-            ->where('events.event_group_id', $groupId)
+            ->whereRaw('COALESCE(eg.federation_id, eg.id) = ?', [$fedKey])
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
                 $w->where('events.start_time', '>=', $cutoffTs)
                     ->orWhere(function ($x) use ($fromDateMsk) {
@@ -119,6 +137,8 @@ class EventRepository
     {
         $limit = max(1, min($limit, 50));
 
+        $fedKey = $this->federationKeyOf($groupId);
+
         $nowMsk = now('Europe/Moscow');
         $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
         $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
@@ -130,7 +150,7 @@ class EventRepository
             ->whereNull('eg.deleted_at')
             ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')
-            ->where('events.event_group_id', $groupId)
+            ->whereRaw('COALESCE(eg.federation_id, eg.id) = ?', [$fedKey])
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
                 $w->where('events.start_time', '>=', $cutoffTs)
                     ->orWhere(function ($x) use ($fromDateMsk) {
@@ -742,6 +762,7 @@ class EventRepository
                         ->whereNull('eg.deleted_at');
                 })
                 ->selectRaw("eg.current_event_id as __grp_current_event_id")
+                ->selectRaw("eg.federation_id as __grp_federation_id")
                 ->selectRaw("
                     COALESCE(
                       b.start_time,
@@ -762,7 +783,7 @@ class EventRepository
                 ->select('b2.*')
                 ->selectRaw("
                     row_number() over (
-                      partition by COALESCE(b2.event_group_id, -b2.id)
+                      partition by COALESCE(b2.__grp_federation_id, b2.event_group_id, -b2.id)
                       order by
                         CASE
                           WHEN b2.__grp_current_event_id IS NOT NULL
@@ -1690,14 +1711,35 @@ class EventRepository
 
         $MAX_DATES = 12; // чтобы group.dates не раздувал ответы
 
-        $groupIds = $events->pluck('event_group_id')
+        $repGroupIds = $events->pluck('event_group_id')
             ->filter(fn($v) => is_numeric($v) && (int)$v > 0)
             ->map(fn($v) => (int)$v)
             ->unique()
             ->values()
             ->all();
 
-        if (!$groupIds) return;
+        if (!$repGroupIds) return;
+
+        // federation-aware ключ группы: COALESCE(federation_id, id). Расширяем
+        // rep-группы до всех групп их федераций, чтобы chip'ы сеансов собрались
+        // по ВСЕЙ федерации (cross-community), а не только по группе rep'а.
+        $fedKeys = DB::table('event_groups')
+            ->whereIn('id', $repGroupIds)
+            ->whereNull('deleted_at')
+            ->selectRaw('DISTINCT COALESCE(federation_id, id) as fk')
+            ->pluck('fk')
+            ->map(fn($v) => (int)$v)
+            ->all();
+
+        if (!$fedKeys) return;
+
+        // rep.event_group_id → fed_key (для раскладки результата на rep-события)
+        $repFed = DB::table('event_groups')
+            ->whereIn('id', $repGroupIds)
+            ->selectRaw('id, COALESCE(federation_id, id) as fk')
+            ->pluck('fk', 'id')
+            ->map(fn($v) => (int)$v)
+            ->all();
 
         // те же правила, что /web/event-groups/{id} (и /web/events)
         $nowMsk = now('Europe/Moscow');
@@ -1708,11 +1750,12 @@ class EventRepository
             ->join('event_groups as eg', 'eg.id', '=', 'e.event_group_id')
             ->join('cities as ct', 'ct.id', '=', 'e.city_id')
             ->select(['e.id', 'e.event_group_id', 'e.start_time', 'e.start_date', 'e.time_precision', 'e.time_text'])
-            ->selectRaw('count(*) OVER (PARTITION BY e.event_group_id) as __grp_count')
+            ->selectRaw('COALESCE(eg.federation_id, eg.id) as __fed_key')
+            ->selectRaw('count(*) OVER (PARTITION BY COALESCE(eg.federation_id, eg.id)) as __grp_count')
             ->whereNull('eg.deleted_at')
             ->where('ct.status', 'active')
             ->whereNull('e.deleted_at')
-            ->whereIn('e.event_group_id', $groupIds)
+            ->whereIn(DB::raw('COALESCE(eg.federation_id, eg.id)'), $fedKeys)
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
                 $w->where('e.start_time', '>=', $cutoffTs)
                     ->orWhere(function ($x) use ($fromDateMsk) {
@@ -1746,7 +1789,7 @@ class EventRepository
         ");
 
         $rows = $q
-            ->orderBy('e.event_group_id', 'asc')
+            ->orderByRaw('COALESCE(eg.federation_id, eg.id) asc')
             ->orderByRaw('e.start_date asc nulls last')
             ->orderByRaw('e.start_time asc nulls last')
             ->orderBy('e.id', 'asc')
@@ -1756,7 +1799,7 @@ class EventRepository
         $cntMap = [];
 
         foreach ($rows as $r) {
-            $gid = (int) $r->event_group_id;
+            $gid = (int) $r->__fed_key; // ключ карты = федерация (или сама группа, если не федерирована)
             if (!$gid) continue;
 
             $grpCount = (int) ($r->__grp_count ?? 0);
@@ -1789,8 +1832,9 @@ class EventRepository
             ];
         }
 
-        $events->each(function (Event $e) use ($map, $cntMap) {
-            $gid = (int) ($e->event_group_id ?? 0);
+        $events->each(function (Event $e) use ($map, $cntMap, $repFed) {
+            $egid = (int) ($e->event_group_id ?? 0);
+            $gid = $repFed[$egid] ?? $egid; // event_group_id rep'а → его fed-ключ
             if ($gid > 0 && isset($map[$gid])) {
                 $e->setAttribute('group_dates', $map[$gid]); // уже лимитировано
                 $e->setAttribute('group_count', (int) ($cntMap[$gid] ?? count($map[$gid])));

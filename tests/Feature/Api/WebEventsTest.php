@@ -685,6 +685,43 @@ class WebEventsTest extends TestCase
         );
     }
 
+    public function test_sort_top_collapses_federated_groups_across_communities(): void
+    {
+        // Cross-community федерация (MVP-B): один фестиваль из двух пабликов =
+        // два события, две group (разные community_id → разный group_key), но
+        // связаны federation_id → ОДНА карточка на ленте.
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $c1 = $this->createCommunity($city->id, 'Паблик 1');
+        $c2 = $this->createCommunity($city->id, 'Паблик 2');
+        $when = Carbon::now()->addDays(5)->setTime(18, 0);
+
+        $e1 = $this->createEvent($city->id, $c1->id, 'Платоновский фестиваль', $when->copy());
+        $e2 = $this->createEvent($city->id, $c2->id, 'Платоновский фестиваль', $when->copy());
+
+        // g1 — канон федерации (federation_id NULL → COALESCE даёт сам g1);
+        // g2 — член, federation_id = g1.
+        $g1 = DB::table('event_groups')->insertGetId([
+            'community_id' => $c1->id, 'city_id' => $city->id,
+            'group_key' => 'fed-canon', 'title_norm' => 'платоновский фестиваль',
+            'current_event_id' => $e1->id, 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $g2 = DB::table('event_groups')->insertGetId([
+            'community_id' => $c2->id, 'city_id' => $city->id,
+            'group_key' => 'fed-member', 'title_norm' => 'платоновский фестиваль',
+            'current_event_id' => $e2->id, 'federation_id' => $g1,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('events')->where('id', $e1->id)->update(['event_group_id' => $g1]);
+        DB::table('events')->where('id', $e2->id)->update(['event_group_id' => $g2]);
+
+        $data = $this->getJson("/api/web/events?city_id={$city->id}&sort=top")
+            ->assertOk()->json('data');
+
+        $fest = array_values(array_filter($data, fn ($e) => ($e['title'] ?? '') === 'Платоновский фестиваль'));
+        $this->assertCount(1, $fest, 'федерированные группы разных сообществ → одна карточка');
+        $this->assertSame(2, (int) ($fest[0]['group']['count'] ?? 0), 'group.count считается по всей федерации');
+    }
+
     private function insertCity(string $name, string $slug, string $status, float $lng, float $lat): City
     {
         $now = now();
