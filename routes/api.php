@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\Admin\AdminErrorLogsController;
 use App\Http\Controllers\Api\Admin\AdminSelectController;
 use App\Http\Controllers\Api\Admin\AdminYandexAfishaController;
 use App\Http\Controllers\Api\CityController;
@@ -79,6 +80,10 @@ Route::prefix('admin')
         // parsing-status (мониторинг frozen-источников + ручная разморозка)
         Route::get('/parsing-status', [AdminParsingStatusController::class, 'index']);
         Route::post('/parsing-status/{linkId}/unfreeze', [AdminParsingStatusController::class, 'unfreeze']);
+
+        // error-logs (просмотрщик ошибок «где и какие» + пометка «решено»)
+        Route::get('/error-logs', [AdminErrorLogsController::class, 'index']);
+        Route::post('/error-logs/{id}/resolve', [AdminErrorLogsController::class, 'resolve']);
 
         // dashboard
         Route::get('/dashboard/stats', [AdminDashboardController::class, 'stats']);
