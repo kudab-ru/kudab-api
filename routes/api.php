@@ -92,6 +92,8 @@ Route::prefix('admin/sources/yandex-afisha')
         Route::get('config', [AdminYandexAfishaController::class, 'config']);
         Route::put('config', [AdminYandexAfishaController::class, 'updateConfig']);
         Route::get('status', [AdminYandexAfishaController::class, 'status']);
+        // Синхронный headless-fetch — троттлим от abuse/anti-bot Я.Афиши.
+        Route::post('scan', [AdminYandexAfishaController::class, 'scan'])->middleware('throttle:20,1');
     });
 
 Route::prefix('web')->middleware(['throttle:web'])->group(function () {

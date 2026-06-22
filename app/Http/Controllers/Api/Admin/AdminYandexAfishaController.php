@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api\Admin;
 
+use App\Http\Requests\Admin\Sources\ScanYandexAfishaRequest;
 use App\Http\Requests\Admin\Sources\UpdateYandexAfishaConfigRequest;
 use App\Models\SourceConfig;
 use App\Models\SourceRun;
+use App\Services\Sources\YandexAfishaScanner;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -102,6 +104,27 @@ class AdminYandexAfishaController extends Controller
                 'posts_48h' => $posts48h,
             ],
         ]);
+    }
+
+    /**
+     * Разведка раздела «сейчас»: один headless-fetch листинга, подсчёт event-URL.
+     * Синхронно (быстрый preview без detail-страниц) — суперадмин проверяет slug
+     * до включения. Read-only.
+     */
+    public function scan(ScanYandexAfishaRequest $request, YandexAfishaScanner $scanner): JsonResponse
+    {
+        $data = $request->validated();
+        $result = $scanner->scan($data['city_slug'], $data['section']);
+
+        Log::info('admin:yandex-afisha:scan', [
+            'actor_id' => $request->user()?->id,
+            'city_slug' => $data['city_slug'],
+            'section' => $data['section'],
+            'urls_found' => $result['urls_found'],
+            'ok' => $result['ok'],
+        ]);
+
+        return response()->json(['data' => $result]);
     }
 
     private function serializeConfig(SourceConfig $c): array

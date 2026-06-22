@@ -6,6 +6,7 @@ use App\Models\SourceConfig;
 use App\Models\SourceRun;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Laravel\Sanctum\Sanctum;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
@@ -120,6 +121,53 @@ class AdminYandexAfishaTest extends TestCase
 
         $row = SourceConfig::where('source_slug', 'yandex_afisha')->where('city_slug', 'voronezh')->first();
         $this->assertSame(['opera'], array_column($row->sections, 'slug'));
+    }
+
+    public function test_superadmin_can_scan_section(): void
+    {
+        $this->actingAsRole('superadmin');
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ok',
+                'html' => '<a href="/voronezh/opera/swan-lake">x</a><a href="/voronezh/opera/carmen">y</a>',
+            ], 200),
+        ]);
+
+        $this->postJson('/api/admin/sources/yandex-afisha/scan', [
+            'city_slug' => 'voronezh',
+            'section' => 'opera',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.ok', true)
+            ->assertJsonPath('data.urls_found', 2);
+    }
+
+    public function test_scan_reports_empty_when_headless_not_ok(): void
+    {
+        $this->actingAsRole('superadmin');
+        Http::fake(['*' => Http::response(['status' => 'error', 'error' => 'timeout'], 200)]);
+
+        $this->postJson('/api/admin/sources/yandex-afisha/scan', [
+            'city_slug' => 'voronezh',
+            'section' => 'nonexistent',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.ok', false)
+            ->assertJsonPath('data.urls_found', 0);
+    }
+
+    public function test_scan_forbidden_for_regular_admin(): void
+    {
+        $this->actingAsRole('admin');
+        $this->postJson('/api/admin/sources/yandex-afisha/scan', ['city_slug' => 'voronezh', 'section' => 'opera'])
+            ->assertStatus(403);
+    }
+
+    public function test_scan_rejects_malformed_section(): void
+    {
+        $this->actingAsRole('superadmin');
+        $this->postJson('/api/admin/sources/yandex-afisha/scan', ['city_slug' => 'voronezh', 'section' => 'bad/slug'])
+            ->assertStatus(422)->assertJsonValidationErrors(['section']);
     }
 
     public function test_status_returns_recent_runs(): void
