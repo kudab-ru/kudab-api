@@ -53,7 +53,7 @@ class EventsController extends Controller
             'price_max'    => ['sometimes','integer','min:0'],
             'tod'          => ['sometimes', Rule::in(['morning','day','evening','night'])],
 
-            'sort'         => ['sometimes', Rule::in(['start_at','start_date','start_time','created_at','price_min'])],
+            'sort'         => ['sometimes', Rule::in(['start_at','start_date','start_time','created_at','price_min','top'])],
             'dir'          => ['sometimes', Rule::in(['asc','desc'])],
         ]);
         $validator->after(fn ($v) => $this->rejectMixedInterests($request, $v));

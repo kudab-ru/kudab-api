@@ -615,6 +615,43 @@ class WebEventsTest extends TestCase
         ]);
     }
 
+    public function test_sort_top_ranks_richer_events_first(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Тест');
+        $venue = $this->createVenue($city->id, 'Зал', 'zal');
+
+        $when = Carbon::now()->addDays(5)->setTime(19, 0);
+
+        // Богатое: FIAS + venue + цена + длинное описание + точное время → высокий score
+        $rich = $this->createEvent($city->id, $community->id, 'Богатое', $when->copy(), $venue->id);
+        $rich->house_fias_id = 'fias-123';
+        $rich->price_status = 'priced';
+        $rich->price_min = 500;
+        $rich->description = str_repeat('а ', 80); // >120 символов
+        $rich->time_precision = 'datetime';
+        $rich->save();
+
+        // Бедное: ничего, та же дата → нулевой score
+        $poor = $this->createEvent($city->id, $community->id, 'Бедное', $when->copy());
+        $poor->time_precision = 'date';
+        $poor->save();
+
+        $titles = array_column(
+            $this->getJson("/api/web/events?city_id={$city->id}&sort=top&grouped=0&grouped_by_post=0")
+                ->assertOk()->json('data'),
+            'title',
+        );
+
+        $this->assertContains('Богатое', $titles);
+        $this->assertContains('Бедное', $titles);
+        $this->assertLessThan(
+            array_search('Бедное', $titles),
+            array_search('Богатое', $titles),
+            'sort=top должен ставить богатое событие раньше бедного',
+        );
+    }
+
     private function insertCity(string $name, string $slug, string $status, float $lng, float $lat): City
     {
         $now = now();

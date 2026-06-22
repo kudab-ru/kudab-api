@@ -439,13 +439,25 @@ class EventRepository
         $this->excludeBlacklistedSources($q);
         $this->applyMainFeedTaxonomyFilter($q, $filters);
 
-        // приоритет: past -> image -> gray
-        $q->orderBy('__past_rank', 'asc')
-            ->orderBy('__img_rank', 'asc')
-            ->orderBy('__gray_rank', 'asc')
-            ->orderByRaw('events.start_date asc nulls last')
-            ->orderByRaw('events.start_time asc nulls last')
-            ->orderBy('events.id', 'asc');
+        if (($filters['sort'] ?? null) === 'top') {
+            // Ранжированная лента: будущее первее, внутри — по «интересности»
+            // (__top_score, порт EventBroadcastScorer). Группировку не трогает —
+            // представитель выбирается отдельным row_number-окном ниже.
+            $this->addTopScore($q);
+            $q->orderBy('__past_rank', 'asc')
+                ->orderByRaw('__top_score desc')
+                ->orderByRaw('events.start_date asc nulls last')
+                ->orderByRaw('events.start_time asc nulls last')
+                ->orderBy('events.id', 'asc');
+        } else {
+            // По умолчанию — хронология: past -> image -> gray -> дата
+            $q->orderBy('__past_rank', 'asc')
+                ->orderBy('__img_rank', 'asc')
+                ->orderBy('__gray_rank', 'asc')
+                ->orderByRaw('events.start_date asc nulls last')
+                ->orderByRaw('events.start_time asc nulls last')
+                ->orderBy('events.id', 'asc');
+        }
 
         if (!empty($filters['city_id'])) {
             $q->where('events.city_id', (int) $filters['city_id']);
@@ -902,6 +914,7 @@ class EventRepository
                 '__img_rank',
                 '__like_rank',
                 '__score',
+                '__top_score',
                 '__unknown_last',
             ]);
         });
@@ -1456,9 +1469,13 @@ class EventRepository
         $q->selectRaw("$sql as __gray_rank");
     }
 
-    private function addImgRank($q): void
+    /**
+     * SQL-условие «у события есть фото» (event_sources.images или attachments
+     * самого события / исходного поста). Общее для __img_rank и __top_score.
+     */
+    private function hasPhotoSql(): string
     {
-        $sql = "CASE WHEN (
+        return "(
             EXISTS (
                 SELECT 1 FROM event_sources es
                 WHERE es.event_id = events.id
@@ -1482,9 +1499,48 @@ class EventRepository
                   AND (ap.url IS NOT NULL OR ap.preview_url IS NOT NULL)
                 LIMIT 1
             )
-        ) THEN 0 ELSE 1 END";
+        )";
+    }
 
-        $q->selectRaw("$sql as __img_rank");
+    private function addImgRank($q): void
+    {
+        $q->selectRaw('CASE WHEN '.$this->hasPhotoSql().' THEN 0 ELSE 1 END as __img_rank');
+    }
+
+    /**
+     * __top_score — «интересность» события для ранжированной ленты (sort=top).
+     * Порт весов EventBroadcastScorer (Telegram\Scoring) в SQL: тот же набор
+     * сигналов, что выбирает «богатые» события для автопостинга, переиспользуем
+     * для главной. interests-компонент = 0 пока дерево интересов не наполнено
+     * (event_interest пуст) — заработает автоматически после наполнения.
+     *
+     * Свежесть считаем от coalesce(start_time::date, start_date) — для ленты
+     * date-only события НЕ штрафуем как -25 (в скорере start_time=null→FAR; здесь
+     * мягче, точное время уже отдельно вознаграждено W_TIME_EXACT).
+     */
+    private function addTopScore($q): void
+    {
+        $photo = $this->hasPhotoSql();
+
+        $sql = "(
+            CASE WHEN $photo THEN 40 ELSE 0 END
+            + CASE WHEN events.house_fias_id IS NOT NULL AND events.house_fias_id <> '' THEN 20 ELSE 0 END
+            + CASE WHEN events.venue_id IS NOT NULL THEN 15 ELSE 0 END
+            + CASE WHEN (SELECT count(*) FROM event_interest ei WHERE ei.event_id = events.id) >= 1 THEN 15 ELSE 0 END
+            + CASE WHEN events.tickets_status = 'available' THEN 10 ELSE 0 END
+            + CASE WHEN events.price_status IN ('free','priced') OR events.price_min IS NOT NULL THEN 5 ELSE 0 END
+            + CASE WHEN char_length(coalesce(events.description, '')) >= 120 THEN 10 ELSE 0 END
+            + CASE WHEN events.time_precision = 'datetime' THEN 5 ELSE 0 END
+            + CASE
+                WHEN coalesce(events.start_time::date, events.start_date) IS NULL THEN -25
+                WHEN coalesce(events.start_time::date, events.start_date) <= (now()::date + 2) THEN 0
+                WHEN coalesce(events.start_time::date, events.start_date) <= (now()::date + 7) THEN -5
+                WHEN coalesce(events.start_time::date, events.start_date) <= (now()::date + 30) THEN -12
+                ELSE -25
+              END
+        )";
+
+        $q->selectRaw("$sql as __top_score");
     }
 
     private function normalizeQ(?string $q): ?string
