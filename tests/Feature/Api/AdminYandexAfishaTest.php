@@ -96,14 +96,30 @@ class AdminYandexAfishaTest extends TestCase
         );
     }
 
-    public function test_put_rejects_unknown_section_slug(): void
+    public function test_put_rejects_malformed_section_slug(): void
     {
         $this->actingAsRole('superadmin');
 
+        // Слеш/верхний регистр — path-traversal / инъекция в URL афиши.
         $this->putJson('/api/admin/sources/yandex-afisha/config', [
             'city_slug' => 'voronezh',
-            'sections' => [['slug' => 'evil-injection', 'enabled' => true]],
+            'sections' => [['slug' => 'bad/Slug', 'enabled' => true]],
         ])->assertStatus(422)->assertJsonValidationErrors(['sections.0.slug']);
+    }
+
+    public function test_put_accepts_custom_valid_slug(): void
+    {
+        $this->actingAsRole('superadmin');
+
+        // Кастомный slug вне KNOWN_SECTIONS, но корректного формата — разрешён
+        // (суперадмин может добавить новый раздел Я.Афиши «на всякий случай»).
+        $this->putJson('/api/admin/sources/yandex-afisha/config', [
+            'city_slug' => 'voronezh',
+            'sections' => [['slug' => 'opera', 'enabled' => true]],
+        ])->assertOk()->assertJsonPath('data.sections.0.slug', 'opera');
+
+        $row = SourceConfig::where('source_slug', 'yandex_afisha')->where('city_slug', 'voronezh')->first();
+        $this->assertSame(['opera'], array_column($row->sections, 'slug'));
     }
 
     public function test_status_returns_recent_runs(): void
