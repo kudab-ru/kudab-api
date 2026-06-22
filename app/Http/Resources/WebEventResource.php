@@ -10,14 +10,18 @@ class WebEventResource extends JsonResource
 {
     public function toArray(Request $request): array
     {
+        // Отдаём в МСК (Europe/Moscow) с offset, а не UTC-Z: фронт извлекает HH:MM
+        // из строки напрямую (regex в KTicketCard/FeaturedTicket/KPosterCard), поэтому
+        // время ДОЛЖНО быть в МСК — иначе карточки показывают UTC = на 3 часа меньше.
+        // Инстант сохраняется (offset), поэтому new Date()/конвертирующие компоненты не ломаются.
         $startAt = $this->start_time;
         if ($startAt instanceof CarbonInterface) {
-            $startAt = $startAt->toISOString();
+            $startAt = $startAt->copy()->setTimezone('Europe/Moscow')->toIso8601String();
         }
 
         $endAt = $this->end_time;
         if ($endAt instanceof CarbonInterface) {
-            $endAt = $endAt->toISOString();
+            $endAt = $endAt->copy()->setTimezone('Europe/Moscow')->toIso8601String();
         }
 
         $images = $this->images;

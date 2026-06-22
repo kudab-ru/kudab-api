@@ -777,6 +777,23 @@ class WebEventsTest extends TestCase
         $this->assertContains('entertainment', $kindSeq);
     }
 
+    public function test_web_event_start_at_returned_in_moscow_time(): void
+    {
+        // start_time хранится в UTC; API должен отдавать start_at в МСК с offset,
+        // иначе карточки (regex HH:MM из строки) показывают UTC = на 3 часа меньше.
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Тест');
+        $when = Carbon::now('UTC')->addDays(5)->setTime(16, 0, 0); // 16:00 UTC → 19:00 МСК
+        $this->createEvent($city->id, $community->id, 'TZ-проверка', $when);
+
+        $data = $this->getJson("/api/web/events?city_id={$city->id}")->assertOk()->json('data');
+        $row = collect($data)->firstWhere('title', 'TZ-проверка');
+
+        $this->assertNotNull($row, 'событие в ленте');
+        $this->assertStringEndsWith('+03:00', (string) $row['start_at'], 'start_at в МСК-offset');
+        $this->assertStringContainsString('T19:00', (string) $row['start_at'], '16:00 UTC → 19:00 МСК');
+    }
+
     private function insertCity(string $name, string $slug, string $status, float $lng, float $lat): City
     {
         $now = now();
