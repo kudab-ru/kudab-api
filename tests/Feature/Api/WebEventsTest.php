@@ -290,6 +290,23 @@ class WebEventsTest extends TestCase
         $this->assertSame([], $untaggedItem['interests'], 'untagged event must have interests: [] (not null, not omitted)');
     }
 
+    public function test_event_payload_contains_age_restriction(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+
+        $withAge = $this->createEvent($msk->id, $community->id, 'Концерт 18+', now()->addDay());
+        $noAge = $this->createEvent($msk->id, $community->id, 'Лекция', now()->addDays(2));
+        DB::table('events')->where('id', $withAge->id)->update(['age_restriction' => 18]);
+
+        $items = $this->getJson('/api/web/events?city=moskva&sort=created_at&dir=asc')->json('data');
+        $withItem = collect($items)->firstWhere('title', 'Концерт 18+');
+        $noItem = collect($items)->firstWhere('title', 'Лекция');
+
+        $this->assertSame(18, $withItem['age_restriction']);
+        $this->assertNull($noItem['age_restriction'], 'событие без маркера → age_restriction: null');
+    }
+
     /* ===== double-write (legacy int + new slug) ===== */
 
     /**

@@ -103,6 +103,10 @@ class WebEventResource extends JsonResource
             // content_kind — для цветного kind-бейджа на карточке (визуальное разнообразие)
             'content_kind'   => $this->content_kind ?: null,
 
+            // age_restriction — юр-маркер (0/6/12/16/18). Фронт рисует бейдж «N+»
+            // при age >= 6 (KEventCard). null = маркер не извлечён.
+            'age_restriction' => $this->age_restriction !== null ? (int) $this->age_restriction : null,
+
             'price_status'   => (string) ($this->price_status ?? 'unknown'),
             'tickets_status' => (string) ($this->tickets_status ?? 'unknown'),
             'price_min'      => $this->price_min !== null ? (int) $this->price_min : null,

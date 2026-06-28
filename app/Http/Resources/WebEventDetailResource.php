@@ -86,6 +86,9 @@ class WebEventDetailResource extends JsonResource
             'time_text' => $this->time_text,
             'timezone' => $this->timezone,
 
+            // age_restriction — юр-маркер (0/6/12/16/18); null = не извлечён.
+            'age_restriction' => $this->age_restriction !== null ? (int) $this->age_restriction : null,
+
             // цена
             'price_status' => $this->price_status,
             'tickets_status' => (string) ($this->tickets_status ?? 'unknown'),
