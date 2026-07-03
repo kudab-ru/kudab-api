@@ -53,6 +53,13 @@ class WebEventResource extends JsonResource
                     'count' => $count,
                     'dates' => $dates,
                 ];
+
+                // вид повторения (регулярные события PR3): фронт строит фразу
+                // «по средам в 16:00» / «ежедневно до 10 июля» / «в репертуаре»
+                $series = $this->getAttribute('group_series');
+                if (is_array($series) && !empty($series['kind'])) {
+                    $group['series'] = $series;
+                }
             }
         }
 

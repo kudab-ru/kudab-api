@@ -1795,6 +1795,16 @@ class EventRepository
             ->map(fn($v) => (int)$v)
             ->all();
 
+        // серийные метаданные rep-групп (регулярные события PR3): вид повторения
+        // и детали для человеческой фразы («по средам в 16:00», «ежедневно до…»).
+        // Пишет ночной events:groups:infer-series --save в парсере.
+        $seriesByGroup = DB::table('event_groups')
+            ->whereIn('id', $repGroupIds)
+            ->whereNull('deleted_at')
+            ->whereNotNull('series_kind')
+            ->get(['id', 'series_kind', 'series_meta', 'next_at'])
+            ->keyBy('id');
+
         // те же правила, что /web/event-groups/{id} (и /web/events)
         $nowMsk = now('Europe/Moscow');
         $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
@@ -1886,12 +1896,28 @@ class EventRepository
             ];
         }
 
-        $events->each(function (Event $e) use ($map, $cntMap, $repFed) {
+        $events->each(function (Event $e) use ($map, $cntMap, $repFed, $seriesByGroup) {
             $egid = (int) ($e->event_group_id ?? 0);
             $gid = $repFed[$egid] ?? $egid; // event_group_id rep'а → его fed-ключ
             if ($gid > 0 && isset($map[$gid])) {
                 $e->setAttribute('group_dates', $map[$gid]); // уже лимитировано
                 $e->setAttribute('group_count', (int) ($cntMap[$gid] ?? count($map[$gid])));
+
+                $s = $seriesByGroup->get($egid);
+                if ($s !== null) {
+                    $meta = is_string($s->series_meta)
+                        ? (json_decode($s->series_meta, true) ?: [])
+                        : (array) ($s->series_meta ?? []);
+                    $e->setAttribute('group_series', [
+                        'kind' => (string) $s->series_kind,
+                        'stable_time' => $meta['stable_time'] ?? null,
+                        'dow' => isset($meta['dow']) ? (int) $meta['dow'] : null,
+                        'last' => $meta['last'] ?? null,
+                        'next_at' => $s->next_at !== null
+                            ? CarbonImmutable::parse((string) $s->next_at)->toISOString()
+                            : null,
+                    ]);
+                }
             }
         });
     }
