@@ -59,11 +59,13 @@ class Event extends Model
         return $this->belongsTo(ContextPost::class, 'original_post_id');
     }
 
-    /** Интересы события */
+    /** Интересы события — по rank (0 = главная тема, порядок тэггера парсера) */
     public function interests(): BelongsToMany
     {
         return $this->belongsToMany(Interest::class, 'event_interest')
-            ->withTimestamps();
+            ->withTimestamps()
+            ->orderBy('event_interest.rank')
+            ->orderBy('interests.id');
     }
 
     /** Участники (RSVP) */
