@@ -25,6 +25,18 @@ class AdminSourceProfilesController extends Controller
     {
         $profiles = DB::table('source_profiles')->orderBy('slug')->get();
 
+        // события профиля за 30 дней: профиль → link (network 3, external=slug) →
+        // community → events
+        $eventCounts = DB::table('community_social_links as l')
+            ->join('events as e', 'e.community_id', '=', 'l.community_id')
+            ->where('l.social_network_id', 3)
+            ->whereIn('l.external_community_id', $profiles->pluck('slug'))
+            ->whereNull('e.deleted_at')
+            ->where('e.created_at', '>=', now()->subDays(30))
+            ->groupBy('l.external_community_id')
+            ->selectRaw('l.external_community_id as slug, count(*) as c, max(l.community_id) as community_id')
+            ->get()->keyBy('slug');
+
         // последние 5 ранов на профиль одним запросом (профилей мало)
         $slugs = $profiles->pluck('slug')->all();
         $runs = DB::table('source_runs')
@@ -34,7 +46,7 @@ class AdminSourceProfilesController extends Controller
             ->get()
             ->groupBy('source_slug');
 
-        $data = $profiles->map(function ($p) use ($runs) {
+        $data = $profiles->map(function ($p) use ($runs, $eventCounts) {
             $own = ($runs[$p->slug] ?? collect())->take(5)->values();
             $finished = $own->filter(fn ($r) => $r->finished_at !== null);
 
@@ -52,6 +64,8 @@ class AdminSourceProfilesController extends Controller
                 'probed_at' => $p->probed_at,
                 'reprobe_requested_at' => $p->reprobe_requested_at ?? null,
                 'health' => $this->health($finished),
+                'events_30d' => (int) ($eventCounts[$p->slug]->c ?? 0),
+                'community_id' => isset($eventCounts[$p->slug]) ? (int) $eventCounts[$p->slug]->community_id : null,
                 'recent_runs' => $own->map(fn ($r) => [
                     'started_at' => $r->started_at,
                     'finished_at' => $r->finished_at,
