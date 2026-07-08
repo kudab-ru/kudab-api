@@ -110,6 +110,16 @@ Route::prefix('admin/sources/profiles')
         Route::get('venues', [\App\Http\Controllers\Api\Admin\AdminSourceProfilesController::class, 'searchVenues']);
     });
 
+// Каталог площадок (venues) — суперадмин: само-наполняется резолверами,
+// здесь список/правка/склейка дублей.
+Route::prefix('admin/venues')
+    ->middleware(['auth:sanctum', 'role:superadmin'])
+    ->group(function () {
+        Route::get('/', [\App\Http\Controllers\Api\Admin\AdminVenuesController::class, 'index']);
+        Route::patch('{id}', [\App\Http\Controllers\Api\Admin\AdminVenuesController::class, 'update'])->whereNumber('id');
+        Route::post('{id}/merge', [\App\Http\Controllers\Api\Admin\AdminVenuesController::class, 'merge'])->whereNumber('id');
+    });
+
 Route::prefix('admin/sources/yandex-afisha')
     ->middleware(['auth:sanctum', 'role:superadmin'])
     ->group(function () {
