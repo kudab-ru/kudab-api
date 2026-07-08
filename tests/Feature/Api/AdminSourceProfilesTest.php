@@ -163,4 +163,65 @@ class AdminSourceProfilesTest extends TestCase
         $this->postJson("/api/admin/sources/profiles/{$id}/rebind", ['community_id' => $target])
             ->assertStatus(422);
     }
+
+    public function test_set_and_unset_venue_with_city_gate(): void
+    {
+        $this->actingAsRole('superadmin');
+        $id = $this->seedProfile();
+
+        $communityId = (int) DB::table('communities')->insertGetId([
+            'name' => 'ДК', 'verification_status' => 'approved', 'is_verified' => true,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::statement("INSERT INTO social_networks (id, name, slug, icon, url_mask, created_at, updated_at)
+            VALUES (3, 'Сайт', 'site', 's', 'x', NOW(), NOW()) ON CONFLICT (id) DO NOTHING");
+        DB::table('community_social_links')->insert([
+            'community_id' => $communityId, 'social_network_id' => 3,
+            'external_community_id' => 'dk50-voronezh', 'url' => 'https://dk50.example',
+            'status' => 'active', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::insert(
+            'INSERT INTO cities (name, country_code, location, status, slug, created_at, updated_at)
+             VALUES (?, ?, ST_SetSRID(ST_Point(?, ?), 4326), ?, ?, ?, ?)',
+            ['Воронеж', 'RU', 39.2, 51.66, 'active', 'voronezh', now(), now()]
+        );
+        $cityId = (int) DB::table('cities')->where('slug', 'voronezh')->value('id');
+        DB::table('communities')->where('id', $communityId)->update(['city_id' => $cityId]);
+        $venueId = (int) DB::table('venues')->insertGetId([
+            'name' => 'Зал ДК', 'slug' => 'zal-dk', 'status' => 'active', 'city_id' => $cityId,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->postJson("/api/admin/sources/profiles/{$id}/venue", ['venue_id' => $venueId])
+            ->assertOk()
+            ->assertJsonPath('data.venue_name', 'Зал ДК');
+        $this->assertSame($venueId, (int) DB::table('communities')->where('id', $communityId)->value('venue_id'));
+
+        // снятие
+        $this->postJson("/api/admin/sources/profiles/{$id}/venue", ['venue_id' => null])->assertOk();
+        $this->assertNull(DB::table('communities')->where('id', $communityId)->value('venue_id'));
+
+        // несуществующая площадка
+        $this->postJson("/api/admin/sources/profiles/{$id}/venue", ['venue_id' => 999999])->assertStatus(422);
+    }
+
+    public function test_search_venues(): void
+    {
+        $this->actingAsRole('superadmin');
+        DB::insert(
+            'INSERT INTO cities (name, country_code, location, status, slug, created_at, updated_at)
+             VALUES (?, ?, ST_SetSRID(ST_Point(?, ?), 4326), ?, ?, ?, ?)',
+            ['Воронеж', 'RU', 39.2, 51.66, 'active', 'voronezh', now(), now()]
+        );
+        $cityId = (int) DB::table('cities')->where('slug', 'voronezh')->value('id');
+        DB::table('venues')->insert([
+            ['name' => 'Парк Алые паруса', 'slug' => 'park-alye', 'status' => 'active', 'city_id' => $cityId, 'created_at' => now(), 'updated_at' => now()],
+            ['name' => 'Зелёный театр', 'slug' => 'zel-teatr', 'status' => 'active', 'city_id' => $cityId, 'created_at' => now(), 'updated_at' => now()],
+        ]);
+
+        $this->getJson('/api/admin/sources/profiles/venues?q=парус')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.name', 'Парк Алые паруса');
+    }
 }

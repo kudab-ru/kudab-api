@@ -25,13 +25,14 @@ class AdminSourceProfilesController extends Controller
     {
         $profiles = DB::table('source_profiles')->orderBy('slug')->get();
 
-        // связь профиль → площадка (link network 3, external=slug) — всегда
+        // связь профиль → организатор (+его venue) — link network 3, external=slug
         $communityBySlug = DB::table('community_social_links as l')
             ->join('communities as c', 'c.id', '=', 'l.community_id')
+            ->leftJoin('venues as v', 'v.id', '=', 'c.venue_id')
             ->where('l.social_network_id', 3)
             ->whereIn('l.external_community_id', $profiles->pluck('slug'))
             ->whereNull('c.deleted_at')
-            ->get(['l.external_community_id as slug', 'c.id', 'c.name'])
+            ->get(['l.external_community_id as slug', 'c.id', 'c.name', 'v.id as venue_id', 'v.name as venue_name'])
             ->keyBy('slug');
 
         // события профиля за 30 дней: профиль → link (network 3, external=slug) →
@@ -78,6 +79,8 @@ class AdminSourceProfilesController extends Controller
                 'events_30d' => (int) ($eventCounts[$p->slug]->c ?? 0),
                 'community_id' => isset($communityBySlug[$p->slug]) ? (int) $communityBySlug[$p->slug]->id : null,
                 'community_name' => $communityBySlug[$p->slug]->name ?? null,
+                'venue_id' => isset($communityBySlug[$p->slug]->venue_id) ? (int) $communityBySlug[$p->slug]->venue_id : null,
+                'venue_name' => $communityBySlug[$p->slug]->venue_name ?? null,
                 'recent_runs' => $own->map(fn ($r) => [
                     'started_at' => $r->started_at,
                     'finished_at' => $r->finished_at,
@@ -151,6 +154,62 @@ class AdminSourceProfilesController extends Controller
         ]);
 
         return response()->json(['data' => ['requested' => true]]);
+    }
+
+    /**
+     * Привязать/снять ПЛОЩАДКУ (venue) организатора источника. ВАЖНО:
+     * community.venue_id — шаг 1 каскада VenueResolver и ПЕРЕКРЫВАЕТ адреса
+     * из текстов событий; ставится только для сайтов ОДНОГО места (ДК, клуб),
+     * не для музеев с филиалами/фестивалей/агрегаторов.
+     */
+    public function setVenue(Request $request, int $id): JsonResponse
+    {
+        $data = $request->validate([
+            'venue_id' => ['present', 'nullable', 'integer'],
+        ]);
+
+        $profile = DB::table('source_profiles')->where('id', $id)->first();
+        abort_if($profile === null, 404);
+        $link = DB::table('community_social_links')
+            ->where('social_network_id', 3)->where('external_community_id', $profile->slug)->first();
+        abort_if($link === null, 422, 'У источника нет линка');
+
+        $venueId = $data['venue_id'] !== null ? (int) $data['venue_id'] : null;
+        $venueName = null;
+        if ($venueId !== null) {
+            $venue = DB::table('venues')->where('id', $venueId)->whereNull('deleted_at')->first(['id', 'name', 'city_id']);
+            abort_if($venue === null, 422, 'Площадка не найдена');
+            $communityCity = DB::table('communities')->where('id', $link->community_id)->value('city_id');
+            abort_if($communityCity !== null && (int) $venue->city_id !== (int) $communityCity,
+                422, 'Площадка из другого города');
+            $venueName = (string) $venue->name;
+        }
+
+        DB::table('communities')->where('id', $link->community_id)
+            ->update(['venue_id' => $venueId, 'updated_at' => now()]);
+
+        Log::info('admin:source-profiles:venue-set', [
+            'actor_id' => $request->user()?->id,
+            'profile_id' => $id,
+            'community_id' => (int) $link->community_id,
+            'venue_id' => $venueId,
+        ]);
+
+        return response()->json(['data' => ['venue_id' => $venueId, 'venue_name' => $venueName]]);
+    }
+
+    /** Поиск по каталогу площадок (селектор привязки). */
+    public function searchVenues(Request $request): JsonResponse
+    {
+        $q = trim((string) $request->query('q', ''));
+        $rows = DB::table('venues')
+            ->whereNull('deleted_at')
+            ->when($q !== '', fn ($query) => $query->where('name', 'ILIKE', '%'.str_replace(['%', '_'], '', $q).'%'))
+            ->orderBy('name')
+            ->limit(8)
+            ->get(['id', 'name', 'address']);
+
+        return response()->json(['data' => $rows]);
     }
 
     /**
