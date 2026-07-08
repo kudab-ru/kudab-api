@@ -159,6 +159,56 @@ class AdminSourceProbeTest extends TestCase
         $this->assertSame(0, DB::table('communities')->where('name', 'Сайт Никитинского')->count());
     }
 
+    public function test_create_autobinds_by_url_host(): void
+    {
+        $this->actingAsSuperadmin();
+        $cityId = $this->seedCity();
+        $reqId = $this->seedDoneRequest();
+        // у площадки уже записан VK-линк с URL её сайта в url
+        $communityId = (int) DB::table('communities')->insertGetId([
+            'name' => 'ДК имени Кирова', 'city_id' => $cityId,
+            'verification_status' => 'approved', 'is_verified' => true,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::statement("INSERT INTO social_networks (id, name, slug, icon, url_mask, created_at, updated_at)
+            VALUES (1, 'VK', 'vk', 'v', 'x', NOW(), NOW()) ON CONFLICT (id) DO NOTHING");
+        DB::table('community_social_links')->insert([
+            'community_id' => $communityId, 'social_network_id' => 1,
+            'external_community_id' => 'dk_club', 'url' => 'https://dk50.example/about',
+            'status' => 'active', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->postJson('/api/admin/sources/profiles/create', [
+            'probe_request_id' => $reqId,
+            'name' => 'Совсем другое имя',
+            'city_slug' => 'voronezh',
+            'parse_mode' => 'jsonld',
+        ])->assertCreated()
+            ->assertJsonPath('data.community_id', $communityId)
+            ->assertJsonPath('data.bound_via', 'url_host');
+    }
+
+    public function test_create_autobinds_by_normalized_name(): void
+    {
+        $this->actingAsSuperadmin();
+        $cityId = $this->seedCity();
+        $reqId = $this->seedDoneRequest();
+        $communityId = (int) DB::table('communities')->insertGetId([
+            'name' => 'Театр «Шинник»', 'city_id' => $cityId,
+            'verification_status' => 'approved', 'is_verified' => true,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->postJson('/api/admin/sources/profiles/create', [
+            'probe_request_id' => $reqId,
+            'name' => 'театр шинник',
+            'city_slug' => 'voronezh',
+            'parse_mode' => 'jsonld',
+        ])->assertCreated()
+            ->assertJsonPath('data.community_id', $communityId)
+            ->assertJsonPath('data.bound_via', 'name');
+    }
+
     public function test_create_rejects_jsonld_without_positive_probe(): void
     {
         $this->actingAsSuperadmin();

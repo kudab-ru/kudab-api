@@ -97,15 +97,16 @@ class AdminSourceProfilesTest extends TestCase
         $this->assertSame(2000, $s['delay_ms']);
     }
 
-    public function test_reprobe_sets_mark_and_rejects_llm_text(): void
+    public function test_reprobe_sets_mark_for_both_modes(): void
     {
         $this->actingAsRole('superadmin');
         $jsonld = $this->seedProfile();
         $llm = $this->seedProfile(['slug' => 'fest-x', 'parse_mode' => 'llm_text']);
 
         $this->postJson("/api/admin/sources/profiles/{$jsonld}/reprobe")->assertOk();
-        $this->assertNotNull(DB::table('source_profiles')->where('id', $jsonld)->value('reprobe_requested_at'));
+        $this->postJson("/api/admin/sources/profiles/{$llm}/reprobe")->assertOk();
 
-        $this->postJson("/api/admin/sources/profiles/{$llm}/reprobe")->assertStatus(422);
+        $this->assertNotNull(DB::table('source_profiles')->where('id', $jsonld)->value('reprobe_requested_at'));
+        $this->assertNotNull(DB::table('source_profiles')->where('id', $llm)->value('reprobe_requested_at'));
     }
 }

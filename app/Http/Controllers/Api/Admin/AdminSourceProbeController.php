@@ -140,12 +140,24 @@ class AdminSourceProbeController extends Controller
         // если привязываем к существующему сообществу — оно должно жить и не
         // иметь другого сайт-источника (link network 3 уникален на сообщество)
         $existingCommunityId = isset($data['community_id']) ? (int) $data['community_id'] : null;
+        $boundVia = $existingCommunityId !== null ? 'manual' : null;
         if ($existingCommunityId !== null) {
             abort_if(! DB::table('communities')->where('id', $existingCommunityId)->whereNull('deleted_at')->exists(),
                 422, 'Сообщество не найдено');
             abort_if(DB::table('community_social_links')
                 ->where('community_id', $existingCommunityId)->where('social_network_id', 3)->exists(),
                 422, 'У этого сообщества уже есть сайт-источник');
+        }
+
+        // АВТО-связывание с существующей площадкой (консервативные правила):
+        //  1) у сообщества уже записан URL с тем же доменом (сильный сигнал);
+        //  2) точное совпадение нормализованного имени в том же городе.
+        // Привязанное сообщество не должно иметь другого сайт-источника.
+        if ($existingCommunityId === null) {
+            $auto = $this->autoBindCommunity($host, $data['name'], (int) $cityId);
+            if ($auto !== null) {
+                [$existingCommunityId, $boundVia] = $auto;
+            }
         }
 
         DB::transaction(function () use ($data, $slug, $regex, $req, $result, $cityId, $host, $existingCommunityId) {
@@ -213,13 +225,69 @@ SQL);
             }
         });
 
+        $finalCommunityId = $existingCommunityId
+            ?? (int) DB::table('community_social_links')
+                ->where('social_network_id', 3)->where('external_community_id', $slug)->value('community_id');
+        $communityName = (string) DB::table('communities')->where('id', $finalCommunityId)->value('name');
+
         Log::info('admin:source-probe:profile-created', [
             'actor_id' => $request->user()?->id,
             'slug' => $slug,
             'parse_mode' => $data['parse_mode'],
+            'community_id' => $finalCommunityId,
+            'bound_via' => $boundVia ?? 'created',
         ]);
 
-        return response()->json(['data' => ['slug' => $slug, 'enabled' => false]], 201);
+        return response()->json(['data' => [
+            'slug' => $slug,
+            'enabled' => false,
+            'community_id' => $finalCommunityId,
+            'community_name' => $communityName,
+            'bound_via' => $boundVia ?? 'created', // manual|url_host|name|created
+        ]], 201);
+    }
+
+    /**
+     * Авто-привязка к существующему сообществу: по домену в записанных URL
+     * (links.url / communities.site_url-подобные поля не трогаем — links
+     * достаточно) либо по точному нормализованному имени в городе.
+     *
+     * @return array{int, string}|null [community_id, via]
+     */
+    private function autoBindCommunity(string $host, string $name, int $cityId): ?array
+    {
+        $host = mb_strtolower(ltrim($host, 'w.'));
+        $hostLike = '%'.str_replace(['%', '_'], '', $host).'%';
+
+        // 1) домен уже записан у сообщества (любая сеть, чаще всего url линка)
+        $byUrl = DB::table('community_social_links as l')
+            ->join('communities as c', 'c.id', '=', 'l.community_id')
+            ->whereNull('c.deleted_at')
+            ->where('c.city_id', $cityId)
+            ->where('l.url', 'ILIKE', $hostLike)
+            ->value('l.community_id');
+        if ($byUrl !== null && $this->freeOfSiteLink((int) $byUrl)) {
+            return [(int) $byUrl, 'url_host'];
+        }
+
+        // 2) точное имя (без регистра/кавычек/лишних пробелов) в том же городе
+        $norm = mb_strtolower(trim(preg_replace('~[«»"\'\s]+~u', ' ', $name)));
+        $byName = DB::table('communities')
+            ->whereNull('deleted_at')
+            ->where('city_id', $cityId)
+            ->whereRaw("lower(trim(regexp_replace(name, '[«»\"'']+', '', 'g'))) = ?", [trim(str_replace('  ', ' ', $norm))])
+            ->value('id');
+        if ($byName !== null && $this->freeOfSiteLink((int) $byName)) {
+            return [(int) $byName, 'name'];
+        }
+
+        return null;
+    }
+
+    private function freeOfSiteLink(int $communityId): bool
+    {
+        return ! DB::table('community_social_links')
+            ->where('community_id', $communityId)->where('social_network_id', 3)->exists();
     }
 
     /**

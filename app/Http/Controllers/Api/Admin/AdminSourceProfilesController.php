@@ -25,6 +25,15 @@ class AdminSourceProfilesController extends Controller
     {
         $profiles = DB::table('source_profiles')->orderBy('slug')->get();
 
+        // связь профиль → площадка (link network 3, external=slug) — всегда
+        $communityBySlug = DB::table('community_social_links as l')
+            ->join('communities as c', 'c.id', '=', 'l.community_id')
+            ->where('l.social_network_id', 3)
+            ->whereIn('l.external_community_id', $profiles->pluck('slug'))
+            ->whereNull('c.deleted_at')
+            ->get(['l.external_community_id as slug', 'c.id', 'c.name'])
+            ->keyBy('slug');
+
         // события профиля за 30 дней: профиль → link (network 3, external=slug) →
         // community → events
         $eventCounts = DB::table('community_social_links as l')
@@ -48,7 +57,7 @@ class AdminSourceProfilesController extends Controller
             ['{'.implode(',', $slugs).'}'],
         ))->groupBy('source_slug');
 
-        $data = $profiles->map(function ($p) use ($runs, $eventCounts) {
+        $data = $profiles->map(function ($p) use ($runs, $eventCounts, $communityBySlug) {
             $own = ($runs[$p->slug] ?? collect())->take(5)->values();
             $finished = $own->filter(fn ($r) => $r->finished_at !== null);
 
@@ -67,7 +76,8 @@ class AdminSourceProfilesController extends Controller
                 'reprobe_requested_at' => $p->reprobe_requested_at ?? null,
                 'health' => $this->health($finished),
                 'events_30d' => (int) ($eventCounts[$p->slug]->c ?? 0),
-                'community_id' => isset($eventCounts[$p->slug]) ? (int) $eventCounts[$p->slug]->community_id : null,
+                'community_id' => isset($communityBySlug[$p->slug]) ? (int) $communityBySlug[$p->slug]->id : null,
+                'community_name' => $communityBySlug[$p->slug]->name ?? null,
                 'recent_runs' => $own->map(fn ($r) => [
                     'started_at' => $r->started_at,
                     'finished_at' => $r->finished_at,
@@ -126,8 +136,8 @@ class AdminSourceProfilesController extends Controller
     {
         $profile = DB::table('source_profiles')->where('id', $id)->first();
         abort_if($profile === null, 404);
-        abort_if(($profile->parse_mode ?? 'jsonld') !== 'jsonld', 422,
-            'Re-probe только для jsonld-профилей: шаблон llm_text выбирает человек');
+        // jsonld: перевыучивает регэксп; llm_text: обновляет разведку (кластеры),
+        // выбранный шаблон сохраняется
 
         DB::table('source_profiles')->where('id', $id)->update([
             'reprobe_requested_at' => now(),
