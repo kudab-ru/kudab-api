@@ -37,14 +37,16 @@ class AdminSourceProfilesController extends Controller
             ->selectRaw('l.external_community_id as slug, count(*) as c, max(l.community_id) as community_id')
             ->get()->keyBy('slug');
 
-        // последние 5 ранов на профиль одним запросом (профилей мало)
+        // последние 5 ранов НА КАЖДЫЙ профиль (window, не глобальный лимит —
+        // частый профиль иначе вымывает раны редкого и тот выглядит пустым)
         $slugs = $profiles->pluck('slug')->all();
-        $runs = DB::table('source_runs')
-            ->whereIn('source_slug', $slugs)
-            ->orderByDesc('id')
-            ->limit(count($slugs) * 5 + 50)
-            ->get()
-            ->groupBy('source_slug');
+        $runs = collect($slugs === [] ? [] : DB::select(
+            'SELECT * FROM (
+                SELECT r.*, ROW_NUMBER() OVER (PARTITION BY source_slug ORDER BY id DESC) AS rn
+                FROM source_runs r WHERE source_slug = ANY(?)
+            ) t WHERE rn <= 5 ORDER BY id DESC',
+            ['{'.implode(',', $slugs).'}'],
+        ))->groupBy('source_slug');
 
         $data = $profiles->map(function ($p) use ($runs, $eventCounts) {
             $own = ($runs[$p->slug] ?? collect())->take(5)->values();
@@ -141,19 +143,27 @@ class AdminSourceProfilesController extends Controller
         return response()->json(['data' => ['requested' => true]]);
     }
 
-    /** green — последний завершённый ран принёс посты; red — 3 нулевых подряд; yellow — иное. */
+    /**
+     * Здоровье по broken-семантике (как self-heal парсера): broken-ран =
+     * упал / листинг не сматчил ни одной ссылки / фетчили и всё провалилось.
+     * llm_text с urls>0 и ok=0 (всё уже собрано, новых событий нет) — ЗДОРОВ.
+     * idle — ранов ещё не было (профиль новый/выключен).
+     */
     private function health($finishedRuns): string
     {
         if ($finishedRuns->isEmpty()) {
-            return 'yellow';
+            return 'idle';
         }
-        if ((int) $finishedRuns->first()->posts_ok > 0) {
+
+        $isBroken = fn ($r) => ($r->status ?? null) !== 'ok'
+            || (int) $r->urls_total === 0
+            || ((int) $r->posts_ok === 0 && (int) $r->posts_failed > 0);
+
+        if (! $isBroken($finishedRuns->first())) {
             return 'green';
         }
         $lastThree = $finishedRuns->take(3);
 
-        return count($lastThree) >= 3 && $lastThree->every(fn ($r) => (int) $r->posts_ok === 0)
-            ? 'red'
-            : 'yellow';
+        return count($lastThree) >= 3 && $lastThree->every($isBroken) ? 'red' : 'yellow';
     }
 }

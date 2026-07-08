@@ -41,6 +41,27 @@ class AdminSourceProbeController extends Controller
         return response()->json(['data' => ['id' => $id, 'status' => 'pending']], 201);
     }
 
+    /** Недавние заявки (форма показывает их после перезагрузки страницы). */
+    public function index(): JsonResponse
+    {
+        // sweep: заявка running дольше 10 мин = консьюмер был прерван; честный
+        // failed вместо вечного «разведка идёт»
+        DB::table('source_probe_requests')
+            ->where('status', 'running')
+            ->where('updated_at', '<', now()->subMinutes(10))
+            ->update(['status' => 'failed', 'error' => 'Разведка прервана (консьюмер перезапущен) — запусти заново', 'updated_at' => now()]);
+
+        $rows = DB::table('source_probe_requests')->orderByDesc('id')->limit(5)->get();
+
+        return response()->json(['data' => $rows->map(fn ($r) => [
+            'id' => (int) $r->id,
+            'listing_url' => $r->listing_url,
+            'status' => $r->status,
+            'error' => $r->error,
+            'result' => is_string($r->result) ? json_decode($r->result, true) : $r->result,
+        ])->values()]);
+    }
+
     public function show(int $id): JsonResponse
     {
         $req = DB::table('source_probe_requests')->where('id', $id)->first();

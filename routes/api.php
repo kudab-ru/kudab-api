@@ -99,6 +99,7 @@ Route::prefix('admin/sources/profiles')
     ->group(function () {
         Route::get('/', [\App\Http\Controllers\Api\Admin\AdminSourceProfilesController::class, 'index']);
         // онбординг: заявка на probe-разведку (выполняет парсер) + создание профиля
+        Route::get('probe-requests', [\App\Http\Controllers\Api\Admin\AdminSourceProbeController::class, 'index']);
         Route::post('probe-requests', [\App\Http\Controllers\Api\Admin\AdminSourceProbeController::class, 'store'])->middleware('throttle:10,1');
         Route::get('probe-requests/{id}', [\App\Http\Controllers\Api\Admin\AdminSourceProbeController::class, 'show'])->whereNumber('id');
         Route::post('create', [\App\Http\Controllers\Api\Admin\AdminSourceProbeController::class, 'createProfile']);
