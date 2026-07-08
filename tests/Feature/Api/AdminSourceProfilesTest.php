@@ -109,4 +109,58 @@ class AdminSourceProfilesTest extends TestCase
         $this->assertNotNull(DB::table('source_profiles')->where('id', $jsonld)->value('reprobe_requested_at'));
         $this->assertNotNull(DB::table('source_profiles')->where('id', $llm)->value('reprobe_requested_at'));
     }
+
+    public function test_rebind_moves_link_posts_and_own_events(): void
+    {
+        $this->actingAsRole('superadmin');
+        $id = $this->seedProfile();
+
+        $old = (int) DB::table('communities')->insertGetId([
+            'name' => 'Дубль', 'verification_status' => 'approved', 'is_verified' => true,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $target = (int) DB::table('communities')->insertGetId([
+            'name' => 'Настоящий организатор', 'verification_status' => 'approved', 'is_verified' => true,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::statement("INSERT INTO social_networks (id, name, slug, icon, url_mask, created_at, updated_at)
+            VALUES (3, 'Сайт', 'site', 's', 'x', NOW(), NOW()) ON CONFLICT (id) DO NOTHING");
+        $linkId = (int) DB::table('community_social_links')->insertGetId([
+            'community_id' => $old, 'social_network_id' => 3,
+            'external_community_id' => 'dk50-voronezh', 'url' => 'https://dk50.example',
+            'status' => 'active', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $postId = (int) DB::table('context_posts')->insertGetId([
+            'external_id' => 'afisha/x', 'source' => 'site', 'social_link_id' => $linkId,
+            'community_id' => $old, 'status' => 'parsed', 'text' => 't',
+            'author_id' => 1, 'author_type' => 'community', 'published_at' => now(),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $eventId = (int) DB::table('events')->insertGetId([
+            'title' => 'Событие источника', 'community_id' => $old, 'original_post_id' => $postId,
+            'start_time' => now()->addDay(), 'status' => 'active',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        // чужое событие старого организатора — остаётся на месте
+        $foreignEvent = (int) DB::table('events')->insertGetId([
+            'title' => 'Чужое', 'community_id' => $old,
+            'start_time' => now()->addDay(), 'status' => 'active',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->postJson("/api/admin/sources/profiles/{$id}/rebind", ['community_id' => $target])
+            ->assertOk()
+            ->assertJsonPath('data.moved_events', 1)
+            ->assertJsonPath('data.moved_posts', 1);
+
+        $this->assertSame($target, (int) DB::table('community_social_links')->where('id', $linkId)->value('community_id'));
+        $this->assertSame($target, (int) DB::table('events')->where('id', $eventId)->value('community_id'));
+        $this->assertSame($old, (int) DB::table('events')->where('id', $foreignEvent)->value('community_id'));
+        // дубль-организатор жив (ничего не удаляем)
+        $this->assertNotNull(DB::table('communities')->where('id', $old)->whereNull('deleted_at')->first());
+
+        // отказ: у цели уже есть сайт-источник (только что переехал)
+        $this->postJson("/api/admin/sources/profiles/{$id}/rebind", ['community_id' => $target])
+            ->assertStatus(422);
+    }
 }

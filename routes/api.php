@@ -105,6 +105,7 @@ Route::prefix('admin/sources/profiles')
         Route::post('create', [\App\Http\Controllers\Api\Admin\AdminSourceProbeController::class, 'createProfile']);
         Route::patch('{id}', [\App\Http\Controllers\Api\Admin\AdminSourceProfilesController::class, 'update'])->whereNumber('id');
         Route::post('{id}/reprobe', [\App\Http\Controllers\Api\Admin\AdminSourceProfilesController::class, 'reprobe'])->whereNumber('id');
+        Route::post('{id}/rebind', [\App\Http\Controllers\Api\Admin\AdminSourceProfilesController::class, 'rebind'])->whereNumber('id');
     });
 
 Route::prefix('admin/sources/yandex-afisha')

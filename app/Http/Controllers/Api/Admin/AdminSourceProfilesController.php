@@ -154,6 +154,66 @@ class AdminSourceProfilesController extends Controller
     }
 
     /**
+     * Сменить организатора у источника: линк, посты и события ИСТОЧНИКА
+     * переезжают транзакцией — ничего не удаляется, старый организатор
+     * остаётся (пустой безвреден, чинится обратной перепривязкой).
+     * Группы событий перестроятся ночными groups:relink/index/prune.
+     */
+    public function rebind(Request $request, int $id): JsonResponse
+    {
+        $data = $request->validate([
+            'community_id' => ['required', 'integer'],
+        ]);
+
+        $profile = DB::table('source_profiles')->where('id', $id)->first();
+        abort_if($profile === null, 404);
+
+        $link = DB::table('community_social_links')
+            ->where('social_network_id', 3)
+            ->where('external_community_id', $profile->slug)
+            ->first();
+        abort_if($link === null, 422, 'У источника нет линка (network site)');
+
+        $target = (int) $data['community_id'];
+        abort_if((int) $link->community_id === $target, 422, 'Источник уже привязан к этому организатору');
+        abort_if(! DB::table('communities')->where('id', $target)->whereNull('deleted_at')->exists(),
+            422, 'Организатор не найден');
+        abort_if(DB::table('community_social_links')
+            ->where('community_id', $target)->where('social_network_id', 3)
+            ->where('id', '!=', $link->id)->exists(),
+            422, 'У целевого организатора уже есть сайт-источник');
+
+        $moved = ['events' => 0, 'posts' => 0];
+        DB::transaction(function () use ($link, $target, &$moved) {
+            DB::table('community_social_links')->where('id', $link->id)
+                ->update(['community_id' => $target, 'updated_at' => now()]);
+
+            // только контент ЭТОГО источника (по social_link_id постов),
+            // чужие события старого организатора не трогаем
+            $postIds = DB::table('context_posts')->where('social_link_id', $link->id)->pluck('id');
+            $moved['posts'] = DB::table('context_posts')->whereIn('id', $postIds)
+                ->update(['community_id' => $target, 'updated_at' => now()]);
+            $moved['events'] = DB::table('events')->whereIn('original_post_id', $postIds)
+                ->update(['community_id' => $target, 'updated_at' => now()]);
+        });
+
+        Log::info('admin:source-profiles:rebound', [
+            'actor_id' => $request->user()?->id,
+            'profile_id' => $id,
+            'from_community' => (int) $link->community_id,
+            'to_community' => $target,
+            'moved' => $moved,
+        ]);
+
+        return response()->json(['data' => [
+            'community_id' => $target,
+            'community_name' => (string) DB::table('communities')->where('id', $target)->value('name'),
+            'moved_events' => $moved['events'],
+            'moved_posts' => $moved['posts'],
+        ]]);
+    }
+
+    /**
      * Здоровье по broken-семантике (как self-heal парсера): broken-ран =
      * упал / листинг не сматчил ни одной ссылки / фетчили и всё провалилось.
      * llm_text с urls>0 и ok=0 (всё уже собрано, новых событий нет) — ЗДОРОВ.
