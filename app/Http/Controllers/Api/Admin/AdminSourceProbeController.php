@@ -24,8 +24,28 @@ class AdminSourceProbeController extends Controller
             'listing_url' => ['required', 'url', 'max:500'],
         ]);
 
+        $url = rtrim($data['listing_url'], '/');
+
+        // дедуп: активная заявка на тот же URL — возвращаем её (не плодим
+        // headless-работу); свежая done (<1 ч) — переиспользуем результат
+        $existing = DB::table('source_probe_requests')
+            ->where('listing_url', $url)
+            ->where(function ($q) {
+                $q->whereIn('status', ['pending', 'running'])
+                    ->orWhere(fn ($qq) => $qq->where('status', 'done')->where('updated_at', '>', now()->subHour()));
+            })
+            ->orderByDesc('id')
+            ->first();
+        if ($existing !== null) {
+            return response()->json(['data' => [
+                'id' => (int) $existing->id,
+                'status' => $existing->status,
+                'reused' => true,
+            ]]);
+        }
+
         $id = DB::table('source_probe_requests')->insertGetId([
-            'listing_url' => rtrim($data['listing_url'], '/'),
+            'listing_url' => $url,
             'status' => 'pending',
             'requested_by' => $request->user()?->id,
             'created_at' => now(),
@@ -90,6 +110,8 @@ class AdminSourceProbeController extends Controller
             'parse_mode' => ['required', 'in:jsonld,llm_text'],
             'template' => ['required_if:parse_mode,llm_text', 'nullable', 'string', 'max:300'],
             'slug' => ['sometimes', 'nullable', 'string', 'max:100', 'regex:~^[a-z0-9-]+$~'],
+            // привязка к УЖЕ существующей площадке/сообществу вместо создания нового
+            'community_id' => ['sometimes', 'nullable', 'integer'],
         ]);
 
         $req = DB::table('source_probe_requests')->where('id', $data['probe_request_id'])->first();
@@ -105,13 +127,28 @@ class AdminSourceProbeController extends Controller
         abort_if(DB::table('source_profiles')->where('slug', $slug)->exists(), 422, "Профиль '{$slug}' уже существует");
 
         if ($data['parse_mode'] === 'jsonld') {
-            $regex = (string) ($result['suggested_regex'] ?? '');
+            // выбранный кластер сужает регэксп до конкретной группы страниц;
+            // без выбора — объединение всех positive-кластеров разведки
+            $regex = ! empty($data['template'])
+                ? $this->regexFromTemplate($origin, (string) $data['template'])
+                : (string) ($result['suggested_regex'] ?? '');
             abort_if($regex === '', 422, 'Разведка не нашла Event JSON-LD — jsonld-режим невозможен, выбери llm_text с шаблоном');
         } else {
             $regex = $this->regexFromTemplate($origin, (string) $data['template']);
         }
 
-        DB::transaction(function () use ($data, $slug, $regex, $req, $result, $cityId, $host) {
+        // если привязываем к существующему сообществу — оно должно жить и не
+        // иметь другого сайт-источника (link network 3 уникален на сообщество)
+        $existingCommunityId = isset($data['community_id']) ? (int) $data['community_id'] : null;
+        if ($existingCommunityId !== null) {
+            abort_if(! DB::table('communities')->where('id', $existingCommunityId)->whereNull('deleted_at')->exists(),
+                422, 'Сообщество не найдено');
+            abort_if(DB::table('community_social_links')
+                ->where('community_id', $existingCommunityId)->where('social_network_id', 3)->exists(),
+                422, 'У этого сообщества уже есть сайт-источник');
+        }
+
+        DB::transaction(function () use ($data, $slug, $regex, $req, $result, $cityId, $host, $existingCommunityId) {
             DB::table('source_profiles')->insert([
                 'slug' => $slug,
                 'name' => $data['name'],
@@ -133,8 +170,9 @@ class AdminSourceProbeController extends Controller
 
             // aggregator-community + link (network 3 'site') — схема сида qtickets:
             // venue_id=NULL, kind=aggregator блокирует HQ-fallback
-            $communityId = DB::table('communities')
-                ->where('name', $data['name'])->where('city_id', $cityId)->whereNull('deleted_at')->value('id');
+            $communityId = $existingCommunityId
+                ?? DB::table('communities')
+                    ->where('name', $data['name'])->where('city_id', $cityId)->whereNull('deleted_at')->value('id');
             if ($communityId === null) {
                 $communityId = DB::table('communities')->insertGetId([
                     'name' => $data['name'],

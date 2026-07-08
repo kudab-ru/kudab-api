@@ -67,6 +67,22 @@ class AdminSourceProbeTest extends TestCase
         $this->assertDatabaseHas('source_probe_requests', ['listing_url' => 'https://dk50.example/afisha']);
     }
 
+    public function test_store_dedupes_active_and_fresh_requests(): void
+    {
+        $this->actingAsSuperadmin();
+
+        $first = $this->postJson('/api/admin/sources/profiles/probe-requests', ['listing_url' => 'https://dk50.example/afisha'])
+            ->assertCreated()->json('data.id');
+
+        // повторная заявка на тот же URL — возвращается существующая, дубль не создаётся
+        $this->postJson('/api/admin/sources/profiles/probe-requests', ['listing_url' => 'https://dk50.example/afisha/'])
+            ->assertOk()
+            ->assertJsonPath('data.id', $first)
+            ->assertJsonPath('data.reused', true);
+
+        $this->assertSame(1, DB::table('source_probe_requests')->count());
+    }
+
     public function test_create_jsonld_profile_quarantined_with_community_and_link(): void
     {
         $this->actingAsSuperadmin();
@@ -113,6 +129,34 @@ class AdminSourceProbeTest extends TestCase
         $regex = DB::table('source_profiles')->where('slug', 'fest-x')->value('event_url_regex');
         $this->assertSame(1, preg_match($regex, 'https://dk50.example/prog/koncert-y'));
         $this->assertSame(0, preg_match($regex, 'https://dk50.example/news/koncert-y'));
+    }
+
+    public function test_create_binds_to_existing_community(): void
+    {
+        $this->actingAsSuperadmin();
+        $cityId = $this->seedCity();
+        $reqId = $this->seedDoneRequest();
+        $communityId = (int) DB::table('communities')->insertGetId([
+            'name' => 'Никитинский театр', 'city_id' => $cityId,
+            'verification_status' => 'approved', 'is_verified' => true,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->postJson('/api/admin/sources/profiles/create', [
+            'probe_request_id' => $reqId,
+            'name' => 'Сайт Никитинского',
+            'city_slug' => 'voronezh',
+            'parse_mode' => 'jsonld',
+            'community_id' => $communityId,
+        ])->assertCreated();
+
+        // линк повешен на СУЩЕСТВУЮЩЕЕ сообщество, дубль не создан
+        $this->assertDatabaseHas('community_social_links', [
+            'community_id' => $communityId,
+            'social_network_id' => 3,
+            'external_community_id' => 'dk50-example',
+        ]);
+        $this->assertSame(0, DB::table('communities')->where('name', 'Сайт Никитинского')->count());
     }
 
     public function test_create_rejects_jsonld_without_positive_probe(): void
