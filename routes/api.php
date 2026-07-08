@@ -92,6 +92,16 @@ Route::prefix('admin')
 
 // Управление источником Я.Афиша — ТОЛЬКО суперадмин (отдельная группа, НЕ
 // role:admin|superadmin выше). Пишет source_configs, parser читает свежим.
+// Профильные сайты-источники (source_profiles само-строящегося парсера) —
+// тумблер/лимиты действуют со следующего цикла парсера, re-probe через метку.
+Route::prefix('admin/sources/profiles')
+    ->middleware(['auth:sanctum', 'role:superadmin'])
+    ->group(function () {
+        Route::get('/', [\App\Http\Controllers\Api\Admin\AdminSourceProfilesController::class, 'index']);
+        Route::patch('{id}', [\App\Http\Controllers\Api\Admin\AdminSourceProfilesController::class, 'update'])->whereNumber('id');
+        Route::post('{id}/reprobe', [\App\Http\Controllers\Api\Admin\AdminSourceProfilesController::class, 'reprobe'])->whereNumber('id');
+    });
+
 Route::prefix('admin/sources/yandex-afisha')
     ->middleware(['auth:sanctum', 'role:superadmin'])
     ->group(function () {
