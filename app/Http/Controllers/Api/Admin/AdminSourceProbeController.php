@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Support\SourceHost;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -122,7 +123,7 @@ class AdminSourceProbeController extends Controller
         abort_if(! $cityId, 422, "Город '{$data['city_slug']}' не найден");
 
         $origin = (string) ($result['origin'] ?? '');
-        $host = (string) (parse_url($origin)['host'] ?? '');
+        $host = SourceHost::host($origin);
         $slug = $data['slug'] ?? Str::of($host)->replace('.', '-')->lower()->toString();
         abort_if(DB::table('source_profiles')->where('slug', $slug)->exists(), 422, "Профиль '{$slug}' уже существует");
 
@@ -256,7 +257,9 @@ SQL);
      */
     private function autoBindCommunity(string $host, string $name, int $cityId): ?array
     {
-        $host = mb_strtolower(ltrim($host, 'w.'));
+        // $host уже канонизирован в createProfile (SourceHost::host). Раньше
+        // здесь был ltrim($host, 'w.') — резал ведущие w/точки как набор
+        // символов ('weekend.ru' → 'eekend.ru') → промах авто-биндинга и дубль.
         $hostLike = '%'.str_replace(['%', '_'], '', $host).'%';
 
         // 1) домен уже записан у сообщества (любая сеть, чаще всего url линка)
