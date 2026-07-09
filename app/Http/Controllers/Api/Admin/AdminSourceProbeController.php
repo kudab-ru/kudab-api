@@ -26,17 +26,24 @@ class AdminSourceProbeController extends Controller
         ]);
 
         $url = rtrim($data['listing_url'], '/');
+        $host = SourceHost::host($url);
 
-        // дедуп: активная заявка на тот же URL — возвращаем её (не плодим
-        // headless-работу); свежая done (<1 ч) — переиспользуем результат
-        $existing = DB::table('source_probe_requests')
-            ->where('listing_url', $url)
+        // дедуп по origin-host (один сайт = один источник): активная заявка на
+        // тот же хост — возвращаем её (не плодим headless-работу); свежая done
+        // (<1 ч) — переиспользуем результат. Сравнение хоста в PHP: раздел URL
+        // не влияет (site.ru/afisha и site.ru/concerts — один сайт), выборка
+        // активных/свежих заявок крошечная.
+        $candidates = DB::table('source_probe_requests')
             ->where(function ($q) {
                 $q->whereIn('status', ['pending', 'running'])
                     ->orWhere(fn ($qq) => $qq->where('status', 'done')->where('updated_at', '>', now()->subHour()));
             })
             ->orderByDesc('id')
-            ->first();
+            ->limit(50)
+            ->get();
+        $existing = $host === ''
+            ? null
+            : $candidates->first(fn ($r) => SourceHost::host((string) $r->listing_url) === $host);
         if ($existing !== null) {
             return response()->json(['data' => [
                 'id' => (int) $existing->id,
@@ -72,15 +79,53 @@ class AdminSourceProbeController extends Controller
             ->where('updated_at', '<', now()->subMinutes(10))
             ->update(['status' => 'failed', 'error' => 'Разведка прервана (консьюмер перезапущен) — запусти заново', 'updated_at' => now()]);
 
-        $rows = DB::table('source_probe_requests')->orderByDesc('id')->limit(5)->get();
+        // хосты, уже ставшие источником — их заявки в ленте не нужны (жалоба
+        // «разведка показывается, хотя источник уже добавлен»)
+        $onboardedHosts = DB::table('source_profiles')
+            ->pluck('listing_url')
+            ->map(fn ($u) => SourceHost::host((string) $u))
+            ->filter()
+            ->unique();
 
-        return response()->json(['data' => $rows->map(fn ($r) => [
-            'id' => (int) $r->id,
-            'listing_url' => $r->listing_url,
-            'status' => $r->status,
-            'error' => $r->error,
-            'result' => is_string($r->result) ? json_decode($r->result, true) : $r->result,
-        ])->values()]);
+        // onboarded — терминальный статус (проставляется в createProfile), в
+        // ленту не идёт; берём с запасом для схлопывания по хосту
+        $rows = DB::table('source_probe_requests')
+            ->where('status', '!=', 'onboarded')
+            ->orderByDesc('id')
+            ->limit(50)
+            ->get();
+
+        // схлопываем по origin-host: одна заявка на сайт. Приоритет статуса:
+        // активная > done > failed (failed-only-хост оставляем — можно
+        // перезапустить), тай-брейк по свежести (id).
+        $rank = ['running' => 3, 'pending' => 3, 'done' => 2, 'failed' => 1];
+        $byHost = [];
+        foreach ($rows as $r) {
+            $host = SourceHost::host((string) $r->listing_url);
+            if ($host === '' || $onboardedHosts->contains($host)) {
+                continue;
+            }
+            $cur = $byHost[$host] ?? null;
+            $better = $cur === null
+                || ($rank[$r->status] ?? 0) > ($rank[$cur->status] ?? 0)
+                || (($rank[$r->status] ?? 0) === ($rank[$cur->status] ?? 0) && $r->id > $cur->id);
+            if ($better) {
+                $byHost[$host] = $r;
+            }
+        }
+
+        $data = collect($byHost)
+            ->sortByDesc('id')
+            ->take(5)
+            ->map(fn ($r) => [
+                'id' => (int) $r->id,
+                'listing_url' => $r->listing_url,
+                'status' => $r->status,
+                'error' => $r->error,
+                'result' => is_string($r->result) ? json_decode($r->result, true) : $r->result,
+            ])->values();
+
+        return response()->json(['data' => $data]);
     }
 
     public function show(int $id): JsonResponse
@@ -224,6 +269,12 @@ SQL);
                     'updated_at' => now(),
                 ]);
             }
+
+            // терминальный статус заявки: сайт стал источником → в ленте
+            // «Недавних разведок» не показываем (index фильтрует onboarded)
+            DB::table('source_probe_requests')
+                ->where('id', $req->id)
+                ->update(['status' => 'onboarded', 'updated_at' => now()]);
         });
 
         $finalCommunityId = $existingCommunityId
