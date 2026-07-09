@@ -88,6 +88,10 @@ class WebEventResource extends JsonResource
             'id'             => (int) $this->id,
             'title'          => (string) ($this->title ?? ''),
 
+            // короткое описание для карточки (парсер считает events.short_description);
+            // фолбэк на усечённый description, пока backfill не прошёл
+            'short_description' => $this->shortDescriptionForCard(),
+
             'city_slug'      => $this->getAttribute('city_slug') ?: null,
             'venue'          => $this->relationLoaded('venue') && $this->venue
                 ? (new VenueBadgeResource($this->venue))->toArray($request)
@@ -136,5 +140,21 @@ class WebEventResource extends JsonResource
         }
 
         return $out;
+    }
+
+    private function shortDescriptionForCard(): ?string
+    {
+        $short = $this->short_description;
+        if (is_string($short) && trim($short) !== '') {
+            return $short;
+        }
+
+        $desc = $this->description;
+        if (!is_string($desc) || trim($desc) === '') {
+            return null;
+        }
+        $desc = trim(preg_replace('~\s+~u', ' ', $desc) ?? $desc);
+
+        return mb_strlen($desc) > 180 ? rtrim(mb_substr($desc, 0, 179)).'…' : $desc;
     }
 }
