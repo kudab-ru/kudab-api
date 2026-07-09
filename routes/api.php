@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\Admin\AdminYandexAfishaController;
 use App\Http\Controllers\Api\CityController;
 use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Api\Web\CitiesController;
+use App\Http\Controllers\Api\Web\CommunitiesController as WebCommunitiesController;
 use App\Http\Controllers\Api\Web\TelegramResolveController;
 use App\Http\Controllers\Api\Web\WebSitemapController;
 use App\Http\Controllers\Bot\RoleController;
@@ -150,6 +151,11 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('venues', [\App\Http\Controllers\Api\Web\VenuesController::class, 'index']);
     Route::get('venues/map', [\App\Http\Controllers\Api\Web\VenuesController::class, 'map']);
     Route::get('venues/{id}', [\App\Http\Controllers\Api\Web\VenuesController::class, 'show'])->whereNumber('id');
+
+    // Публичный каталог источников для /sources. Порядок важен: index (строка
+    // "communities") регистрируем ДО communities/{id} (whereNumber подстрахует).
+    // Отдельный публичный контроллер/ресурс — НЕ admin (тот утёк бы verification_meta).
+    Route::get('communities', [WebCommunitiesController::class, 'index']);
 
     Route::post('communities/import', [AdminCommunitiesController::class, 'import']);
     Route::get('communities/{id}', [AdminCommunitiesController::class, 'show'])->whereNumber('id');
