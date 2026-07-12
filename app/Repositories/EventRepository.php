@@ -1659,27 +1659,9 @@ class EventRepository
         // Скрываем событие только если:
         // - есть хотя бы один source с black ссылкой
         // - и нет ни одного source, который НЕ black (включая source без social_link_id)
-        $q->whereRaw("
-        NOT (
-            EXISTS (
-                SELECT 1
-                FROM event_sources es
-                JOIN community_social_links csl ON csl.id = es.social_link_id
-                WHERE es.event_id = events.id
-                  AND csl.status = 'black'
-            )
-            AND NOT EXISTS (
-                SELECT 1
-                FROM event_sources es2
-                LEFT JOIN community_social_links csl2 ON csl2.id = es2.social_link_id
-                WHERE es2.event_id = events.id
-                  AND (
-                    es2.social_link_id IS NULL
-                    OR COALESCE(csl2.status, 'active') <> 'black'
-                  )
-            )
-        )
-    ");
+        // Само условие живёт в Event::scopeWebNotBlacklisted (единственный
+        // источник правды — его же используют venues/communities-выдачи).
+        $q->webNotBlacklisted();
     }
 
     /**
@@ -1694,6 +1676,9 @@ class EventRepository
      * Override: $filters['include_all'] === true (через `?include_all=1`) —
      * пропускает фильтр целиком. Для админки / dev-режима / специальных
      * страниц «увидеть всё».
+     *
+     * Сами условия живут в Event::scopeWebMainFeedTaxonomy (единственный
+     * источник правды — его же используют venues-выдачи).
      */
     private function applyMainFeedTaxonomyFilter($q, array $filters): void
     {
@@ -1704,17 +1689,7 @@ class EventRepository
             return;
         }
 
-        $q->where(function ($w) {
-            $w->whereNull('events.audience')
-                ->orWhereNotIn('events.audience', ['kids', 'family']);
-        });
-
-        $q->where(function ($w) {
-            $w->whereNull('events.content_kind')
-                ->orWhereIn('events.content_kind', [
-                    'entertainment', 'culture', 'education', 'sport', 'civic',
-                ]);
-        });
+        $q->webMainFeedTaxonomy();
     }
 
     /**

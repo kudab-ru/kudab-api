@@ -4,10 +4,12 @@ namespace App\Http\Controllers\Api\Web;
 
 use App\Http\Resources\WebVenueDetailResource;
 use App\Http\Resources\WebVenueResource;
+use App\Models\Event;
 use App\Models\Venue;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -18,6 +20,10 @@ use Illuminate\Support\Facades\DB;
  *
  * `cover_image_url` (A4(a)) — proxy картинки первого event'а через
  * EventSource.images. Один subquery на запрос, без N+1.
+ *
+ * `next_event` / `upcoming_total` — обогащение карточки каталога (Vue-порт
+ * /venues): строка «ближайшее» и состояние «сегодня / есть предстоящие /
+ * пока без афиши». Один window-запрос на страницу, см. attachUpcoming().
  */
 class VenuesController extends Controller
 {
@@ -37,6 +43,8 @@ class VenuesController extends Controller
             ->orderBy('venues.name');
 
         $page = $query->paginate($perPage);
+
+        $this->attachUpcoming($page->items());
 
         return response()->json([
             'meta' => [
@@ -132,6 +140,91 @@ class VenuesController extends Controller
                 DB::raw($eventsCountSql . ' as events_count'),
                 DB::raw($coverSql . ' as cover_image_url'),
             ]);
+    }
+
+    /**
+     * next_event + upcoming_total для карточек каталога.
+     *
+     * «Предстоящее» = от полуночи СЕГОДНЯШНЕГО дня (МСК-дата, bare date в
+     * сравнении — паритет с date_from паблик-ленты, который форсит полночь):
+     * событие, начавшееся сегодня утром, остаётся «предстоящим» и даёт
+     * карточке состояние «сегодня».
+     *
+     * Видимость — Event::visibleWeb(): тот же статус-скоуп, что выдача
+     * /api/web/events (город active + не удалено + blacklist-гейт +
+     * дефолтная таксономия ленты). Счётчик считает только реально видимые
+     * события — НЕ архивный тотал (аудит 2026-07-10: архивные счётчики =
+     * ложь пользователю).
+     *
+     * Батч: один window-запрос (COUNT/ROW_NUMBER OVER PARTITION BY venue_id)
+     * на всю страницу (≤50 площадок), без N+1.
+     *
+     * @param array<int, Venue> $venues
+     */
+    private function attachUpcoming(array $venues): void
+    {
+        $ids = array_map(fn ($v) => (int) $v->id, $venues);
+        if ($ids === []) {
+            return;
+        }
+
+        $todayMsk = now('Europe/Moscow')->toDateString();
+
+        $inner = Event::query()
+            ->visibleWeb()
+            ->whereIn('events.venue_id', $ids)
+            ->where(function ($w) use ($todayMsk) {
+                $w->where('events.start_time', '>=', $todayMsk)
+                    ->orWhere(function ($x) use ($todayMsk) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $todayMsk);
+                    });
+            })
+            ->select([
+                'events.venue_id',
+                'events.id',
+                'events.title',
+                'events.start_time',
+                'events.start_date',
+                'events.time_precision',
+            ])
+            ->selectRaw('COUNT(*) OVER (PARTITION BY events.venue_id) AS upcoming_total')
+            // хронология «ближайшего» — как в ленте: start_date, потом start_time
+            ->selectRaw('ROW_NUMBER() OVER (
+                PARTITION BY events.venue_id
+                ORDER BY events.start_date ASC NULLS LAST, events.start_time ASC NULLS LAST, events.id ASC
+            ) AS rn');
+
+        $rows = DB::query()->fromSub($inner, 't')->where('t.rn', 1)->get();
+
+        $byVenue = [];
+        foreach ($rows as $r) {
+            $startAt = null;
+            if ($r->start_time !== null) {
+                // как WebEventResource: инстант сохраняем, отдаём в МСК с offset
+                $startAt = Carbon::parse($r->start_time)
+                    ->setTimezone('Europe/Moscow')
+                    ->toIso8601String();
+            }
+
+            $byVenue[(int) $r->venue_id] = [
+                'total' => (int) $r->upcoming_total,
+                'next'  => [
+                    'id'             => (int) $r->id,
+                    'title'          => (string) $r->title,
+                    'start_at'       => $startAt,
+                    'start_date'     => $r->start_date !== null ? substr((string) $r->start_date, 0, 10) : null,
+                    'time_precision' => (string) ($r->time_precision ?? 'datetime'),
+                ],
+            ];
+        }
+
+        foreach ($venues as $v) {
+            $hit = $byVenue[(int) $v->id] ?? null;
+            $v->setAttribute('upcoming_total', $hit['total'] ?? 0);
+            $v->setAttribute('next_event_payload', $hit['next'] ?? null);
+        }
     }
 
     private function resolveCityId(Request $request): ?int

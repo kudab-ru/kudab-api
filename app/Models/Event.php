@@ -95,6 +95,89 @@ class Event extends Model
         return $q->where('start_time', '>=', now()->subHour());
     }
 
+    /* ============ Web-видимость (паритет с паблик-лентой) ============ */
+
+    /**
+     * Blacklist-гейт паблик-выдачи: скрываем событие, только если есть хотя бы
+     * один source с black-ссылкой И нет ни одного не-black source (включая
+     * source без social_link_id).
+     *
+     * Единственный источник правды этого условия. Веб-лента применяет его
+     * через EventRepository::excludeBlacklistedSources → этот scope.
+     * Требует alias таблицы `events` в запросе (без переименования).
+     */
+    public function scopeWebNotBlacklisted($q)
+    {
+        return $q->whereRaw("
+        NOT (
+            EXISTS (
+                SELECT 1
+                FROM event_sources es
+                JOIN community_social_links csl ON csl.id = es.social_link_id
+                WHERE es.event_id = events.id
+                  AND csl.status = 'black'
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM event_sources es2
+                LEFT JOIN community_social_links csl2 ON csl2.id = es2.social_link_id
+                WHERE es2.event_id = events.id
+                  AND (
+                    es2.social_link_id IS NULL
+                    OR COALESCE(csl2.status, 'active') <> 'black'
+                  )
+            )
+        )
+    ");
+    }
+
+    /**
+     * Дефолтное сужение «общегородская развлекательная лента»: без
+     * kids/family-аудитории и вне-форматных content_kind. NULL-значения НЕ
+     * скрываем (legacy events / пропуски LLM — backwards-compat).
+     *
+     * Синхронно с EventRepository::applyMainFeedTaxonomyFilter (он делегирует
+     * сюда; include_all-override остаётся на стороне репозитория).
+     */
+    public function scopeWebMainFeedTaxonomy($q)
+    {
+        $q->where(function ($w) {
+            $w->whereNull('events.audience')
+                ->orWhereNotIn('events.audience', ['kids', 'family']);
+        });
+
+        $q->where(function ($w) {
+            $w->whereNull('events.content_kind')
+                ->orWhereIn('events.content_kind', [
+                    'entertainment', 'culture', 'education', 'sport', 'civic',
+                ]);
+        });
+
+        return $q;
+    }
+
+    /**
+     * «Видимое в вебе» событие — тот же статус-скоуп, что паблик-выдача
+     * /api/web/events (EventRepository::paginateUpcomingWeb): не удалено +
+     * город active + не blacklisted + дефолтная таксономия ленты.
+     *
+     * БЕЗ временно́го окна — границу (upcoming / lookback) задаёт вызывающий.
+     * include_all-override здесь не поддерживается (это фича query-string
+     * ленты, не «видимости по умолчанию»).
+     */
+    public function scopeVisibleWeb($q)
+    {
+        return $q->whereNull('events.deleted_at')
+            ->whereExists(function ($sub) {
+                $sub->selectRaw('1')
+                    ->from('cities')
+                    ->whereColumn('cities.id', 'events.city_id')
+                    ->where('cities.status', 'active');
+            })
+            ->webNotBlacklisted()
+            ->webMainFeedTaxonomy();
+    }
+
     /* ==================== Helpers ==================== */
 
     /**
