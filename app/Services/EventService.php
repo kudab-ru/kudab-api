@@ -27,6 +27,17 @@ class EventService
     }
 
     /**
+     * Лента прошедших событий площадки («Здесь уже проходило») — all-time,
+     * в обход lookback-окна ленты. См. EventRepository::listVenuePast.
+     *
+     * @return array{page: LengthAwarePaginator, totalEvents: int}
+     */
+    public function listVenuePast(int $venueId, int $perPage = 24, int $page = 1): array
+    {
+        return $this->repo->listVenuePast($venueId, $perPage, $page);
+    }
+
+    /**
      * @return array{event: Event|null, total: int}
      */
     public function pickRandomWeb(array $filters): array

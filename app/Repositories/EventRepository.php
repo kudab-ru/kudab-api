@@ -1468,6 +1468,59 @@ class EventRepository
         });
     }
 
+    /**
+     * Лента ПРОШЕДШИХ событий площадки («Здесь уже проходило»).
+     *
+     * Единственный web-путь БЕЗ окна PAST_LOOKBACK_DAYS: обход изолирован тем,
+     * что окна тут физически нет — главная лента paginateUpcomingWeb не трогается
+     * ни на бит (нет флага, который мог бы протечь через $filters). Гидрация
+     * карточки как у ленты (те же private-хелперы), но:
+     *   - ungrouped: история = каждый показ отдельной приглушённой карточкой
+     *     (12 показов ≠ 1 карточка); заодно снимает тяжёлую window-машину групп;
+     *   - обратная хронология (свежее прошлое сверху);
+     *   - past-предикат ПОБИТОВО совпадает с CASE в addPastFlags() (grace 1ч,
+     *     SQL-время, НЕ PHP), иначе на границе суток карточка попала бы в ленту с
+     *     __is_past=0 (не приглушена). SYNC с addPastFlags ниже — менять вместе.
+     *
+     * @return array{page: \Illuminate\Contracts\Pagination\LengthAwarePaginator, totalEvents: int}
+     */
+    public function listVenuePast(int $venueId, int $perPage = 24, int $page = 1): array
+    {
+        $graceHours = (int) self::PAST_GRACE_HOURS;
+
+        $q = Event::query()
+            ->select('events.*', 'ct.slug as city_slug')
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
+            ->whereNull('events.deleted_at')
+            ->where('events.venue_id', $venueId)
+            // past-предикат = CASE addPastFlags (SQL-время, не PHP → фильтр и флаг
+            // не разъедутся на границе суток). SYNC: addPastFlags $caseSql.
+            ->where(function ($w) use ($graceHours) {
+                $w->whereRaw("events.start_time IS NOT NULL AND events.start_time < (now() - interval '{$graceHours} hours')")
+                    ->orWhereRaw("events.start_time IS NULL AND events.start_date IS NOT NULL AND events.start_date < (now() AT TIME ZONE 'Europe/Moscow')::date");
+            })
+            ->with(['interests:id,slug,name']);
+
+        $this->addPastFlags($q);                    // __is_past=true всем + __past_rank
+        $this->excludeBlacklistedSources($q);       // = webNotBlacklisted
+        $this->applyMainFeedTaxonomyFilter($q, []); // дефолтный taxonomy-гейт ленты
+
+        // свежее прошлое первым (не зовём addImgRank/addGrayRank/addTopScore —
+        // сортируем только по дате, их алиасы в ORDER BY не нужны)
+        $q->orderByRaw('events.start_date desc nulls last')
+            ->orderByRaw('events.start_time desc nulls last')
+            ->orderBy('events.id', 'desc');
+
+        $paginator = $q->paginate($perPage, ['*'], 'page', max(1, $page));
+        $events    = $paginator->getCollection();
+
+        $this->hydrateImages($events);              // images + poster (иначе карточки без обложек)
+        $events->each(fn (Event $e) => $e->makeHidden(['__past_rank', '__is_past']));
+
+        return ['page' => $paginator, 'totalEvents' => (int) $paginator->total()];
+    }
+
     private function addPastFlags($q): void
     {
         $graceHours = (int) self::PAST_GRACE_HOURS;

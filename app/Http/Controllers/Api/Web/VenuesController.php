@@ -2,10 +2,12 @@
 
 namespace App\Http\Controllers\Api\Web;
 
+use App\Http\Resources\WebEventResource;
 use App\Http\Resources\WebVenueDetailResource;
 use App\Http\Resources\WebVenueResource;
 use App\Models\Event;
 use App\Models\Venue;
+use App\Services\EventService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -27,6 +29,10 @@ use Illuminate\Support\Facades\DB;
  */
 class VenuesController extends Controller
 {
+    public function __construct(private readonly EventService $events)
+    {
+    }
+
     public function index(Request $request): JsonResponse
     {
         $cityId = $this->resolveCityId($request);
@@ -130,6 +136,36 @@ class VenuesController extends Controller
         }
 
         return response()->json(['data' => $map]);
+    }
+
+    /**
+     * «Здесь уже проходило» — лента ПРОШЕДШИХ событий площадки, all-time (в обход
+     * lookback-окна ленты). Конверт идентичен /web/events (data + meta) → фронт
+     * переиспользует dtoToEvent без изменений. Карточки прошлого приходят с
+     * is_past=true → фронт приглушает их автоматически. Гейт пустого блока —
+     * meta.total===0 (тот же пагинатор, что data; отдельный запрос не нужен).
+     */
+    public function pastEvents(int $id, Request $request): JsonResponse
+    {
+        $venue = Venue::query()->active()->whereKey($id)->first(['id']);
+        if ($venue === null) {
+            return response()->json(['error' => 'venue_not_found'], 404);
+        }
+
+        $perPage = max(1, min((int) $request->input('per_page', 24), 24));
+        $page    = max(1, (int) $request->input('page', 1));
+
+        ['page' => $paginator, 'totalEvents' => $total] = $this->events->listVenuePast($id, $perPage, $page);
+
+        return response()->json([
+            'meta' => [
+                'current_page' => $paginator->currentPage(),
+                'per_page'     => $paginator->perPage(),
+                'total'        => (int) $total,
+                'last_page'    => $paginator->lastPage(),
+            ],
+            'data' => WebEventResource::collection($paginator->items()),
+        ]);
     }
 
     /**

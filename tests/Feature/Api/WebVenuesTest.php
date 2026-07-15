@@ -438,6 +438,166 @@ class WebVenuesTest extends TestCase
         $response->assertStatus(404);
     }
 
+    /* ============ past-events («Здесь уже проходило», all-time в обход lookback) ============ */
+
+    public function test_past_events_surfaces_old_events_and_hydrates_poster(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Музей Крамского', 'muzey-kramskogo');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        // событие 30 дней назад — старше окна lookback(7д): в ленте бы не показалось
+        $old = $this->createEvent($vrn->id, $venue->id, $community->id, 'Прошлая выставка',
+            Carbon::now('Europe/Moscow')->subDays(30)->format('Y-m-d H:i:s'));
+        $this->attachSourceWithImages($old->id, $community->id, ['https://img/poster.jpg']);
+
+        $response = $this->getJson('/api/web/venues/' . $venue->id . '/past-events');
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Прошлая выставка')
+            ->assertJsonPath('data.0.is_past', true)
+            ->assertJsonPath('data.0.poster', 'https://img/poster.jpg');
+    }
+
+    public function test_past_events_isolated_from_main_feed(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Музей', 'muzey');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $old = $this->createEvent($vrn->id, $venue->id, $community->id, 'Старое событие',
+            Carbon::now('Europe/Moscow')->subDays(30)->format('Y-m-d H:i:s'));
+
+        // в главной ленте (окно 7д) старого события НЕТ
+        $feed = $this->getJson('/api/web/events?venue_id=' . $venue->id);
+        $feed->assertOk();
+        $this->assertNotContains($old->id, collect($feed->json('data'))->pluck('id')->all());
+
+        // в past-events — ЕСТЬ (обход lookback изолирован от ленты)
+        $this->getJson('/api/web/venues/' . $venue->id . '/past-events')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonPath('data.0.id', $old->id);
+    }
+
+    public function test_past_events_excludes_web_invisible(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Музей', 'muzey');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $visible = $this->createEvent($vrn->id, $venue->id, $community->id, 'Видимое прошлое',
+            Carbon::now('Europe/Moscow')->subDays(30)->format('Y-m-d H:i:s'));
+
+        $deleted = $this->createEvent($vrn->id, $venue->id, $community->id, 'Удалённое',
+            Carbon::now('Europe/Moscow')->subDays(31)->format('Y-m-d H:i:s'));
+        $deleted->delete();
+
+        $kids = $this->createEvent($vrn->id, $venue->id, $community->id, 'Детское',
+            Carbon::now('Europe/Moscow')->subDays(32)->format('Y-m-d H:i:s'));
+        $kids->audience = 'kids';
+        $kids->save();
+
+        $black = $this->createEvent($vrn->id, $venue->id, $community->id, 'Из чёрного',
+            Carbon::now('Europe/Moscow')->subDays(33)->format('Y-m-d H:i:s'));
+        $this->attachBlackSource($black->id, $community->id);
+
+        $this->getJson('/api/web/venues/' . $venue->id . '/past-events')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonPath('data.0.id', $visible->id);
+    }
+
+    public function test_past_events_ordered_recent_first(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Музей', 'muzey');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $mid    = $this->createEvent($vrn->id, $venue->id, $community->id, 'Середина',
+            Carbon::now('Europe/Moscow')->subDays(20)->format('Y-m-d H:i:s'));
+        $recent = $this->createEvent($vrn->id, $venue->id, $community->id, 'Недавнее',
+            Carbon::now('Europe/Moscow')->subDays(5)->format('Y-m-d H:i:s'));
+        $old    = $this->createEvent($vrn->id, $venue->id, $community->id, 'Давнее',
+            Carbon::now('Europe/Moscow')->subDays(40)->format('Y-m-d H:i:s'));
+
+        $ids = collect($this->getJson('/api/web/venues/' . $venue->id . '/past-events')->json('data'))
+            ->pluck('id')->all();
+
+        $this->assertSame([$recent->id, $mid->id, $old->id], $ids);
+    }
+
+    public function test_past_events_empty_when_only_future(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Активная', 'aktivnaya');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Будущее',
+            Carbon::now('Europe/Moscow')->addDays(7)->format('Y-m-d H:i:s'));
+
+        $this->getJson('/api/web/venues/' . $venue->id . '/past-events')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 0)
+            ->assertJsonCount(0, 'data');
+    }
+
+    public function test_past_events_active_venue_in_inactive_city_is_empty(): void
+    {
+        $off = $this->insertCity('Спящий', 'spyashiy', 'inactive', 39.0, 51.0);
+        $venue = $this->createVenue($off->id, 'Площадка в спящем', 'v-spyashem');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $off->id]);
+
+        $this->createEvent($off->id, $venue->id, $community->id, 'Прошлое в спящем',
+            Carbon::now('Europe/Moscow')->subDays(20)->format('Y-m-d H:i:s'));
+
+        // площадка active → не 404, но город inactive → пусто (ct.status='active')
+        $this->getJson('/api/web/venues/' . $venue->id . '/past-events')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 0)
+            ->assertJsonCount(0, 'data');
+    }
+
+    public function test_past_events_404_for_unknown_venue(): void
+    {
+        $this->getJson('/api/web/venues/9999999/past-events')->assertStatus(404);
+    }
+
+    /** Нормальный (active) source с картинками — для гидрации poster/images. */
+    private function attachSourceWithImages(int $eventId, int $communityId, array $images): void
+    {
+        $now = now();
+
+        $snId = DB::table('social_networks')->insertGetId([
+            'name'       => 'vk',
+            'slug'       => 'vk-img-' . $eventId,
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        $linkId = DB::table('community_social_links')->insertGetId([
+            'community_id'      => $communityId,
+            'social_network_id' => $snId,
+            'url'               => 'https://vk.com/src_' . $eventId,
+            'status'            => 'active',
+            'created_at'        => $now,
+            'updated_at'        => $now,
+        ]);
+
+        DB::table('event_sources')->insert([
+            'event_id'         => $eventId,
+            'social_link_id'   => $linkId,
+            'source'           => 'vk',
+            'post_external_id' => 'src-post-' . $eventId,
+            'images'           => json_encode($images),
+            'created_at'       => $now,
+            'updated_at'       => $now,
+        ]);
+    }
+
     private function createInterest(string $slug, string $name): int
     {
         return (int) DB::table('interests')->insertGetId([
