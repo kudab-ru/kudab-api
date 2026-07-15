@@ -76,6 +76,63 @@ class VenuesController extends Controller
     }
 
     /**
+     * Календарь площадки: карта «YYYY-MM-DD» → число событий в этот день.
+     * Фронт рисует месяц-сетку и листает месяцы клиентом без новых запросов,
+     * поэтому отдаём всю карту разом (компактно даже для сотен событий).
+     *
+     * ВАЖНО — окно то же, что у /web/events (paginateUpcoming): от
+     * `now - PAST_LOOKBACK_DAYS` и в будущее. Иначе календарь подсветил бы
+     * старые дни, а клик по ним вернул бы пусто (лента режет прошлое окном).
+     * Полная история старше недели — отдельная фича «Здесь уже проходило»
+     * (нужен venue-эндпоинт без lookback + гидрация карточек).
+     *
+     * День = start_date (МСК-дата, как в афише/next_event); если её нет —
+     * дата из start_time в МСК. Видимость — Event::visibleWeb(). Честный гейт
+     * «мало событий → не показывать» решает фронт по сумме карты.
+     */
+    public function calendar(int $id, Request $request): JsonResponse
+    {
+        $venue = Venue::query()->active()->whereKey($id)->first(['id']);
+        if ($venue === null) {
+            return response()->json(['error' => 'venue_not_found'], 404);
+        }
+
+        // то же окно, что у публичной ленты — держим в sync через константу репо
+        $nowMsk      = now('Europe/Moscow');
+        $cutoffTs    = $nowMsk->copy()->subDays(\App\Repositories\EventRepository::PAST_LOOKBACK_DAYS);
+        $fromDateMsk = $cutoffTs->toDateString();
+
+        $dayExpr = "COALESCE(events.start_date, (events.start_time AT TIME ZONE 'Europe/Moscow')::date)";
+
+        $rows = Event::query()
+            ->visibleWeb()
+            ->where('events.venue_id', $id)
+            ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
+                $w->where('events.start_time', '>=', $cutoffTs)
+                    ->orWhere(function ($x) use ($fromDateMsk) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $fromDateMsk);
+                    });
+            })
+            ->whereRaw("$dayExpr IS NOT NULL")
+            ->selectRaw("to_char($dayExpr, 'YYYY-MM-DD') as day")
+            ->selectRaw('COUNT(*) as cnt')
+            ->groupByRaw($dayExpr)
+            ->get();
+
+        $map = [];
+        foreach ($rows as $r) {
+            if ($r->day === null) {
+                continue;
+            }
+            $map[(string) $r->day] = (int) $r->cnt;
+        }
+
+        return response()->json(['data' => $map]);
+    }
+
+    /**
      * Профиль жанров площадки: топ interest-тегов по ВСЕЙ истории её событий
      * (прошедшие + будущие). «Здесь бывает» — идентичность места; работает,
      * даже когда афиша пуста, — единственный блок, который оживляет площадки

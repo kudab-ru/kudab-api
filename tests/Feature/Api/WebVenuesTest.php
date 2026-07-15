@@ -374,6 +374,70 @@ class WebVenuesTest extends TestCase
             ->assertJsonPath('data.genre_profile.0.count', 3);
     }
 
+    /* ============ calendar (карта дат для месяц-сетки) ============ */
+
+    public function test_calendar_returns_date_count_map_within_lookback_window(): void
+    {
+        // окно ленты = [now - 7 дней, будущее]; событие старше недели отсекается,
+        // иначе клик по его дню вернул бы пусто (лента режет прошлое)
+        Carbon::setTestNow(Carbon::parse('2026-07-15 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Зелёный театр', 'zelenyi-teatr');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Недавний', '2026-07-10 19:00:00'); // в окне (5 дней назад)
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Концерт 1', '2026-07-14 19:00:00');
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Концерт 2', '2026-07-14 21:00:00');
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Спектакль', '2026-07-20 18:00:00');
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Старый', '2026-05-01 12:00:00'); // старше недели → вне окна
+
+        $response = $this->getJson('/api/web/venues/' . $venue->id . '/calendar');
+
+        $response->assertOk()->assertExactJson([
+            'data' => [
+                '2026-07-10' => 1,
+                '2026-07-14' => 2,
+                '2026-07-20' => 1,
+            ],
+        ]);
+    }
+
+    public function test_calendar_excludes_web_invisible_events(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-07-13 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Юбилейный', 'yubileinyi');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        // 2 видимых события в один день — единственное, что должно попасть
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Видимый 1', '2026-07-14 19:00:00');
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Видимый 2', '2026-07-14 21:00:00');
+
+        $deleted = $this->createEvent($vrn->id, $venue->id, $community->id, 'Удалённый', '2026-07-15 19:00:00');
+        $deleted->delete();
+
+        $kids = $this->createEvent($vrn->id, $venue->id, $community->id, 'Детский', '2026-07-16 10:00:00');
+        $kids->audience = 'kids';
+        $kids->save();
+
+        $blacklisted = $this->createEvent($vrn->id, $venue->id, $community->id, 'Из чёрного', '2026-07-17 14:00:00');
+        $this->attachBlackSource($blacklisted->id, $community->id);
+
+        $response = $this->getJson('/api/web/venues/' . $venue->id . '/calendar');
+
+        $response->assertOk()->assertExactJson([
+            'data' => ['2026-07-14' => 2],
+        ]);
+    }
+
+    public function test_calendar_returns_404_for_unknown_venue(): void
+    {
+        $response = $this->getJson('/api/web/venues/9999999/calendar');
+        $response->assertStatus(404);
+    }
+
     private function createInterest(string $slug, string $name): int
     {
         return (int) DB::table('interests')->insertGetId([
