@@ -41,6 +41,11 @@ class WebVenueDetailResource extends JsonResource
             'avatar_url'      => $this->avatar_url !== null ? (string) $this->avatar_url : null,
 
             'events_count'    => (int) ($this->getAttribute('events_count') ?? 0),
+
+            // «Здесь бывает» — топ interest-тегов по всей истории событий
+            // площадки. Пустой массив = профиля нет (мало истории), фронт
+            // блок не рисует. Считается в VenuesController::genreProfile().
+            'genre_profile'   => array_values($this->getAttribute('genre_profile') ?? []),
             // future_events идут через отдельный /web/events?venue_id=...
             // фронт сам делает второй запрос; в venue-detail держать список
             // events избыточно (rebroadcast той же sql-логики event-репо).

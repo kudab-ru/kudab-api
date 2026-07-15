@@ -262,6 +262,154 @@ class WebVenuesTest extends TestCase
         );
     }
 
+    /* ============ genre_profile («Здесь бывает») ============ */
+
+    public function test_show_genre_profile_ranks_and_gates_by_count(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Зелёный театр', 'zelenyi-teatr');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $music   = $this->createInterest('music', 'Музыка');
+        $standup = $this->createInterest('standup', 'Стендап и юмор');
+        $theatre = $this->createInterest('theatre', 'Театр и спектакли');
+        $cinema  = $this->createInterest('cinema', 'Кино и показы');
+        $lecture = $this->createInterest('lecture', 'Образование и лекции');
+
+        // denom = 16 различных тегированных событий. Строго убывающие счётчики,
+        // чтобы порядок был детерминирован. cinema/lecture (по 2, доля 12%) —
+        // ниже гейта, в профиль не попадают.
+        $this->makeTaggedEvents($vrn->id, $venue->id, $community->id, $music, 5);
+        $this->makeTaggedEvents($vrn->id, $venue->id, $community->id, $standup, 4);
+        $this->makeTaggedEvents($vrn->id, $venue->id, $community->id, $theatre, 3);
+        $this->makeTaggedEvents($vrn->id, $venue->id, $community->id, $cinema, 2);
+        $this->makeTaggedEvents($vrn->id, $venue->id, $community->id, $lecture, 2);
+
+        $response = $this->getJson('/api/web/venues/' . $venue->id);
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(3, 'data.genre_profile')
+            ->assertJsonPath('data.genre_profile.0.slug', 'music')
+            ->assertJsonPath('data.genre_profile.0.name', 'Музыка')
+            ->assertJsonPath('data.genre_profile.0.count', 5)
+            ->assertJsonPath('data.genre_profile.1.slug', 'standup')
+            ->assertJsonPath('data.genre_profile.2.slug', 'theatre');
+    }
+
+    public function test_show_genre_profile_share_branch_keeps_dominant_two_event_genre(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Клуб 12', 'klub-12');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $music   = $this->createInterest('music', 'Музыка');
+        $standup = $this->createInterest('standup', 'Стендап и юмор');
+        $theatre = $this->createInterest('theatre', 'Театр и спектакли');
+
+        // denom = 4. music = 2/4 = 50% (доминирует при 2 событиях → проходит).
+        // standup/theatre по 1 — ниже гейта.
+        $this->makeTaggedEvents($vrn->id, $venue->id, $community->id, $music, 2);
+        $this->makeTaggedEvents($vrn->id, $venue->id, $community->id, $standup, 1);
+        $this->makeTaggedEvents($vrn->id, $venue->id, $community->id, $theatre, 1);
+
+        $response = $this->getJson('/api/web/venues/' . $venue->id);
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(1, 'data.genre_profile')
+            ->assertJsonPath('data.genre_profile.0.slug', 'music');
+    }
+
+    public function test_show_genre_profile_empty_for_thin_venue(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Тихая площадка', 'tihaya');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        // всего 2 тегированных события (< 3) → профиля нет, блок скрыт
+        $music   = $this->createInterest('music', 'Музыка');
+        $this->makeTaggedEvents($vrn->id, $venue->id, $community->id, $music, 2);
+
+        $response = $this->getJson('/api/web/venues/' . $venue->id);
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(0, 'data.genre_profile');
+    }
+
+    public function test_show_genre_profile_excludes_web_invisible_events(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Юбилейный', 'yubileinyi');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $music   = $this->createInterest('music', 'Музыка');
+        $theatre = $this->createInterest('theatre', 'Театр и спектакли');
+        $standup = $this->createInterest('standup', 'Стендап и юмор');
+
+        // 3 видимых музыкальных — единственное, что должно попасть в профиль
+        $this->makeTaggedEvents($vrn->id, $venue->id, $community->id, $music, 3);
+
+        // невидимые теги театра/стендапа — не должны считаться
+        $deleted = $this->createEvent($vrn->id, $venue->id, $community->id, 'Удалённый спектакль', '2026-07-13 13:00:00');
+        $this->tagEvent($deleted->id, $theatre);
+        $deleted->delete();
+
+        $blacklisted = $this->createEvent($vrn->id, $venue->id, $community->id, 'Спектакль из чёрного', '2026-07-13 14:00:00');
+        $this->tagEvent($blacklisted->id, $theatre);
+        $this->attachBlackSource($blacklisted->id, $community->id);
+
+        $kids = $this->createEvent($vrn->id, $venue->id, $community->id, 'Детский стендап', '2026-07-13 10:00:00');
+        $kids->audience = 'kids';
+        $kids->save();
+        $this->tagEvent($kids->id, $standup);
+
+        $response = $this->getJson('/api/web/venues/' . $venue->id);
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(1, 'data.genre_profile')
+            ->assertJsonPath('data.genre_profile.0.slug', 'music')
+            ->assertJsonPath('data.genre_profile.0.count', 3);
+    }
+
+    private function createInterest(string $slug, string $name): int
+    {
+        return (int) DB::table('interests')->insertGetId([
+            'name'       => $name,
+            'slug'       => $slug,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
+    private function tagEvent(int $eventId, int $interestId): void
+    {
+        DB::table('event_interest')->insert([
+            'event_id'    => $eventId,
+            'interest_id' => $interestId,
+            'rank'        => 0,
+            'created_at'  => now(),
+            'updated_at'  => now(),
+        ]);
+    }
+
+    /** N видимых событий на площадке, каждое с одним тегом $interestId. */
+    private function makeTaggedEvents(int $cityId, int $venueId, int $communityId, int $interestId, int $n): void
+    {
+        for ($i = 0; $i < $n; $i++) {
+            $e = $this->createEvent(
+                $cityId,
+                $venueId,
+                $communityId,
+                'Событие ' . $interestId . '-' . $i,
+                '2026-07-' . str_pad((string) (10 + ($i % 18)), 2, '0', STR_PAD_LEFT) . ' 19:00:00'
+            );
+            $this->tagEvent($e->id, $interestId);
+        }
+    }
+
     private function insertCity(string $name, string $slug, string $status, float $lng, float $lat): City
     {
         $now = now();

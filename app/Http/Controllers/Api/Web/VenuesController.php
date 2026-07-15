@@ -68,10 +68,75 @@ class VenuesController extends Controller
         }
 
         $venue->load('city:id,name,slug');
+        $venue->setAttribute('genre_profile', $this->genreProfile((int) $venue->id));
 
         return response()->json([
             'data' => (new WebVenueDetailResource($venue))->toArray($request),
         ]);
+    }
+
+    /**
+     * Профиль жанров площадки: топ interest-тегов по ВСЕЙ истории её событий
+     * (прошедшие + будущие). «Здесь бывает» — идентичность места; работает,
+     * даже когда афиша пуста, — единственный блок, который оживляет площадки
+     * без предстоящих событий.
+     *
+     * Видимость — Event::visibleWeb(): тот же контракт, что каталог/лента (не
+     * удалено + город active + не blacklist + дефолтная таксономия), чтобы
+     * жанры совпадали с событиями, которые пользователь реально может открыть.
+     * Даты НЕ фильтруем — профиль складывается из всей биографии площадки.
+     *
+     * Гейт против чипов-заглушек (аудит: у тонкой площадки один случайный тег
+     * читается как «жанр»): нужно ≥3 тегированных события, и жанр либо
+     * повторялся ≥3 раза, либо занимает ≥30% программы при ≥2 событиях. Иначе
+     * профиля нет — честнее пустоты, чем ярлык из одного факта. Топ-5.
+     *
+     * @return array<int, array{slug: string, name: string, count: int}>
+     */
+    private function genreProfile(int $venueId): array
+    {
+        // знаменатель: сколько РАЗЛИЧНЫХ видимых событий площадки несут ≥1 тег
+        $denom = (int) Event::query()
+            ->visibleWeb()
+            ->where('events.venue_id', $venueId)
+            ->join('event_interest as ei', 'ei.event_id', '=', 'events.id')
+            ->distinct()
+            ->count('events.id');
+
+        if ($denom < 3) {
+            return [];
+        }
+
+        $rows = Event::query()
+            ->visibleWeb()
+            ->where('events.venue_id', $venueId)
+            ->join('event_interest as ei', 'ei.event_id', '=', 'events.id')
+            ->join('interests as i', 'i.id', '=', 'ei.interest_id')
+            ->groupBy('i.slug', 'i.name')
+            ->select('i.slug', 'i.name')
+            ->selectRaw('COUNT(DISTINCT events.id) as cnt')
+            ->orderByRaw('COUNT(DISTINCT events.id) DESC')
+            ->orderBy('i.name')
+            ->get();
+
+        $chips = [];
+        foreach ($rows as $r) {
+            $cnt   = (int) $r->cnt;
+            $share = $cnt / $denom;
+            // жанр либо повторяется (≥3), либо доминирует (≥30% при ≥2 событиях)
+            if ($cnt >= 3 || ($cnt >= 2 && $share >= 0.30)) {
+                $chips[] = [
+                    'slug'  => (string) $r->slug,
+                    'name'  => (string) $r->name,
+                    'count' => $cnt,
+                ];
+            }
+            if (count($chips) >= 5) {
+                break;
+            }
+        }
+
+        return $chips;
     }
 
     public function map(Request $request): JsonResponse
