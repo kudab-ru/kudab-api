@@ -24,7 +24,11 @@ class TelegramChatBroadcastItem extends Model
 
     protected $fillable = [
         'broadcast_id',
+        'kind',
         'event_id',
+        'venue_id',
+        'caption',
+        'photo_url',
         'status',
         'planned_at',
         'posted_at',
@@ -65,6 +69,11 @@ class TelegramChatBroadcastItem extends Model
 
     public const STATUS_AUTO_APPROVED = 'auto_approved';  // авто-одобрено по таймауту
 
+    // Тип поста в очереди:
+    public const KIND_EVENT = 'event';  // событие (рендерится ботом из шаблона)
+
+    public const KIND_VENUE = 'venue';  // портрет площадки (готовый caption)
+
     /**
      * Настройки рассылки для чата.
      */
@@ -74,10 +83,18 @@ class TelegramChatBroadcastItem extends Model
     }
 
     /**
-     * Событие, которое публикуем.
+     * Событие, которое публикуем (для kind=event).
      */
     public function event(): BelongsTo
     {
         return $this->belongsTo(Event::class, 'event_id');
+    }
+
+    /**
+     * Площадка портрета (для kind=venue).
+     */
+    public function venue(): BelongsTo
+    {
+        return $this->belongsTo(Venue::class, 'venue_id');
     }
 }

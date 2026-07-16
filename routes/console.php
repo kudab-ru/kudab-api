@@ -19,3 +19,10 @@ Schedule::command('broadcast:enqueue-due')
 Schedule::command('broadcast:approve-timeouts')
     ->everyMinute()
     ->withoutOverlapping();
+
+// Этап 2 venue-portrait: наполнение очереди портретами площадок. Каденс (≈раз в
+// неделю на канал) + ротация без повторов — внутри команды; часовой тик ловит
+// свободное окно очереди. Доставка — тот же bot-cron, что у событий.
+Schedule::command('broadcast:enqueue-venue-portraits')
+    ->hourly()
+    ->withoutOverlapping();

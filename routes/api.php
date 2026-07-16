@@ -185,6 +185,8 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     Route::post('/broadcast/single/pick', [TelegramChatBroadcastController::class, 'pickSingle']);
     // Отметить одно событие как отправленное
     Route::post('/broadcast/single/mark-sent', [TelegramChatBroadcastController::class, 'markSingleSent']);
+    // Портрет площадки: mark по item_id (у venue-поста нет event_id)
+    Route::post('/broadcast/single/mark-item-sent', [TelegramChatBroadcastController::class, 'markItemSent']);
 
     Route::post('/broadcast/single/enqueue', [TelegramChatBroadcastController::class, 'enqueueSingle']);
     Route::post('/broadcast/single/queue', [TelegramChatBroadcastController::class, 'listQueue']);
@@ -195,6 +197,10 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     );
 
     Route::get('/broadcast/templates', [TelegramChatBroadcastController::class, 'listTemplates']);
+
+    // Портреты площадок: список для пикера + ручная постановка (кнопка в боте)
+    Route::post('/broadcast/venue/list', [TelegramChatBroadcastController::class, 'listVenuePortraits']);
+    Route::post('/broadcast/venue/enqueue', [TelegramChatBroadcastController::class, 'enqueueVenue']);
 
     // P0.5 approve-in-DM: ревью-гейт автопостинга
     Route::post('/broadcast/review/preview-sent', [TelegramChatBroadcastController::class, 'reviewPreviewSent']);

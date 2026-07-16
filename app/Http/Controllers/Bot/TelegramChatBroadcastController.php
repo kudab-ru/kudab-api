@@ -331,6 +331,45 @@ class TelegramChatBroadcastController extends Controller
     }
 
     /**
+     * Пометить айтем очереди (портрет площадки) как опубликованный — по item_id.
+     * У venue-поста нет event_id, поэтому mark идёт по id айтема + claim_token.
+     *
+     * POST /api/bot/broadcast/single/mark-item-sent
+     * Body: { "item_id": 987, "claim_token": "...", "posted_at": "..." }
+     */
+    public function markItemSent(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'item_id' => ['required', 'integer'],
+            'claim_token' => ['required', 'string', 'max:40'],
+            'posted_at' => ['nullable', 'string'],
+        ]);
+
+        $moment = null;
+        if (! empty($validated['posted_at'])) {
+            try {
+                $moment = new \DateTimeImmutable($validated['posted_at']);
+            } catch (\Exception $e) {
+                $moment = null;
+            }
+        }
+
+        try {
+            $ok = $this->broadcastService->markItemSentForChat(
+                (int) $validated['item_id'],
+                (string) $validated['claim_token'],
+                $moment,
+            );
+
+            return response()->json(['ok' => $ok]);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json(['ok' => false, 'error' => 'Не удалось отметить портрет как опубликованный.']);
+        }
+    }
+
+    /**
      * Поставить одно событие в очередь для канала.
      *
      * POST /api/bot/broadcast/single/enqueue
@@ -581,6 +620,71 @@ class TelegramChatBroadcastController extends Controller
                 'error' => 'Не удалось собрать задачи рассылки.',
                 'items' => [],
             ]);
+        }
+    }
+
+    /**
+     * Площадки города канала с готовым портретом — для пикера «Запостить площадку».
+     *
+     * POST /api/bot/broadcast/venue/list
+     * Body: { "telegram_id": 123, "telegram_chat_id": -100123 }
+     */
+    public function listVenuePortraits(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'telegram_id' => ['required', 'integer'],
+            'telegram_chat_id' => ['required', 'integer'],
+        ]);
+
+        try {
+            $venues = $this->broadcastService->listVenuePortraitsForChat(
+                (int) $validated['telegram_id'],
+                (int) $validated['telegram_chat_id'],
+            );
+
+            return response()->json(['ok' => true, 'venues' => $venues]);
+        } catch (RuntimeException $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()]);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json(['ok' => false, 'error' => 'Не удалось получить список площадок.']);
+        }
+    }
+
+    /**
+     * Ручная постановка портрета площадки в очередь (кнопка в боте).
+     *
+     * POST /api/bot/broadcast/venue/enqueue
+     * Body: { "telegram_id": 123, "telegram_chat_id": -100123, "venue_id": 34, "force": false }
+     */
+    public function enqueueVenue(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'telegram_id' => ['required', 'integer'],
+            'telegram_chat_id' => ['required', 'integer'],
+            'venue_id' => ['required', 'integer'],
+            'force' => ['nullable', 'boolean'],
+        ]);
+
+        try {
+            $item = $this->broadcastService->enqueueVenuePortraitForChat(
+                (int) $validated['telegram_id'],
+                (int) $validated['telegram_chat_id'],
+                (int) $validated['venue_id'],
+                (bool) ($validated['force'] ?? false),
+            );
+
+            return response()->json([
+                'ok' => true,
+                'item' => ['id' => $item->id, 'status' => $item->status],
+            ]);
+        } catch (RuntimeException $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()]);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json(['ok' => false, 'error' => 'Не удалось поставить портрет площадки в очередь.']);
         }
     }
 

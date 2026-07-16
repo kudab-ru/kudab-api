@@ -11,6 +11,7 @@ use App\Models\Event;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
+use App\Models\Venue;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use Carbon\Carbon;
 use DateTimeInterface;
@@ -38,6 +39,7 @@ class TelegramChatBroadcastService
         private readonly TelegramChatBroadcastItemRepositoryInterface $broadcastItemRepository,
         private readonly BotRoleServiceInterface $botRoleService,
         private readonly EventBroadcastScorer $scorer,
+        private readonly TelegramVenuePortraitService $venuePortraitService,
     ) {}
 
     // ---------------------------------------------------------------------
@@ -185,6 +187,65 @@ class TelegramChatBroadcastService
         }
 
         $this->broadcastRepository->touchLastRunAt($chat->id, $moment);
+    }
+
+    /**
+     * Пометить айтем очереди (портрет площадки) как опубликованный — claim-guarded,
+     * по item_id (у venue-поста нет event_id). В отличие от markSingleEventSentForChat
+     * НЕ двигает last_run_at: у портрета свой недельный каденс (по posted_at
+     * venue-айтемов), а не событийное расписание канала.
+     */
+    public function markItemSentForChat(int $itemId, string $claimToken, ?DateTimeInterface $moment = null): bool
+    {
+        return $this->broadcastItemRepository->markPostedIfClaimed($itemId, $claimToken, $moment);
+    }
+
+    /**
+     * Площадки города канала с готовым портретом (для пикера «Запостить площадку»
+     * в боте). Проверка прав — как у остальных bot-действий (resolveManagedChat).
+     *
+     * @return array<int, array{id:int, name:string}>
+     */
+    public function listVenuePortraitsForChat(int $telegramId, int $telegramChatId): array
+    {
+        [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
+        if (! $chat->city_id) {
+            return [];
+        }
+
+        return Venue::query()
+            ->active()
+            ->where('city_id', $chat->city_id)
+            ->whereNotNull('tg_portrait')
+            ->where('tg_portrait', '<>', '')
+            ->orderBy('name')
+            ->limit(200)
+            ->get(['id', 'name'])
+            ->map(fn (Venue $v) => ['id' => (int) $v->id, 'name' => (string) $v->name])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Ручная постановка портрета площадки из бота (кнопка). Проверка прав +
+     * защита от двойного поста (one-in-flight) внутри venuePortraitService.
+     */
+    public function enqueueVenuePortraitForChat(int $telegramId, int $telegramChatId, int $venueId, bool $force = false): TelegramChatBroadcastItem
+    {
+        [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
+        $broadcast = $this->broadcastRepository->getOrCreateByChatId($chat->id);
+
+        $reviewGate = (bool) config('services.bot.broadcast_review_gate');
+        $reviewer = $chat->owner?->telegram_id;
+
+        return $this->venuePortraitService->enqueueVenueManually(
+            (int) $broadcast->id,
+            $venueId,
+            now(),
+            $force,
+            $reviewGate,
+            $reviewer ? (int) $reviewer : null,
+        );
     }
 
     /**
@@ -354,10 +415,6 @@ class TelegramChatBroadcastService
         $tasks = [];
 
         foreach ($broadcasts as $broadcast) {
-            if (! $this->isSingleRunDue($broadcast, $now)) {
-                continue;
-            }
-
             $chat = $broadcast->chat;
             if (! $chat instanceof TelegramChat || ! $chat->telegram_chat_id) {
                 continue;
@@ -369,14 +426,47 @@ class TelegramChatBroadcastService
                 continue;
             }
 
+            $isVenue = $item->kind === TelegramChatBroadcastItem::KIND_VENUE;
+            $inReviewFlow = in_array($item->status, [
+                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                TelegramChatBroadcastItem::STATUS_APPROVED,
+                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+            ], true);
+
+            // Событийный pending/planned постится строго в СВОЁ окно расписания
+            // (isSingleRunDue). Портрет площадки (свой недельный каденс) и уже-в-полёте
+            // ревью-статусы доставляем независимо от событийного расписания.
+            if (! $isVenue && ! $inReviewFlow && ! $this->isSingleRunDue($broadcast, $now)) {
+                continue;
+            }
+
             $ownerTelegramId = $chat->owner?->telegram_id ?? null;
 
             $base = [
                 'item_id' => (int) $item->id,
                 'telegram_chat_id' => (int) $chat->telegram_chat_id,
-                'event_id' => (int) $item->event_id,
-                'template_code' => (string) $broadcast->template_code,
             ];
+            if ($isVenue) {
+                // Портрет площадки: готовый текст + НЕСКОЛЬКО обложек-прокси (альбом).
+                $photoUrls = $item->venue_id
+                    ? $this->venuePortraitService->venuePhotoUrls((int) $item->venue_id, 4)
+                    : [];
+                if ($photoUrls === [] && $item->photo_url) {
+                    $photoUrls = [(string) $item->photo_url];
+                }
+                $base += [
+                    'kind' => 'venue',
+                    'caption' => (string) $item->caption,
+                    'photo_url' => $photoUrls[0] ?? $item->photo_url,
+                    'photo_urls' => $photoUrls,
+                ];
+            } else {
+                $base += [
+                    'kind' => 'event',
+                    'event_id' => (int) $item->event_id,
+                    'template_code' => (string) $broadcast->template_code,
+                ];
+            }
 
             if ($item->status === TelegramChatBroadcastItem::STATUS_PENDING_REVIEW) {
                 // Превью ещё не отправлено → review-задача; уже отправлено → ждём решения/таймаута.
