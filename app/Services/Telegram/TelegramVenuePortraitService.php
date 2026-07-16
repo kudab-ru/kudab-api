@@ -220,7 +220,7 @@ class TelegramVenuePortraitService
             ->whereNotNull('tg_portrait')
             ->where('tg_portrait', '<>', '')
             ->when($exclude !== [], fn ($q) => $q->whereNotIn('id', $exclude))
-            ->get(['id', 'name', 'tg_portrait']);
+            ->get(['id', 'name', 'tg_portrait', 'street', 'house', 'address', 'latitude', 'longitude']);
 
         if ($eligible->isEmpty()) {
             return null;
@@ -238,12 +238,17 @@ class TelegramVenuePortraitService
      */
     public function buildVenueCaption(Venue $venue, Carbon $now): string
     {
-        $lines = [
-            '🏛 <b>'.$this->esc((string) $venue->name).'</b>',
-            '',
-            $this->esc(trim((string) $venue->tg_portrait)),
-            '',
-        ];
+        $lines = ['🏛 <b>'.$this->esc((string) $venue->name).'</b>'];
+
+        // Адрес-ссылка на карту под названием (короткий: улица+дом, не «394036, обл, г…»)
+        $addr = $this->shortAddress($venue);
+        if ($addr !== '') {
+            $lines[] = '📍 <a href="'.$this->mapsUrl($venue).'">'.$this->esc($addr).'</a>';
+        }
+
+        $lines[] = '';
+        $lines[] = $this->esc(trim((string) $venue->tg_portrait));
+        $lines[] = '';
 
         $next = $this->nextEvent((int) $venue->id, $now);
         if ($next) {
@@ -262,6 +267,39 @@ class TelegramVenuePortraitService
     private function esc(string $s): string
     {
         return htmlspecialchars($s, ENT_NOQUOTES, 'UTF-8');
+    }
+
+    /** Короткий адрес: улица+дом; иначе адрес без индекса/области/города, обрезанный. */
+    private function shortAddress(Venue $venue): string
+    {
+        $street = trim((string) ($venue->street ?? ''));
+        $house = trim((string) ($venue->house ?? ''));
+        if ($street !== '') {
+            return $house !== '' ? $street.', '.$house : $street;
+        }
+        $addr = trim((string) ($venue->address ?? ''));
+        if ($addr === '') {
+            return '';
+        }
+        $addr = (string) preg_replace('/^\s*\d{5,6}\s*,\s*/u', '', $addr);          // индекс
+        $addr = (string) preg_replace('/^[^,]*\bобл[^,]*,\s*/ui', '', $addr);        // область
+        $addr = (string) preg_replace('/^\s*г\.?\s+[^,]+,\s*/ui', '', $addr);        // город
+        $addr = trim($addr, " ,");
+
+        return mb_strlen($addr) > 60 ? mb_substr($addr, 0, 57).'…' : $addr;
+    }
+
+    /** Ссылка на Яндекс.Карты: по координатам (если есть) или по адресу/названию. */
+    private function mapsUrl(Venue $venue): string
+    {
+        if ($venue->latitude !== null && $venue->longitude !== null) {
+            $ll = ((string) $venue->longitude).','.((string) $venue->latitude);
+
+            return 'https://yandex.ru/maps/?ll='.$ll.'&z=17&pt='.$ll;
+        }
+        $q = trim((string) ($venue->address ?: $venue->name));
+
+        return 'https://yandex.ru/maps/?text='.rawurlencode($q);
     }
 
     /** Ближайшее будущее видимое событие площадки. */
