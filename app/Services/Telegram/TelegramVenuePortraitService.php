@@ -45,6 +45,9 @@ class TelegramVenuePortraitService
     /** Каденс канала: не чаще одного портрета в N дней (≈ раз в неделю). */
     private const WEEKLY_COOLDOWN_DAYS = 7;
 
+    /** Название+адрес ≤ этой длины (символов) — склеиваем в одну строку шапки. */
+    private const HEADER_ONE_LINE_MAX = 42;
+
     private const MONTHS = [
         1 => 'января', 2 => 'февраля', 3 => 'марта', 4 => 'апреля', 5 => 'мая', 6 => 'июня',
         7 => 'июля', 8 => 'августа', 9 => 'сентября', 10 => 'октября', 11 => 'ноября', 12 => 'декабря',
@@ -238,12 +241,18 @@ class TelegramVenuePortraitService
      */
     public function buildVenueCaption(Venue $venue, Carbon $now): string
     {
-        $lines = ['🏛 <b>'.$this->esc((string) $venue->name).'</b>'];
-
-        // Адрес-ссылка на карту под названием (короткий: улица+дом, не «394036, обл, г…»)
+        $name = $this->esc((string) $venue->name);
         $addr = $this->shortAddress($venue);
-        if ($addr !== '') {
-            $lines[] = '📍 <a href="'.$this->mapsUrl($venue).'">'.$this->esc($addr).'</a>';
+        $addrLink = $addr !== '' ? '📍 <a href="'.$this->mapsUrl($venue).'">'.$this->esc($addr).'</a>' : '';
+
+        // Короткие название+адрес — в одну строку; иначе адрес отдельной строкой.
+        if ($addrLink !== '' && (mb_strlen((string) $venue->name) + mb_strlen($addr)) <= self::HEADER_ONE_LINE_MAX) {
+            $lines = ['🏛 <b>'.$name.'</b>  ·  '.$addrLink];
+        } else {
+            $lines = ['🏛 <b>'.$name.'</b>'];
+            if ($addrLink !== '') {
+                $lines[] = $addrLink;
+            }
         }
 
         $lines[] = '';
