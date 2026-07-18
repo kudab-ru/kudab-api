@@ -239,6 +239,9 @@ class VenuesController extends Controller
         $rows = Venue::query()
             ->active()
             ->whereNotNull('location')
+            // Не отдаём площадки-сироты без города: их координаты оказываются в чужих
+            // городах (Казань/СПб) и «протекают» на карту, когда ?city не передан.
+            ->whereNotNull('city_id')
             ->when($cityId !== null, fn ($qq) => $qq->where('city_id', $cityId))
             ->select('id', 'slug', 'name', 'kind', 'latitude', 'longitude')
             ->get();
