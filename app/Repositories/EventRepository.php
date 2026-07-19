@@ -3,8 +3,11 @@
 namespace App\Repositories;
 
 use Illuminate\Support\Str;
+use App\Models\Community;
 use App\Models\Event;
+use App\Models\Venue;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -1353,6 +1356,164 @@ class EventRepository
         });
 
         return $events;
+    }
+
+    /**
+     * Канонический web-скелет видимости для лент/рейлов: select events.* +
+     * city_slug, join active-city, not-deleted, окно PAST_LOOKBACK_DAYS (future),
+     * past/img/gray суб-ранги, blacklist- и taxonomy-гейты. НЕ ставит city_id и
+     * ORDER BY — это делает вызывающий. Пока используется только companions();
+     * relatedByInterests/paginateUpcomingWeb на него НЕ переведены намеренно (они
+     * покрыты тестами ленты — вынос это отдельный cleanup, не смешиваем с фичей).
+     */
+    private function webVisibleBaseQuery(): Builder
+    {
+        $nowMsk = now('Europe/Moscow');
+        $fromDateMsk = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS)->toDateString();
+        $cutoffTs = $nowMsk->copy()->subDays(self::PAST_LOOKBACK_DAYS);
+
+        $q = Event::query()
+            ->select('events.*', 'ct.slug as city_slug')
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
+            ->whereNull('events.deleted_at')
+            ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
+                $w->where('events.start_time', '>=', $cutoffTs)
+                    ->orWhere(function ($x) use ($fromDateMsk) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $fromDateMsk);
+                    });
+            });
+
+        $this->addPastFlags($q);
+        $this->addGrayRank($q);
+        $this->addImgRank($q);
+        $this->excludeBlacklistedSources($q);
+        $this->applyMainFeedTaxonomyFilter($q, []);
+
+        return $q;
+    }
+
+    /**
+     * Web: «соседи» события по оси площадка/организатор (НЕ по интересам, как
+     * relatedByInterests — это отдельное измерение). venue-first: есть venue_id →
+     * события той же площадки; иначе — того же community_id (у 100% событий он
+     * есть). Исключаем само событие и все события того же event_group_id (это
+     * повторы того же события — не соседи). Видимость — webVisibleBaseQuery,
+     * порядок — ближайшая дата. Пустой/несуществующий id → items пуст, scope
+     * (если знаем) отдаём для заголовка; фронт скрывает рейл при пустом data.
+     *
+     * @return array{
+     *   items: EloquentCollection,
+     *   scope: 'venue'|'community'|null,
+     *   label: ?string,
+     *   venue: ?array{id:int,slug:string,name:string,kind:?string},
+     *   community_name: ?string
+     * }
+     */
+    public function companions(int $eventId, int $limit = 10): array
+    {
+        $empty = ['items' => new EloquentCollection, 'scope' => null, 'label' => null, 'venue' => null, 'community_name' => null];
+
+        $limit = max(1, min($limit, 12));
+
+        $base = Event::query()
+            ->whereNull('deleted_at')
+            ->select('id', 'city_id', 'venue_id', 'community_id', 'event_group_id')
+            ->find($eventId);
+
+        if ($base === null) {
+            return $empty;
+        }
+
+        if ($base->venue_id !== null) {
+            $scope = 'venue';
+        } elseif ($base->community_id !== null && ! $this->communityIsAggregator((int) $base->community_id)) {
+            // fallback на организатора ТОЛЬКО для реальных пабликов; у агрегатора
+            // (Я.Афиша/Qtickets) «ещё у организатора» = случайная лента фида — шум
+            $scope = 'community';
+        } else {
+            return $empty; // ни площадки, ни реального организатора — соседей нет
+        }
+
+        $q = $this->webVisibleBaseQuery()
+            ->where('events.id', '<>', $eventId)
+            ->with([
+                'venue:id,slug,name,kind',
+                'interests:id,slug,name',
+            ]);
+
+        if ($scope === 'venue') {
+            $q->where('events.venue_id', (int) $base->venue_id);
+        } else {
+            $q->where('events.community_id', (int) $base->community_id);
+        }
+
+        // повторы того же события (тот же event_group_id) — не соседи; события без
+        // группы оставляем (null group_id != текущая группа)
+        if ($base->event_group_id !== null) {
+            $groupId = (int) $base->event_group_id;
+            $q->where(function ($w) use ($groupId) {
+                $w->whereNull('events.event_group_id')
+                    ->orWhere('events.event_group_id', '<>', $groupId);
+            });
+        }
+
+        $q->orderBy('__past_rank', 'asc')
+            ->orderBy('__img_rank', 'asc')
+            ->orderBy('__gray_rank', 'asc')
+            ->orderByRaw('events.start_date asc nulls last')
+            ->orderByRaw('events.start_time asc nulls last')
+            ->orderBy('events.id', 'asc');
+
+        $items = $q->limit($limit)->get();
+        $this->hydrateImages($items);
+        $items->each(function ($e) {
+            $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank']);
+        });
+
+        if ($scope === 'venue') {
+            $venue = Venue::query()->select('id', 'slug', 'name', 'kind')->find((int) $base->venue_id);
+
+            return [
+                'items' => $items,
+                'scope' => 'venue',
+                'label' => 'Ещё на этой площадке',
+                'venue' => $venue ? [
+                    'id' => (int) $venue->id,
+                    'slug' => (string) ($venue->slug ?? ''),
+                    'name' => (string) ($venue->name ?? ''),
+                    'kind' => $venue->kind !== null ? (string) $venue->kind : null,
+                ] : null,
+                'community_name' => null,
+            ];
+        }
+
+        $communityName = Community::query()->whereKey((int) $base->community_id)->value('name');
+
+        return [
+            'items' => $items,
+            'scope' => 'community',
+            'label' => 'Ещё у организатора',
+            'venue' => null,
+            'community_name' => is_string($communityName) && $communityName !== '' ? $communityName : null,
+        ];
+    }
+
+    /**
+     * Community — агрегатор (Я.Афиша/Qtickets, verification_meta.final.kind=
+     * 'aggregator'), а не реальный организатор. Для агрегатора companion-фолбэк по
+     * community не имеет смысла: это общий фид, а не «события организатора».
+     */
+    private function communityIsAggregator(int $communityId): bool
+    {
+        $row = DB::table('communities')
+            ->where('id', $communityId)
+            ->selectRaw("verification_meta->'final'->>'kind' as kind")
+            ->first();
+
+        return is_object($row) && ($row->kind ?? null) === 'aggregator';
     }
 
     private function hydrateImages(EloquentCollection $events): void

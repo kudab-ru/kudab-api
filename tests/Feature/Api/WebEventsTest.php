@@ -607,6 +607,241 @@ class WebEventsTest extends TestCase
         $response->assertJsonMissing(['title' => 'Прошедшее']);
     }
 
+    /* ===================== companions (по площадке/организатору) ===================== */
+
+    public function test_companions_returns_same_venue_events(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $venue = $this->createVenue($msk->id, 'ДК Икс', 'dk-iks');
+
+        $base = $this->createEvent($msk->id, $community->id, 'База', now()->addDay(), $venue->id);
+        $this->createEvent($msk->id, $community->id, 'Сосед 1', now()->addDays(2), $venue->id);
+        $this->createEvent($msk->id, $community->id, 'Сосед 2', now()->addDays(3), $venue->id);
+
+        $response = $this->getJson("/api/web/events/{$base->id}/companions");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonPath('meta.scope', 'venue')
+            ->assertJsonPath('meta.label', 'Ещё на этой площадке')
+            ->assertJsonPath('meta.venue.id', $venue->id);
+
+        $response->assertJsonMissing(['title' => 'База']);
+    }
+
+    public function test_companions_falls_back_to_community_when_no_venue(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Театр Один');
+
+        // база без площадки → скоуп community
+        $base = $this->createEvent($msk->id, $community->id, 'База', now()->addDay());
+        $this->createEvent($msk->id, $community->id, 'От того же организатора', now()->addDays(2));
+
+        $response = $this->getJson("/api/web/events/{$base->id}/companions");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'От того же организатора')
+            ->assertJsonPath('meta.scope', 'community')
+            ->assertJsonPath('meta.label', 'Ещё у организатора')
+            ->assertJsonPath('meta.community_name', 'Театр Один');
+    }
+
+    public function test_companions_empty_for_aggregator_community_without_venue(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $agg = $this->createCommunity($msk->id, 'Яндекс.Афиша');
+        DB::table('communities')->where('id', $agg->id)->update([
+            'verification_meta' => json_encode(['final' => ['kind' => 'aggregator']]),
+        ]);
+
+        $base = $this->createEvent($msk->id, $agg->id, 'База', now()->addDay());
+        $this->createEvent($msk->id, $agg->id, 'Другое из фида', now()->addDays(2));
+
+        $response = $this->getJson("/api/web/events/{$base->id}/companions");
+
+        // агрегатор без площадки → фолбэка на «организатора» нет (это шум-лента), пусто
+        $response
+            ->assertOk()
+            ->assertJsonCount(0, 'data')
+            ->assertJsonPath('meta.scope', null);
+    }
+
+    public function test_companions_venue_scope_works_even_for_aggregator_source(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $agg = $this->createCommunity($msk->id, 'Яндекс.Афиша');
+        DB::table('communities')->where('id', $agg->id)->update([
+            'verification_meta' => json_encode(['final' => ['kind' => 'aggregator']]),
+        ]);
+        $venue = $this->createVenue($msk->id, 'ДК Икс', 'dk-iks');
+
+        $base = $this->createEvent($msk->id, $agg->id, 'База', now()->addDay(), $venue->id);
+        $this->createEvent($msk->id, $agg->id, 'Сосед на площадке', now()->addDays(2), $venue->id);
+
+        // площадка бьёт агрегатор-гейт: venue-scope работает даже если источник — агрегатор
+        $response = $this->getJson("/api/web/events/{$base->id}/companions");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Сосед на площадке')
+            ->assertJsonPath('meta.scope', 'venue');
+    }
+
+    public function test_companions_venue_first_ignores_other_venue_of_same_community(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $venueA = $this->createVenue($msk->id, 'Площадка А', 'ploshadka-a');
+        $venueB = $this->createVenue($msk->id, 'Площадка Б', 'ploshadka-b');
+
+        $base = $this->createEvent($msk->id, $community->id, 'База', now()->addDay(), $venueA->id);
+        $this->createEvent($msk->id, $community->id, 'Тоже на А', now()->addDays(2), $venueA->id);
+        $this->createEvent($msk->id, $community->id, 'На Б того же орга', now()->addDays(2), $venueB->id);
+
+        $response = $this->getJson("/api/web/events/{$base->id}/companions");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Тоже на А');
+
+        $response->assertJsonMissing(['title' => 'На Б того же орга']);
+    }
+
+    public function test_companions_excludes_self_and_same_event_group(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $venue = $this->createVenue($msk->id, 'ДК Икс', 'dk-iks');
+
+        $base = $this->createEvent($msk->id, $community->id, 'База', now()->addDay(), $venue->id);
+        // повтор того же события (тот же event_group_id) — не сосед
+        $repeat = $this->createEvent($msk->id, $community->id, 'База (повтор)', now()->addDays(5), $venue->id);
+        $gid = DB::table('event_groups')->insertGetId([
+            'community_id' => $community->id,
+            'city_id' => $msk->id,
+            'group_key' => 'test-companions-grp',
+            'title_norm' => 'база',
+            'current_event_id' => $base->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('events')->whereIn('id', [$base->id, $repeat->id])->update(['event_group_id' => $gid]);
+
+        $this->createEvent($msk->id, $community->id, 'Настоящий сосед', now()->addDays(2), $venue->id);
+
+        $response = $this->getJson("/api/web/events/{$base->id}/companions");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Настоящий сосед');
+
+        $response->assertJsonMissing(['title' => 'База (повтор)']);
+        $response->assertJsonMissing(['title' => 'База']);
+    }
+
+    public function test_companions_excludes_past_events(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 3, 22, 12, 0, 0, 'Europe/Moscow'));
+
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $venue = $this->createVenue($msk->id, 'ДК Икс', 'dk-iks');
+
+        $base = $this->createEvent($msk->id, $community->id, 'База', Carbon::create(2026, 3, 23, 18, 0, 0, 'Europe/Moscow'), $venue->id);
+        // -10 дней от now → вне future-окна (PAST_LOOKBACK_DAYS=7)
+        $this->createEvent($msk->id, $community->id, 'Прошедшее', Carbon::create(2026, 3, 12, 18, 0, 0, 'Europe/Moscow'), $venue->id);
+        $this->createEvent($msk->id, $community->id, 'Будущее', Carbon::create(2026, 3, 24, 18, 0, 0, 'Europe/Moscow'), $venue->id);
+
+        $response = $this->getJson("/api/web/events/{$base->id}/companions");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Будущее');
+
+        $response->assertJsonMissing(['title' => 'Прошедшее']);
+    }
+
+    public function test_companions_respects_main_feed_taxonomy_filter(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $venue = $this->createVenue($msk->id, 'ДК Икс', 'dk-iks');
+
+        $base = $this->createEvent($msk->id, $community->id, 'База', now()->addDay(), $venue->id);
+
+        $kids = $this->createEvent($msk->id, $community->id, 'Детское', now()->addDays(2), $venue->id);
+        $this->setTaxonomy($kids->id, 'kids', 'culture');
+
+        $adult = $this->createEvent($msk->id, $community->id, 'Взрослое', now()->addDays(2), $venue->id);
+        $this->setTaxonomy($adult->id, 'general', 'entertainment');
+
+        $response = $this->getJson("/api/web/events/{$base->id}/companions");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Взрослое');
+
+        $response->assertJsonMissing(['title' => 'Детское']);
+    }
+
+    public function test_companions_empty_when_only_self_at_venue(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $venue = $this->createVenue($msk->id, 'ДК Икс', 'dk-iks');
+
+        $base = $this->createEvent($msk->id, $community->id, 'База', now()->addDay(), $venue->id);
+
+        $response = $this->getJson("/api/web/events/{$base->id}/companions");
+
+        // соседей нет, но скоуп известен — data пуст, meta заполнен (фронт скрывает рейл)
+        $response
+            ->assertOk()
+            ->assertJsonCount(0, 'data')
+            ->assertJsonPath('meta.scope', 'venue');
+    }
+
+    public function test_companions_nonexistent_id_returns_empty_not_404(): void
+    {
+        $response = $this->getJson('/api/web/events/999999/companions');
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(0, 'data')
+            ->assertJsonPath('meta.scope', null);
+    }
+
+    public function test_companions_orders_by_nearest_date(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $venue = $this->createVenue($msk->id, 'ДК Икс', 'dk-iks');
+
+        $base = $this->createEvent($msk->id, $community->id, 'База', now()->addDay(), $venue->id);
+        $this->createEvent($msk->id, $community->id, 'Через 4 дня', now()->addDays(4), $venue->id);
+        $this->createEvent($msk->id, $community->id, 'Через 2 дня', now()->addDays(2), $venue->id);
+        $this->createEvent($msk->id, $community->id, 'Через 3 дня', now()->addDays(3), $venue->id);
+
+        $response = $this->getJson("/api/web/events/{$base->id}/companions");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(3, 'data')
+            ->assertJsonPath('data.0.title', 'Через 2 дня')
+            ->assertJsonPath('data.1.title', 'Через 3 дня')
+            ->assertJsonPath('data.2.title', 'Через 4 дня');
+    }
+
     /* ===================== helpers ===================== */
 
     private function createInterest(string $name, string $slug, ?int $parentId = null): Interest

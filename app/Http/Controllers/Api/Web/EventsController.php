@@ -458,6 +458,31 @@ class EventsController extends Controller
     }
 
     /**
+     * GET /api/web/events/{id}/companions
+     * «Соседи» события по оси площадка/организатор (venue-first, иначе community) —
+     * отдельное измерение от /related (интересы). Тот же формат карточки.
+     * meta.label — готовый заголовок рейла; meta.venue/community_name — для see-all.
+     * Пустой/несуществующий id → data:[] + meta.scope:null, HTTP 200 (блок скрыт).
+     */
+    public function companions(int $id, Request $request): JsonResponse
+    {
+        $limit = (int) $request->input('limit', 10);
+        $limit = max(8, min($limit, 12));
+
+        $res = $this->service->companionsWeb($id, $limit);
+
+        return response()->json([
+            'data' => WebEventResource::collection($res['items']),
+            'meta' => [
+                'scope' => $res['scope'],
+                'label' => $res['label'],
+                'venue' => $res['venue'],
+                'community_name' => $res['community_name'],
+            ],
+        ]);
+    }
+
+    /**
      * Polymorphic правило: каждый элемент interests[] — либо положительный int
      * (legacy ID), либо kebab-slug (Этап 2). Mixed-array режектится отдельно
      * через rejectMixedInterests(), чтобы upgrade-путь оставался простым:

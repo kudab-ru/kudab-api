@@ -65,6 +65,19 @@ class EventService
     }
 
     /**
+     * Web: «соседи» события по площадке/организатору (venue-first, иначе community).
+     * Отдельная ось от relatedWeb (интересы). Возвращает items + meta (scope/label/
+     * venue/community_name) — контроллер раскладывает в data+meta. Пустой items —
+     * штатно (фронт скрывает рейл).
+     *
+     * @return array{items: EloquentCollection, scope: 'venue'|'community'|null, label: ?string, venue: ?array, community_name: ?string}
+     */
+    public function companionsWeb(int $id, int $limit = 10): array
+    {
+        return $this->repo->companions($id, $limit);
+    }
+
+    /**
      * Web: получить группу целиком (ленивая подгрузка для карусели).
      * Возвращаем items в том же формате, что /web/events (через WebEventResource на контроллере).
      */
