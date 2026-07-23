@@ -452,6 +452,10 @@ class EventRepository
             ->select('events.*', 'ct.slug as city_slug')
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
             ->where('ct.status', 'active')
+            // не публикуем needs_geo: гео не определено → событие садится на центроид города
+            // (неверное место + дубли реальных версий из других пабликов). Паритет с /map и
+            // /random. hq:autofix ночью промоутит их в active по мере резолва адреса.
+            ->where('events.status', 'active')
             ->whereNull('events.deleted_at')
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
                 $w->where('events.start_time', '>=', $cutoffTs)
