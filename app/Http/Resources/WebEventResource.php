@@ -130,6 +130,12 @@ class WebEventResource extends JsonResource
 
             'is_past' => (bool) ($this->getAttribute('__is_past') ?? false),
 
+            // event_group_id — стабильный ключ серии для кросс-секционного дедупа на
+            // главной (useHomeDedup). Отдаём ВСЕГДА (не только когда собран group-объект
+            // под collapseGroups), иначе одна серия рисуется разными карточками в
+            // hero/«Куда на выходных» — у представителя серии в каждом окне свой events.id.
+            'event_group_id' => $gid > 0 ? $gid : null,
+
             'group' => $group,
 
             'interests' => $interests,
