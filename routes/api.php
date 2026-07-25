@@ -131,6 +131,17 @@ Route::prefix('admin/sources/yandex-afisha')
         Route::post('scan', [AdminYandexAfishaController::class, 'scan'])->middleware('throttle:20,1');
     });
 
+// Управление VPN-прокси (xray failover) — ТОЛЬКО суперадмин (2b). Пишет
+// proxy_configs; хост-applier (systemd-timer, root) читает и применяет к xray.
+// Секрет подписки не отдаётся наружу (см. AdminProxyController).
+Route::prefix('admin/proxy')
+    ->middleware(['auth:sanctum', 'role:superadmin'])
+    ->group(function () {
+        Route::get('/', [\App\Http\Controllers\Api\Admin\AdminProxyController::class, 'index']);
+        Route::put('/', [\App\Http\Controllers\Api\Admin\AdminProxyController::class, 'update']);
+        Route::post('apply', [\App\Http\Controllers\Api\Admin\AdminProxyController::class, 'apply'])->middleware('throttle:20,1');
+    });
+
 Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('sitemap/events', [WebSitemapController::class, 'events']);
 
