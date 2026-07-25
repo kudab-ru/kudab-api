@@ -26,6 +26,14 @@ class EventRepository
      */
     public const PAST_LOOKBACK_DAYS = 7;
 
+    /**
+     * Порог «событие в области, а не в городе» (метры от центра города события).
+     * Агрегаторы (Qtickets) ставят city_id=Воронеж событиям в райцентрах за 50-100 км —
+     * coords реальные, city_id это город-скоуп. Такие опускаем вниз ленты (__region_rank),
+     * не трогая city_id/фильтры. 30 км: пригороды (Рамонь/Н.Усмань) остаются, райцентры — вниз.
+     */
+    private const REGION_FAR_METERS = 30000;
+
     private ?bool $hasTrgm = null;
     private ?bool $hasWordSim = null;
 
@@ -470,6 +478,7 @@ class EventRepository
         $this->addPastFlags($q); // __past_rank + __is_past
         $this->addGrayRank($q);
         $this->addImgRank($q);
+        $this->addRegionRank($q); // __region_rank: далёкие (область) вниз ленты
 
         $this->excludeBlacklistedSources($q);
         $this->applyMainFeedTaxonomyFilter($q, $filters);
@@ -481,13 +490,15 @@ class EventRepository
             // а ORDER BY __top_score ранжирует уже представителей групп.
             $this->addTopScore($q);
             $q->orderBy('__past_rank', 'asc')
+                ->orderBy('__region_rank', 'asc') // область (далёкие) вниз
                 ->orderByRaw('__top_score desc')
                 ->orderByRaw('events.start_date asc nulls last')
                 ->orderByRaw('events.start_time asc nulls last')
                 ->orderBy('events.id', 'asc');
         } else {
-            // По умолчанию — хронология: past -> image -> gray -> дата
+            // По умолчанию — хронология: past -> область -> image -> gray -> дата
             $q->orderBy('__past_rank', 'asc')
+                ->orderBy('__region_rank', 'asc') // область (далёкие) вниз
                 ->orderBy('__img_rank', 'asc')
                 ->orderBy('__gray_rank', 'asc')
                 ->orderByRaw('events.start_date asc nulls last')
@@ -1763,6 +1774,21 @@ class EventRepository
     private function addImgRank($q): void
     {
         $q->selectRaw('CASE WHEN '.$this->hasPhotoSql().' THEN 0 ELSE 1 END as __img_rank');
+    }
+
+    /**
+     * __region_rank: 0 — событие в пределах REGION_FAR_METERS от центра СВОЕГО города
+     * (events.city_id → cities.location), 1 — дальше (райцентр/область). Опускает далёкие
+     * события вниз ленты, сортируется сразу после __past_rank (near-future → far-future →
+     * past). location у active-события всегда есть; NULL-гео трактуем как «в городе» (0).
+     */
+    private function addRegionRank($q): void
+    {
+        $q->selectRaw(
+            'CASE WHEN events.location IS NOT NULL AND ct.location IS NOT NULL '
+            .'AND ST_DistanceSphere(events.location, ct.location) > ? THEN 1 ELSE 0 END as __region_rank',
+            [self::REGION_FAR_METERS]
+        );
     }
 
     /**
