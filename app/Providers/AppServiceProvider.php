@@ -19,6 +19,7 @@ use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
+use Symfony\Component\HttpFoundation\IpUtils;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -41,6 +42,19 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         RateLimiter::for('web', function (Request $request) {
+            // Вне прода лимита нет вовсе — он только мешает разработке.
+            if (! $this->app->isProduction()) {
+                return Limit::none();
+            }
+
+            // SSR Nuxt ходит в API из внутренней сети докера: у всех посетителей
+            // это один адрес, общий счётчик выбирался бы мгновенно. Подставить
+            // такой адрес снаружи нельзя — наружу открыт только nginx, а до PHP
+            // запрос доходит по fastcgi с настоящим REMOTE_ADDR.
+            if (IpUtils::isPrivateIp((string) $request->ip())) {
+                return Limit::none();
+            }
+
             return Limit::perMinute(60)->by($request->ip());
         });
     }
