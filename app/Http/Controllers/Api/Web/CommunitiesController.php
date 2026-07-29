@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\Web;
 
 use App\Http\Resources\WebCommunityResource;
+use App\Http\Resources\WebCommunityStatusResource;
 use App\Models\City;
 use App\Models\Community;
 use Illuminate\Http\JsonResponse;
@@ -40,6 +41,28 @@ class CommunitiesController extends Controller
         'timepad', 'ponominalu', 'ticketland', 'radario', 'intickets',
         'bezantrakta', 'nethouse.events', 'afishagoroda',
     ];
+
+    /**
+     * Одно сообщество для потока «добавь своё сообщество» (виджет статуса на фронте).
+     *
+     * Раньше этот публичный маршрут вёл в AdminCommunitiesController::show:
+     * withTrashed() + Admin\CommunityResource, то есть без авторизации наружу
+     * уходили verification_meta, last_checked_at, deleted_at и сами удалённые записи.
+     * Тот же метод в админской группе закрыт auth:sanctum + role — один метод
+     * отдавался и по паролю, и без него.
+     *
+     * Здесь: без withTrashed() (удалённое отвечает 404) и через публичный ресурс.
+     */
+    public function show(Request $request, int $id): JsonResponse
+    {
+        $community = Community::query()
+            ->with(['city:id,name,slug'])
+            ->findOrFail($id);
+
+        return response()->json([
+            'data' => (new WebCommunityStatusResource($community))->toArray($request),
+        ]);
+    }
 
     public function index(Request $request): JsonResponse
     {

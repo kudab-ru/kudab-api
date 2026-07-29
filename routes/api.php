@@ -175,7 +175,11 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('communities', [WebCommunitiesController::class, 'index']);
 
     Route::post('communities/import', [AdminCommunitiesController::class, 'import']);
-    Route::get('communities/{id}', [AdminCommunitiesController::class, 'show'])->whereNumber('id');
+    // Публичный ответ по сообществу — через ВЕБ-контроллер и веб-ресурс.
+    // Раньше здесь стоял AdminCommunitiesController::show: тот же метод, что в
+    // админской группе за auth:sanctum + role, только без авторизации — и он отдавал
+    // withTrashed() + verification_meta / last_checked_at / deleted_at.
+    Route::get('communities/{id}', [WebCommunitiesController::class, 'show'])->whereNumber('id');
     Route::post('communities/{id}/verify', [AdminCommunitiesController::class, 'verify'])->whereNumber('id');
 });
 
