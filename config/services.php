@@ -47,6 +47,13 @@ return [
         // авто-пост по таймауту. Включать на проде после деплоя бота с веткой по type.
         'broadcast_review_gate' => (bool) env('BROADCAST_REVIEW_GATE_ENABLED', false),
         'broadcast_review_timeout_minutes' => (int) env('BROADCAST_REVIEW_TIMEOUT_MINUTES', 120),
+
+        // Придержка айтема после постановки в очередь: за это окно парсер успевает
+        // написать ТГ-текст дорогой моделью (parser:tg:describe-due, everyMinute).
+        // Бот физически не может забрать айтем раньше — findActiveForBroadcast не
+        // отдаёт pending/planned с будущим planned_at. Если парсер лёг, придержка
+        // истекает сама и пост уходит со старым description: деградация пассивная.
+        'broadcast_text_grace_minutes' => (int) env('BROADCAST_TEXT_GRACE_MINUTES', 6),
     ],
 
     'vk' => [

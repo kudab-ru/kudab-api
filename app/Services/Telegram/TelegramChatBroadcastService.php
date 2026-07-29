@@ -426,6 +426,12 @@ class TelegramChatBroadcastService
                 continue;
             }
 
+            // Придержка на время генерации текста: pending/planned репозиторий и так не
+            // отдаёт, но ревью-статусы он отдаёт мимо planned_at — закрываем здесь.
+            if ($item->planned_at !== null && $item->planned_at->isFuture()) {
+                continue;
+            }
+
             $isVenue = $item->kind === TelegramChatBroadcastItem::KIND_VENUE;
             $inReviewFlow = in_array($item->status, [
                 TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
@@ -612,16 +618,29 @@ class TelegramChatBroadcastService
                         $eventId,
                         (int) $reviewerTelegramId,
                         $deadline,
+                        $now->copy()->addMinutes($this->textGraceMinutes()),
                     );
                 }
             } elseif (! $dryRun) {
-                $this->broadcastItemRepository->enqueue($broadcast->id, $eventId, null);
+                // придержка на время генерации ТГ-текста; снимает её парсер, а если
+                // не успел — она истекает сама и пост уходит со старым description
+                $this->broadcastItemRepository->enqueue(
+                    $broadcast->id,
+                    $eventId,
+                    $now->copy()->addMinutes($this->textGraceMinutes()),
+                );
             }
 
             $summary['enqueued']++;
         }
 
         return $summary;
+    }
+
+    /** Сколько минут держим айтем, пока парсер пишет ТГ-текст. */
+    private function textGraceMinutes(): int
+    {
+        return max(0, (int) config('services.bot.broadcast_text_grace_minutes', 6));
     }
 
     /**

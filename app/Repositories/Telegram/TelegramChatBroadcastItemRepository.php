@@ -74,6 +74,7 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         int $eventId,
         int $reviewerTelegramId,
         DateTimeInterface $deadlineAt,
+        ?DateTimeInterface $plannedAt = null,
     ): TelegramChatBroadcastItem {
         $existing = $this->findByBroadcastAndEvent($broadcastId, $eventId);
         if ($existing) {
@@ -86,6 +87,8 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         $item->status = TelegramChatBroadcastItem::STATUS_PENDING_REVIEW;
         $item->review_reviewer_telegram_id = $reviewerTelegramId;
         $item->review_deadline_at = $deadlineAt;
+        // придержка на время генерации текста: превью ревьюеру должно уйти уже с ним
+        $item->planned_at = $plannedAt;
         $item->save();
 
         return $item->refresh();

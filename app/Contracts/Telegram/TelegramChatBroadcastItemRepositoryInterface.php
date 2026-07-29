@@ -57,6 +57,7 @@ interface TelegramChatBroadcastItemRepositoryInterface
         int $eventId,
         int $reviewerTelegramId,
         DateTimeInterface $deadlineAt,
+        ?DateTimeInterface $plannedAt = null,
     ): TelegramChatBroadcastItem;
 
     /**
