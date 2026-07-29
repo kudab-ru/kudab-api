@@ -30,6 +30,11 @@ class EventsController extends Controller
             'date_from'    => ['sometimes','date'],
             'date_to'      => ['sometimes','date'],
 
+            // Отбор по времени ПОПАДАНИЯ события к нам, а не по времени самого
+            // события: «сколько анонсов добавилось за сутки». Отдельно от date_from,
+            // потому что вопросы разные и в одном запросе могут стоять оба.
+            'created_from' => ['sometimes','date'],
+
             'when'         => ['sometimes', Rule::in(['today','now','weekend'])],
             'free'         => ['sometimes','boolean'],
 

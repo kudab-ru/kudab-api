@@ -510,6 +510,13 @@ class EventRepository
             $q->where('events.city_id', (int) $filters['city_id']);
         }
 
+        // Когда событие ПОПАЛО К НАМ, а не когда оно идёт. Нужен для счётчика
+        // «за сутки добавили N анонсов»: date_from/date_to фильтруют по времени
+        // самого события и на этот вопрос ответить не могут.
+        if (!empty($filters['created_from'])) {
+            $q->where('events.created_at', '>=', $filters['created_from']);
+        }
+
         if (!empty($filters['date_from'])) {
             $fromDate = substr((string) $filters['date_from'], 0, 10);
 
