@@ -7,6 +7,7 @@ use App\Http\Requests\Admin\Events\AdminEventsStoreRequest;
 use App\Http\Requests\Admin\Events\AdminEventsUpdateRequest;
 use App\Http\Resources\Admin\EventResource as AdminEventResource;
 use App\Models\Event;
+use App\Services\Text\TextLock;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -182,6 +183,7 @@ class AdminEventsController extends Controller
                      'external_url','status',
                      'latitude','longitude','house_fias_id','original_post_id',
                      'address','city','description','title',
+                     'short_description','tg_description',
                  ] as $field) {
             if (array_key_exists($field, $data)) {
                 $event->{$field} = $data[$field];
@@ -226,6 +228,7 @@ class AdminEventsController extends Controller
                      'external_url','status',
                      'latitude','longitude','house_fias_id','original_post_id',
                      'address','city','description','title',
+                     'short_description','tg_description',
                  ] as $field) {
             if (array_key_exists($field, $data)) {
                 $event->{$field} = $data[$field];
@@ -237,6 +240,12 @@ class AdminEventsController extends Controller
         }
 
         $event->save();
+
+        // руками правленный текст парсер больше не переписывает; пустое значение
+        // снимает отметку и возвращает поле движку
+        TextLock::apply('events', $event->id, array_intersect_key($data, array_flip([
+            'description', 'short_description', 'tg_description',
+        ])));
 
         if ($hasInterests) {
             $event->interests()->sync($interestIds);

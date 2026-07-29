@@ -61,7 +61,10 @@ class BroadcastEnqueueDueTest extends TestCase
         $items = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->get();
         $this->assertCount(1, $items);
         $this->assertSame($soon->id, (int) $items->first()->event_id, 'должно выбраться ближайшее событие');
-        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $items->first()->status);
+        // айтем встаёт под придержкой: за это окно парсер пишет ТГ-текст, и только
+        // потом бот его забирает (см. broadcast_text_grace_minutes)
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PLANNED, $items->first()->status);
+        $this->assertTrue($items->first()->planned_at->isFuture(), 'придержка должна быть в будущем');
     }
 
     public function test_skips_channel_with_pending_item_in_queue(): void
@@ -188,7 +191,7 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertSame(1, $summary['enqueued']);
         $picked = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
-            ->where('status', TelegramChatBroadcastItem::STATUS_PENDING)
+            ->where('status', TelegramChatBroadcastItem::STATUS_PLANNED)
             ->first();
         $this->assertSame($lecture->id, (int) $picked->event_id, 'cross-time: свежий заголовок предпочтительнее');
     }
@@ -213,7 +216,7 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertSame(1, $summary['enqueued']);
         $picked = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
-            ->where('status', TelegramChatBroadcastItem::STATUS_PENDING)
+            ->where('status', TelegramChatBroadcastItem::STATUS_PLANNED)
             ->first();
         $this->assertSame($newConcert->id, (int) $picked->event_id);
     }

@@ -8,6 +8,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use App\Services\Text\TextLock;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -74,6 +75,9 @@ class AdminVenuesController extends Controller
             'name' => ['sometimes', 'string', 'min:2', 'max:255'],
             // правка текста адреса; точку на карте НЕ двигает (гео — из резолверов)
             'address' => ['sometimes', 'nullable', 'string', 'max:500'],
+            // тексты площадки, которые пишет LLM: ручная правка перекрывает генерацию
+            'description' => ['sometimes', 'nullable', 'string', 'max:2000'],
+            'tg_portrait' => ['sometimes', 'nullable', 'string', 'max:2000'],
         ]);
         abort_if($data === [], 422, 'Нечего обновлять');
 
@@ -82,13 +86,15 @@ class AdminVenuesController extends Controller
 
         DB::table('venues')->where('id', $id)->update($data + ['updated_at' => now()]);
 
+        TextLock::apply('venues', $id, array_intersect_key($data, array_flip(['description', 'tg_portrait'])));
+
         Log::info('admin:venues:update', [
             'actor_id' => $request->user()?->id,
             'venue_id' => $id,
             'fields' => array_keys($data),
         ]);
 
-        return response()->json(['data' => DB::table('venues')->where('id', $id)->first(['id', 'name', 'address'])]);
+        return response()->json(['data' => DB::table('venues')->where('id', $id)->first(['id', 'name', 'address', 'description', 'tg_portrait'])]);
     }
 
     /**

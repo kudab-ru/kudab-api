@@ -13,6 +13,10 @@ class AdminEventsUpdateRequest extends FormRequest
         return [
             'title' => ['sometimes','string','max:255'],
             'description' => ['sometimes','nullable','string'],
+            // тексты, которые пишет LLM: ручная правка перекрывает генерацию
+            // (контроллер ставит lock в text_meta, парсер такие поля не трогает)
+            'short_description' => ['sometimes','nullable','string','max:1000'],
+            'tg_description' => ['sometimes','nullable','string','max:1000'],
 
             'community_id' => ['sometimes','nullable','integer','min:1'],
             'city_id' => ['sometimes','nullable','integer','min:1'],
