@@ -95,6 +95,48 @@ class WebInterestsTest extends TestCase
         $this->assertSame(3, $jazzAll['events_count'], 'no scope should count 3 events');
     }
 
+    /**
+     * events_count обещает «сколько ПРЕДСТОЯЩИХ событий темы я увижу, кликнув по ней»,
+     * и считается тем же скоупом видимости, что лента. Тест закрепляет ровно те условия,
+     * по которым счётчик разъезжался с лентой: на «Кино» чип обещал 20, лента отдавала
+     * 12 карточек, из них не прошедших — 8.
+     */
+    public function test_events_count_counts_only_upcoming_and_feed_visible(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $cinema = $this->createInterest('Кино', 'cinema');
+        $com = $this->createCommunity($vrn->id, 'Киноклуб');
+
+        // считается
+        $ok = $this->createEvent($vrn->id, $com->id, 'Завтрашний показ', now()->addDay());
+
+        // не считается: уже прошло (лента такие ещё показывает 7 дней, но внизу и приглушённо)
+        $past = $this->createEvent($vrn->id, $com->id, 'Вчерашний показ', now()->subDay());
+
+        // не считается: статус не active (needs_geo не публикуются)
+        $needsGeo = $this->createEvent($vrn->id, $com->id, 'Без координат', now()->addDay());
+        $needsGeo->status = 'needs_geo';
+        $needsGeo->save();
+
+        // не считается: детский профиль — вне общегородской ленты
+        $kids = $this->createEvent($vrn->id, $com->id, 'Утренник', now()->addDay());
+        $kids->audience = 'kids';
+        $kids->save();
+
+        foreach ([$ok, $past, $needsGeo, $kids] as $e) {
+            $this->tagEvent($e->id, $cinema->id);
+        }
+
+        $response = $this->getJson('/api/web/interests?city=voronezh');
+        $row = collect($response->json('data'))->firstWhere('slug', 'cinema');
+
+        $this->assertSame(
+            1,
+            $row['events_count'],
+            'счёт должен включать только предстоящее и только видимое лентой'
+        );
+    }
+
     public function test_q_filter_uses_ilike_on_name(): void
     {
         $this->createInterest('Театр', 'teatr');
