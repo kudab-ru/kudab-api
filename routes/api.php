@@ -134,6 +134,14 @@ Route::prefix('admin/sources/yandex-afisha')
 // Управление VPN-прокси (xray failover) — ТОЛЬКО суперадмин (2b). Пишет
 // proxy_configs; хост-applier (systemd-timer, root) читает и применяет к xray.
 // Секрет подписки не отдаётся наружу (см. AdminProxyController).
+// Модель текст-движка по назначению: пишет api, читает парсер (TextModelResolver)
+Route::prefix('admin/llm-text')
+    ->middleware(['auth:sanctum', 'role:superadmin'])
+    ->group(function () {
+        Route::get('/', [\App\Http\Controllers\Api\Admin\AdminLlmTextController::class, 'index']);
+        Route::put('/', [\App\Http\Controllers\Api\Admin\AdminLlmTextController::class, 'update'])->middleware('throttle:20,1');
+    });
+
 Route::prefix('admin/proxy')
     ->middleware(['auth:sanctum', 'role:superadmin'])
     ->group(function () {
