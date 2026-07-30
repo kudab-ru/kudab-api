@@ -473,7 +473,10 @@ class EventRepository
                             ->where('events.start_date', '>=', $fromDateMsk);
                     });
             })
-            ->with(['interests:id,slug,name']);
+            ->with([
+                'interests:id,slug,name',
+                'venue:id,slug,name,kind',
+            ]);
 
         $this->addPastFlags($q); // __past_rank + __is_past
         $this->addGrayRank($q);
@@ -1051,7 +1054,10 @@ class EventRepository
                             ->where('events.start_date', '>=', $fromDateMsk);
                     });
             })
-            ->with(['interests:id,slug,name']);
+            ->with([
+                'interests:id,slug,name',
+                'venue:id,slug,name,kind',
+            ]);
 
         // компас не показывает уже прошедшие события
         $q->whereRaw("NOT (
