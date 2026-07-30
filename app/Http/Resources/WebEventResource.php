@@ -2,12 +2,15 @@
 
 namespace App\Http\Resources;
 
+use App\Http\Resources\Concerns\BuildsEventGroup;
 use Carbon\CarbonInterface;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
 class WebEventResource extends JsonResource
 {
+    use BuildsEventGroup;
+
     public function toArray(Request $request): array
     {
         // Отдаём в МСК (Europe/Moscow) с offset, а не UTC-Z: фронт извлекает HH:MM
@@ -32,36 +35,8 @@ class WebEventResource extends JsonResource
         if (!is_array($images)) $images = [];
 
         // group: отдаём только если репозиторий положил group_dates/group_count
-        $group = null;
-        $gid = (int) ($this->event_group_id ?? 0);
-        if ($gid > 0) {
-            $dates = $this->getAttribute('group_dates');
-
-            if (is_string($dates)) {
-                $decoded = json_decode($dates, true);
-                $dates = is_array($decoded) ? $decoded : null;
-            }
-            if (!is_array($dates)) $dates = null;
-
-            $count = $this->getAttribute('group_count');
-            $count = is_numeric($count) ? (int) $count : ($dates ? count($dates) : 0);
-
-            // В ленте показываем group только если реально есть “серия”
-            if ($dates && $count >= 2) {
-                $group = [
-                    'id'    => $gid,
-                    'count' => $count,
-                    'dates' => $dates,
-                ];
-
-                // вид повторения (регулярные события PR3): фронт строит фразу
-                // «по средам в 16:00» / «ежедневно до 10 июля» / «в репертуаре»
-                $series = $this->getAttribute('group_series');
-                if (is_array($series) && !empty($series['kind'])) {
-                    $group['series'] = $series;
-                }
-            }
-        }
+        $gid = $this->eventGroupIdForPayload();
+        $group = $this->eventGroupPayload();
 
         // siblings: ось B (kudab-parser/TASKS.md 2.3). Заполняется
         // hydrateSiblings в репозитории при `grouped_by_post=1`. Включаем в

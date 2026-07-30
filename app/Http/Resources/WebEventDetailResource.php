@@ -2,11 +2,14 @@
 
 namespace App\Http\Resources;
 
+use App\Http\Resources\Concerns\BuildsEventGroup;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
 class WebEventDetailResource extends JsonResource
 {
+    use BuildsEventGroup;
+
     public function toArray(Request $request): array
     {
         // Важно: в репозитории ты “подмешиваешь” computed-атрибуты poster/images через hydrateImages().
@@ -49,6 +52,8 @@ class WebEventDetailResource extends JsonResource
         }
 
         $priceMin = $this->price_min !== null ? (int) $this->price_min : null;
+
+        $groupId = $this->eventGroupIdForPayload();
 
         // interests: всегда array. См. WebEventResource — тот же контракт.
         $interests = [];
@@ -130,6 +135,9 @@ class WebEventDetailResource extends JsonResource
             'is_past' => (bool) ($this->getAttribute('__is_past') ?? false),
 
             'interests' => $interests,
+
+            'event_group_id' => $groupId > 0 ? $groupId : null,
+            'group' => $this->eventGroupPayload(),
         ];
     }
 }

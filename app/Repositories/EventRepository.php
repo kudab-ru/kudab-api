@@ -176,12 +176,20 @@ class EventRepository
         $this->addImgRank($q);
         $this->excludeBlacklistedSources($q);
 
-        $q->orderByRaw('events.start_date asc nulls last')
+        $q->orderByRaw("(CASE WHEN COALESCE(events.start_date, (events.start_time AT TIME ZONE 'Europe/Moscow')::date) < (now() AT TIME ZONE 'Europe/Moscow')::date THEN 1 ELSE 0 END) asc")
+            ->orderByRaw('events.start_date asc nulls last')
             ->orderByRaw('events.start_time asc nulls last')
             ->orderBy('events.id', 'asc')
             ->limit($limit);
 
         $items = $q->get();
+
+        $items = $items->sortBy(function (Event $e) {
+            $d = $e->start_date ? substr((string) $e->start_date, 0, 10) : '9999-12-31';
+            $t = $e->start_time ? (string) $e->start_time : '';
+            return $d . '|' . $t . '|' . str_pad((string) $e->id, 12, '0', STR_PAD_LEFT);
+        })->values();
+
         $this->hydrateImages($items);
 
         $items->each(function (Event $e) {
@@ -850,14 +858,12 @@ class EventRepository
         // event_group_id, потому что разные даты одного события = тот же
         // event detail). `meta.total` остаётся rep-count для пагинации.
         //
-        // ВАЖНО: snapshot должен включать те же события что и основной $q
-        // (т.е. past+future в окне PAST_LOOKBACK_DAYS). Иначе items на
-        // странице (rep'ы из $q + future siblings) могут превысить
-        // total_events: past соло-rep'ы попадут в items, но не в total.
-        // past siblings отбрасываются позже в hydrateSiblings через
-        // siblingIsFuture — это не противоречит, потому что past siblings
-        // ВСЁ РАВНО присутствуют в pool eligibleEventIds и учитываются
-        // как самостоятельные events на странице.
+        // ВАЖНО: snapshot остаётся надмножеством того, что видно на странице:
+        // rep'ы из $q (в т.ч. прошедшие — их карточки лента рисует
+        // приглушёнными) + future siblings. Прошедшие НЕ-rep'ы вычитаются
+        // ниже, сразу после того как посчитаны rep'ы: карточки у них нет
+        // (hydrateSiblings отбрасывает past через siblingIsFuture), а в
+        // счётчике они раздували «найдено N».
         $uncollapsedQ = $groupedByPost ? (clone $q) : null;
 
         if ($groupedByPost) {
@@ -961,6 +967,18 @@ class EventRepository
                 ->where('r.__post_rn', 1);
 
             $q->whereIn('events.id', $postRepIds);
+
+            // Из снимка выкидываем прошедшие события, которые на странице не
+            // видны: past siblings отсеивает hydrateSiblings (siblingIsFuture),
+            // так что в `total_events` они попадали числом без карточки.
+            // Прошедшие rep'ы остаются: их карточка в ленте есть (приглушена).
+            $uncollapsedQ->where(function ($w) use ($postRepIds, $graceHours) {
+                $w->whereRaw("NOT (
+                        (events.start_time IS NOT NULL AND events.start_time < (now() - interval '{$graceHours} hours'))
+                        OR (events.start_time IS NULL AND events.start_date IS NOT NULL AND events.start_date < (now() AT TIME ZONE 'Europe/Moscow')::date)
+                    )")
+                    ->orWhereIn('events.id', clone $postRepIds);
+            });
         }
 
         $paginator = $q->paginate($perPage);
@@ -1278,6 +1296,7 @@ class EventRepository
         $event = $q->firstOrFail();
 
         $this->hydrateImages(new EloquentCollection([$event]));
+        $this->hydrateGroupDates(new EloquentCollection([$event]));
 
         $event->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
 
@@ -2048,6 +2067,7 @@ class EventRepository
             ->select(['e.id', 'e.event_group_id', 'e.start_time', 'e.start_date', 'e.time_precision', 'e.time_text'])
             ->selectRaw('COALESCE(eg.federation_id, eg.id) as __fed_key')
             ->selectRaw('count(*) OVER (PARTITION BY COALESCE(eg.federation_id, eg.id)) as __grp_count')
+            ->selectRaw("(CASE WHEN COALESCE(e.start_date, (e.start_time AT TIME ZONE 'Europe/Moscow')::date) < (now() AT TIME ZONE 'Europe/Moscow')::date THEN 1 ELSE 0 END) as __day_past")
             ->whereNull('eg.deleted_at')
             ->where('ct.status', 'active')
             ->whereNull('e.deleted_at')
@@ -2091,7 +2111,7 @@ class EventRepository
             ->orderBy('e.id', 'asc')
             ->get();
 
-        $map = [];
+        $buckets = [];
         $cntMap = [];
 
         foreach ($rows as $r) {
@@ -2104,9 +2124,12 @@ class EventRepository
 
             $cntMap[$gid] = $grpCount;
 
-            if (!isset($map[$gid])) $map[$gid] = [];
-            if (count($map[$gid]) >= $MAX_DATES) {
-                // уже набрали лимит дат — остальное не тащим
+            if (!isset($buckets[$gid])) $buckets[$gid] = ['past' => [], 'ahead' => []];
+
+            $dayPast = ((int) ($r->__day_past ?? 0)) === 1;
+
+            if (!$dayPast && count($buckets[$gid]['ahead']) >= $MAX_DATES) {
+                // предстоящих уже набрали лимит — остальное не тащим
                 continue;
             }
 
@@ -2119,13 +2142,32 @@ class EventRepository
                 }
             }
 
-            $map[$gid][] = [
+            $item = [
                 'id'             => (int) $r->id,
                 'start_at'       => $startAt,
                 'start_date'     => $r->start_date ? substr((string) $r->start_date, 0, 10) : null,
                 'time_precision' => (string) ($r->time_precision ?? 'datetime'),
                 'time_text'      => $r->time_text !== null ? (string) $r->time_text : null,
             ];
+
+            if ($dayPast) {
+                $buckets[$gid]['past'][] = $item;
+                if (count($buckets[$gid]['past']) > $MAX_DATES) {
+                    array_shift($buckets[$gid]['past']); // держим только ближайшее прошлое
+                }
+            } else {
+                $buckets[$gid]['ahead'][] = $item;
+            }
+        }
+
+        $map = [];
+        foreach ($buckets as $gid => $b) {
+            $out = $b['ahead'];
+            $room = $MAX_DATES - count($out);
+            if ($room > 0 && $b['past']) {
+                $out = array_merge(array_slice($b['past'], -$room), $out);
+            }
+            $map[$gid] = $out;
         }
 
         $events->each(function (Event $e) use ($map, $cntMap, $repFed, $seriesByGroup) {

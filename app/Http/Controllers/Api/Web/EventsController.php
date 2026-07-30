@@ -87,14 +87,7 @@ class EventsController extends Controller
                 $v['date_from'] = $now->copy()->startOfDay()->toDateTimeString();
                 $v['date_to']   = $now->copy()->endOfDay()->toDateTimeString();
             } elseif ($v['when'] === 'weekend') {
-                // ближайшая суббота (или сегодня, если уже суббота)
-                $daysToSat = (Carbon::SATURDAY - $now->dayOfWeek + 7) % 7;
-
-                $sat = $now->copy()->addDays($daysToSat)->startOfDay();
-                $sun = $sat->copy()->addDay()->endOfDay();
-
-                $v['date_from'] = $sat->toDateTimeString();
-                $v['date_to']   = $sun->toDateTimeString();
+                [$v['date_from'], $v['date_to']] = $this->weekendWindow($now);
             } elseif ($v['when'] === 'now') {
                 $v['date_from'] = $now->copy()->subHours(2)->toDateTimeString();
                 $v['date_to']   = $now->copy()->addHours(4)->toDateTimeString();
@@ -208,11 +201,7 @@ class EventsController extends Controller
                 $v['date_from'] = $now->copy()->startOfDay()->toDateTimeString();
                 $v['date_to']   = $now->copy()->endOfDay()->toDateTimeString();
             } elseif ($v['when'] === 'weekend') {
-                $daysToSat = (Carbon::SATURDAY - $now->dayOfWeek + 7) % 7;
-                $sat = $now->copy()->addDays($daysToSat)->startOfDay();
-                $sun = $sat->copy()->addDay()->endOfDay();
-                $v['date_from'] = $sat->toDateTimeString();
-                $v['date_to']   = $sun->toDateTimeString();
+                [$v['date_from'], $v['date_to']] = $this->weekendWindow($now);
             } elseif ($v['when'] === 'now') {
                 $v['date_from'] = $now->copy()->subHours(2)->toDateTimeString();
                 $v['date_to']   = $now->copy()->addHours(4)->toDateTimeString();
@@ -384,11 +373,7 @@ class EventsController extends Controller
                 $v['date_from'] = $now->copy()->startOfDay()->toDateTimeString();
                 $v['date_to']   = $now->copy()->endOfDay()->toDateTimeString();
             } elseif ($v['when'] === 'weekend') {
-                $daysToSat = (Carbon::SATURDAY - $now->dayOfWeek + 7) % 7;
-                $sat = $now->copy()->addDays($daysToSat)->startOfDay();
-                $sun = $sat->copy()->addDay()->endOfDay();
-                $v['date_from'] = $sat->toDateTimeString();
-                $v['date_to']   = $sun->toDateTimeString();
+                [$v['date_from'], $v['date_to']] = $this->weekendWindow($now);
             } elseif ($v['when'] === 'now') {
                 $v['date_from'] = $now->copy()->subHours(2)->toDateTimeString();
                 $v['date_to']   = $now->copy()->addHours(4)->toDateTimeString();
@@ -485,6 +470,32 @@ class EventsController extends Controller
                 'community_name' => $res['community_name'],
             ],
         ]);
+    }
+
+    /**
+     * Окно пресета `weekend` в Europe/Moscow: [date_from, date_to].
+     *
+     * В сами выходные показываем ТЕКУЩИЕ выходные с начала сегодняшнего дня, а не
+     * следующие: прежняя формула ((SATURDAY - dayOfWeek + 7) % 7) в воскресенье давала
+     * +6 дней, и весь день страница «на выходных» показывала события через неделю.
+     * Прошедшую субботу в воскресенье не тянем — она уже не «куда сходить».
+     */
+    private function weekendWindow(Carbon $now): array
+    {
+        $dow = $now->dayOfWeek;
+
+        if ($dow === Carbon::SATURDAY) {
+            $from = $now->copy()->startOfDay();
+            $to   = $now->copy()->addDay()->endOfDay();
+        } elseif ($dow === Carbon::SUNDAY) {
+            $from = $now->copy()->startOfDay();
+            $to   = $now->copy()->endOfDay();
+        } else {
+            $from = $now->copy()->addDays((Carbon::SATURDAY - $dow + 7) % 7)->startOfDay();
+            $to   = $from->copy()->addDay()->endOfDay();
+        }
+
+        return [$from->toDateTimeString(), $to->toDateTimeString()];
     }
 
     /**
