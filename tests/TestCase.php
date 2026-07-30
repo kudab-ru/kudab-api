@@ -2,85 +2,69 @@
 
 namespace Tests;
 
+use App\Support\DatabaseSafety;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 use Illuminate\Support\Facades\DB;
+use RuntimeException;
 
+/**
+ * Опасное место: трейт RefreshDatabase выполняет migrate:fresh, то есть сносит
+ * все таблицы той базы, к которой подключены тесты. Проверка имени базы стоит
+ * ДО parent::setUp() и при любом сомнении запрещает запуск.
+ */
 abstract class TestCase extends BaseTestCase
 {
-    /**
-     * Safety guard: предотвращает случайное использование dev/prod БД
-     * в тестах.
-     *
-     * **Контекст** (2026-05-11): `WebEventsTest` использует
-     * `RefreshDatabase` trait, которая делает `migrate:fresh` =
-     * TRUNCATE+migrate всех таблиц. Если тесты запущены через
-     * `php artisan test` без правильного env-override'а (sqlite memory
-     * или `kudab_test`), они подключатся к рабочей dev-БД и **уничтожат
-     * её**. Это уже происходило один раз.
-     *
-     * Правильные способы запуска тестов:
-     *  - `make test`         — pgsql `kudab_test` (через test-db-init);
-     *  - `make test-filter FILTER=...`;
-     *  - `make test-fresh`   — pgsql `kudab_test` + migrate:fresh+seed.
-     *
-     * Этот guard аварийно прерывает тесты если детектит подключение
-     * к НЕ-test БД, чтобы повтор был невозможен.
-     */
     protected function setUp(): void
     {
-        // Pre-boot env check: проверяем DB_DATABASE до bootstrap'а
-        // Application — иначе RefreshDatabase в parent::setUp() уже
-        // успеет сделать migrate:fresh на dev-БД.
-        $this->assertTestDatabaseViaEnv();
+        $this->refuseNonTestDatabaseBeforeBoot();
+
         parent::setUp();
-        // Post-boot sanity check: после загрузки фасадов проверяем
-        // реальное имя БД (на случай rebind connection в bootstrap'е).
-        $this->assertTestDatabase();
+
+        $this->refuseNonTestDatabaseAfterBoot();
     }
 
-    private function assertTestDatabaseViaEnv(): void
+    private function refuseNonTestDatabaseBeforeBoot(): void
     {
-        $name = $_ENV['DB_DATABASE'] ?? getenv('DB_DATABASE') ?: '';
-        if ($this->dbNameIsTest((string) $name)) return;
+        $name = DatabaseSafety::databaseNameFromEnvFiles(dirname(__DIR__));
 
-        $msg = "SafetyGuard (pre-boot): DB_DATABASE='{$name}' не похоже на test-БД."
-            . " Запускайте через `make test` / `make test-filter` (они загружают .env.testing"
-            . " с DB_DATABASE=kudab_test). Не выполнять `artisan test` напрямую без --env=testing.";
-        fwrite(STDERR, $msg . PHP_EOL);
-        throw new \RuntimeException($msg);
+        if (DatabaseSafety::looksLikeTestDatabase($name)) {
+            return;
+        }
+
+        $this->refuse($name === ''
+            ? 'имя базы определить не удалось'
+            : "база «{$name}» не тестовая");
     }
 
-    private function dbNameIsTest(string $n): bool
+    private function refuseNonTestDatabaseAfterBoot(): void
     {
-        if ($n === '' || $n === ':memory:') return true;
-        return str_contains(strtolower($n), 'test');
+        $name = (string) DB::connection()->getDatabaseName();
+
+        if (DatabaseSafety::looksLikeTestDatabase($name)) {
+            return;
+        }
+
+        $this->refuse("после запуска приложения база оказалась «{$name}», она не тестовая");
     }
 
-    private function assertTestDatabase(): void
+    private function refuse(string $reason): never
     {
-        $connection = DB::connection();
-        $name = $connection->getDatabaseName();
+        $message = implode(PHP_EOL, array_merge(
+            [
+                '',
+                'Тесты остановлены: '.$reason.'.',
+                'Тесты стирают базу целиком, поэтому запуск отменён.',
+                '',
+            ],
+            DatabaseSafety::HINT_LINES,
+            [
+                'Внутри контейнера то же самое: php artisan test --env=testing',
+                '',
+            ]
+        ));
 
-        if ($this->dbNameIsTest($name)) return;
+        fwrite(STDERR, $message.PHP_EOL);
 
-        // НЕ-test БД. Аварийно прерываем со внятным сообщением.
-        $env = (string) config('app.env');
-        $msg = <<<MSG
-
-╔═══════════════════════════════════════════════════════════════════╗
-║  ⛔  SAFETY GUARD: тесты подключены к НЕ-test БД                  ║
-║                                                                    ║
-║  DB name : {$name}
-║  APP_ENV : {$env}
-║                                                                    ║
-║  RefreshDatabase trait сделает TRUNCATE+migrate ВСЕЙ этой базы.   ║
-║  Если это dev/prod — данные будут потеряны.                       ║
-║                                                                    ║
-║  Используйте `make test` (pgsql kudab_test) или `make test-fresh` ║
-║  вместо `php artisan test`.                                       ║
-╚═══════════════════════════════════════════════════════════════════╝
-MSG;
-        fwrite(STDERR, $msg . PHP_EOL);
-        throw new \RuntimeException("SafetyGuard: refusing to run tests on non-test DB '{$name}'");
+        throw new RuntimeException(trim($message));
     }
 }

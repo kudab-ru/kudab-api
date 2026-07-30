@@ -107,7 +107,8 @@ class EventRepository
 
     /**
      * Web: количество событий в группе (для "count" в ответе).
-     * Считаем по тем же правилам, что /web/events (active city + not deleted + not blacklisted + lookback window).
+     * Считаем по тем же правилам, что /web/events (active city + events.status=active
+     * + not deleted + not blacklisted + lookback window).
      * Federation-aware: считает по всей федерации запрошенной группы.
      */
     public function countWebGroup(int $groupId): int
@@ -123,6 +124,7 @@ class EventRepository
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
             ->whereNull('eg.deleted_at')
             ->where('ct.status', 'active')
+            ->where('events.status', 'active')
             ->whereNull('events.deleted_at')
             ->whereRaw('COALESCE(eg.federation_id, eg.id) = ?', [$fedKey])
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
@@ -142,7 +144,8 @@ class EventRepository
     /**
      * Web: события конкретной группы (ленивая подгрузка карусели).
      * Важно: формат полей + poster/images соответствует /web/events (hydrateImages + __is_past).
-     * Фильтры: как /web/events (active city + not deleted + not blacklisted + lookback window).
+     * Фильтры: как /web/events (active city + events.status=active + not deleted +
+     * not blacklisted + lookback window).
      */
     public function listWebGroup(int $groupId, int $limit = 30): EloquentCollection
     {
@@ -160,6 +163,7 @@ class EventRepository
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
             ->whereNull('eg.deleted_at')
             ->where('ct.status', 'active')
+            ->where('events.status', 'active')
             ->whereNull('events.deleted_at')
             ->whereRaw('COALESCE(eg.federation_id, eg.id) = ?', [$fedKey])
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
@@ -180,9 +184,9 @@ class EventRepository
             ->orderByRaw('events.start_date asc nulls last')
             ->orderByRaw('events.start_time asc nulls last')
             ->orderBy('events.id', 'asc')
-            ->limit($limit);
+            ->limit(min($limit * 10, 400));
 
-        $items = $q->get();
+        $items = $this->pickAcrossDays($q->get(), $limit);
 
         $items = $items->sortBy(function (Event $e) {
             $d = $e->start_date ? substr((string) $e->start_date, 0, 10) : '9999-12-31';
@@ -2014,7 +2018,8 @@ class EventRepository
     {
         if ($events->isEmpty()) return;
 
-        $MAX_DATES = 12; // чтобы group.dates не раздувал ответы
+        $MAX_DAYS = 12;
+        $MAX_TIMES_PER_DAY = 4;
 
         $repGroupIds = $events->pluck('event_group_id')
             ->filter(fn($v) => is_numeric($v) && (int)$v > 0)
@@ -2067,9 +2072,11 @@ class EventRepository
             ->select(['e.id', 'e.event_group_id', 'e.start_time', 'e.start_date', 'e.time_precision', 'e.time_text'])
             ->selectRaw('COALESCE(eg.federation_id, eg.id) as __fed_key')
             ->selectRaw('count(*) OVER (PARTITION BY COALESCE(eg.federation_id, eg.id)) as __grp_count')
+            ->selectRaw("COALESCE(e.start_date, (e.start_time AT TIME ZONE 'Europe/Moscow')::date) as __day")
             ->selectRaw("(CASE WHEN COALESCE(e.start_date, (e.start_time AT TIME ZONE 'Europe/Moscow')::date) < (now() AT TIME ZONE 'Europe/Moscow')::date THEN 1 ELSE 0 END) as __day_past")
             ->whereNull('eg.deleted_at')
             ->where('ct.status', 'active')
+            ->where('e.status', 'active')
             ->whereNull('e.deleted_at')
             ->whereIn(DB::raw('COALESCE(eg.federation_id, eg.id)'), $fedKeys)
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
@@ -2113,6 +2120,7 @@ class EventRepository
 
         $buckets = [];
         $cntMap = [];
+        $daySessions = [];
 
         foreach ($rows as $r) {
             $gid = (int) $r->__fed_key; // ключ карты = федерация (или сама группа, если не федерирована)
@@ -2124,58 +2132,88 @@ class EventRepository
 
             $cntMap[$gid] = $grpCount;
 
+            $day = $r->__day !== null ? substr((string) $r->__day, 0, 10) : null;
+            if ($day === null || $day === '') continue;
+
+            $daySessions[$gid][$day] = ($daySessions[$gid][$day] ?? 0) + 1;
+
             if (!isset($buckets[$gid])) $buckets[$gid] = ['past' => [], 'ahead' => []];
 
             $dayPast = ((int) ($r->__day_past ?? 0)) === 1;
+            $side = $dayPast ? 'past' : 'ahead';
 
-            if (!$dayPast && count($buckets[$gid]['ahead']) >= $MAX_DATES) {
-                // предстоящих уже набрали лимит — остальное не тащим
-                continue;
-            }
-
-            $startAt = null;
-            if (!empty($r->start_time)) {
-                try {
-                    $startAt = CarbonImmutable::parse($r->start_time)->toISOString();
-                } catch (\Throwable $e) {
-                    $startAt = null;
+            if (!isset($buckets[$gid][$side][$day])) {
+                if (!$dayPast && count($buckets[$gid]['ahead']) >= $MAX_DAYS) {
+                    continue; // предстоящих дней уже набрали лимит
                 }
-            }
 
-            $item = [
-                'id'             => (int) $r->id,
-                'start_at'       => $startAt,
-                'start_date'     => $r->start_date ? substr((string) $r->start_date, 0, 10) : null,
-                'time_precision' => (string) ($r->time_precision ?? 'datetime'),
-                'time_text'      => $r->time_text !== null ? (string) $r->time_text : null,
-            ];
+                $startAt = null;
+                if (!empty($r->start_time)) {
+                    try {
+                        $startAt = CarbonImmutable::parse($r->start_time)->toISOString();
+                    } catch (\Throwable $e) {
+                        $startAt = null;
+                    }
+                }
 
-            if ($dayPast) {
-                $buckets[$gid]['past'][] = $item;
-                if (count($buckets[$gid]['past']) > $MAX_DATES) {
+                $buckets[$gid][$side][$day] = [
+                    'item' => [
+                        'id'             => (int) $r->id,
+                        'start_at'       => $startAt,
+                        'start_date'     => $r->start_date ? substr((string) $r->start_date, 0, 10) : null,
+                        'time_precision' => (string) ($r->time_precision ?? 'datetime'),
+                        'time_text'      => $r->time_text !== null ? (string) $r->time_text : null,
+                    ],
+                    'times' => [],
+                ];
+
+                if ($dayPast && count($buckets[$gid]['past']) > $MAX_DAYS) {
                     array_shift($buckets[$gid]['past']); // держим только ближайшее прошлое
                 }
-            } else {
-                $buckets[$gid]['ahead'][] = $item;
+            }
+
+            if (isset($buckets[$gid][$side][$day])
+                && count($buckets[$gid][$side][$day]['times']) < $MAX_TIMES_PER_DAY) {
+                $t = $this->sessionTimeLabel($r);
+                if ($t !== null && !in_array($t, $buckets[$gid][$side][$day]['times'], true)) {
+                    $buckets[$gid][$side][$day]['times'][] = $t;
+                }
             }
         }
 
         $map = [];
+        $daysMap = [];
         foreach ($buckets as $gid => $b) {
-            $out = $b['ahead'];
-            $room = $MAX_DATES - count($out);
+            $days = $b['ahead'];
+            $room = $MAX_DAYS - count($days);
             if ($room > 0 && $b['past']) {
-                $out = array_merge(array_slice($b['past'], -$room), $out);
+                $days = array_slice($b['past'], -$room, null, true) + $days;
             }
+
+            $out = [];
+            foreach ($days as $day => $bucket) {
+                $item = $bucket['item'];
+                $sessions = (int) ($daySessions[$gid][$day] ?? 1);
+                if ($sessions > 1) {
+                    $item['day_count'] = $sessions;
+                    if ($bucket['times']) {
+                        $item['day_times'] = $bucket['times'];
+                    }
+                }
+                $out[] = $item;
+            }
+
             $map[$gid] = $out;
+            $daysMap[$gid] = count($daySessions[$gid] ?? []);
         }
 
-        $events->each(function (Event $e) use ($map, $cntMap, $repFed, $seriesByGroup) {
+        $events->each(function (Event $e) use ($map, $cntMap, $daysMap, $repFed, $seriesByGroup) {
             $egid = (int) ($e->event_group_id ?? 0);
             $gid = $repFed[$egid] ?? $egid; // event_group_id rep'а → его fed-ключ
             if ($gid > 0 && isset($map[$gid])) {
                 $e->setAttribute('group_dates', $map[$gid]); // уже лимитировано
                 $e->setAttribute('group_count', (int) ($cntMap[$gid] ?? count($map[$gid])));
+                $e->setAttribute('group_days_count', (int) ($daysMap[$gid] ?? count($map[$gid])));
 
                 $s = $seriesByGroup->get($egid);
                 if ($s !== null) {
@@ -2194,6 +2232,64 @@ class EventRepository
                 }
             }
         });
+    }
+
+    private function sessionTimeLabel(object $r): ?string
+    {
+        $text = $r->time_text !== null ? trim((string) $r->time_text) : '';
+        if ($text !== '' && mb_strlen($text) <= 12) {
+            return $text;
+        }
+
+        if (!empty($r->start_time) && (string) ($r->time_precision ?? 'datetime') === 'datetime') {
+            try {
+                $t = CarbonImmutable::parse($r->start_time)->setTimezone('Europe/Moscow')->format('H:i');
+            } catch (\Throwable $e) {
+                return null;
+            }
+
+            return $t === '00:00' ? null : $t;
+        }
+
+        return null;
+    }
+
+    private function pickAcrossDays(EloquentCollection $items, int $limit): EloquentCollection
+    {
+        if ($items->count() <= $limit) {
+            return $items;
+        }
+
+        $byDay = [];
+        foreach ($items as $e) {
+            $day = $e->start_date
+                ? substr((string) $e->start_date, 0, 10)
+                : '';
+            if ($day === '' && $e->start_time) {
+                try {
+                    $day = CarbonImmutable::parse($e->start_time)->setTimezone('Europe/Moscow')->toDateString();
+                } catch (\Throwable $x) {
+                    $day = '';
+                }
+            }
+            $byDay[$day][] = $e;
+        }
+
+        $picked = [];
+        $round = 0;
+        while (count($picked) < $limit) {
+            $added = false;
+            foreach ($byDay as $list) {
+                if (!isset($list[$round])) continue;
+                $picked[] = $list[$round];
+                $added = true;
+                if (count($picked) >= $limit) break;
+            }
+            if (!$added) break;
+            $round++;
+        }
+
+        return new EloquentCollection($picked);
     }
 
     /**

@@ -40,10 +40,14 @@ trait BuildsEventGroup
             return null;
         }
 
+        $days = $this->getAttribute('group_days_count');
+        $days = is_numeric($days) ? (int) $days : count($dates);
+
         $group = [
-            'id'    => $gid,
-            'count' => $count,
-            'dates' => $dates,
+            'id'         => $gid,
+            'count'      => $count,
+            'days_count' => $days,
+            'dates'      => $dates,
         ];
 
         // вид повторения (регулярные события PR3): фронт строит фразу

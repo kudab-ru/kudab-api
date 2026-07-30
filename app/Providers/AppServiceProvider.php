@@ -15,10 +15,18 @@ use App\Repositories\Telegram\TelegramChatRepository;
 use App\Repositories\Telegram\TelegramMessageTemplateRepository;
 use App\Repositories\Telegram\TelegramUserRepository;
 use App\Services\Telegram\BotRoleService;
+use App\Support\DatabaseSafety;
 use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Console\Events\CommandStarting;
+use Illuminate\Database\Console\Migrations\FreshCommand;
+use Illuminate\Database\Console\Migrations\RefreshCommand;
+use Illuminate\Database\Console\Migrations\ResetCommand;
+use Illuminate\Database\Console\WipeCommand;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
+use RuntimeException;
 use Symfony\Component\HttpFoundation\IpUtils;
 
 class AppServiceProvider extends ServiceProvider
@@ -41,6 +49,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        $this->guardDestructiveDatabaseCommands();
+
         RateLimiter::for('web', function (Request $request) {
             // Вне прода лимита нет вовсе — он только мешает разработке.
             if (! $this->app->isProduction()) {
@@ -57,5 +67,48 @@ class AppServiceProvider extends ServiceProvider
 
             return Limit::perMinute(60)->by($request->ip());
         });
+    }
+
+    private function guardDestructiveDatabaseCommands(): void
+    {
+        $connection = (string) config('database.default');
+        $database = (string) config("database.connections.{$connection}.database");
+
+        if (DatabaseSafety::looksLikeTestDatabase($database) || DatabaseSafety::wipeAllowedByOperator()) {
+            return;
+        }
+
+        FreshCommand::prohibit();
+        RefreshCommand::prohibit();
+        ResetCommand::prohibit();
+        WipeCommand::prohibit();
+
+        Event::listen(CommandStarting::class, function (CommandStarting $event) use ($database): void {
+            $blocked = ['migrate:fresh', 'migrate:refresh', 'migrate:reset', 'db:wipe'];
+
+            if (! in_array($event->command, $blocked, true)) {
+                return;
+            }
+
+            throw new RuntimeException(self::destructiveCommandRefusal((string) $event->command, $database));
+        });
+    }
+
+    private static function destructiveCommandRefusal(string $command, string $database): string
+    {
+        return implode(PHP_EOL, array_merge(
+            [
+                '',
+                "Команда {$command} отменена: база «{$database}» не тестовая.",
+                'Она снесла бы все таблицы, а вместе с ними данные разработки.',
+                '',
+            ],
+            DatabaseSafety::HINT_LINES,
+            [
+                '',
+                'Если базу разработки правда надо собрать заново, поставьте перед командой KUDAB_ALLOW_DB_WIPE=1.',
+                '',
+            ]
+        ));
     }
 }
