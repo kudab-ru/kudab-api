@@ -73,28 +73,84 @@ class AdminVenuesController extends Controller
     {
         $data = $request->validate([
             'name' => ['sometimes', 'string', 'min:2', 'max:255'],
-            // правка текста адреса; точку на карте НЕ двигает (гео — из резолверов)
+            // правка текста адреса; точку на карте двигают lat/lon ниже
             'address' => ['sometimes', 'nullable', 'string', 'max:500'],
             // тексты площадки, которые пишет LLM: ручная правка перекрывает генерацию
             'description' => ['sometimes', 'nullable', 'string', 'max:2000'],
             'tg_portrait' => ['sometimes', 'nullable', 'string', 'max:2000'],
+            // Точка на карте. Резолверы ошибаются целыми классами — «Парковая, 3»
+            // находится в черте города вместо посёлка, OSM отдаёт тёзку, у дома
+            // может не быть своих координат. Человеку нужен способ поставить
+            // метку рукой, и с этого момента автоматика её не трогает.
+            'lat' => ['sometimes', 'numeric', 'between:-90,90'],
+            'lon' => ['sometimes', 'numeric', 'between:-180,180'],
         ]);
         abort_if($data === [], 422, 'Нечего обновлять');
+        // Половина координаты — не координата: required_with тут не помогает,
+        // он молчит, когда парного поля вообще нет в запросе.
+        abort_if(isset($data['lat']) !== isset($data['lon']), 422, 'Нужны обе координаты: lat и lon');
 
         $venue = DB::table('venues')->where('id', $id)->whereNull('deleted_at')->first();
         abort_if($venue === null, 404);
 
-        DB::table('venues')->where('id', $id)->update($data + ['updated_at' => now()]);
+        $lat = isset($data['lat']) ? (float) $data['lat'] : null;
+        $lon = isset($data['lon']) ? (float) $data['lon'] : null;
+        unset($data['lat'], $data['lon']);
+
+        $update = $data + ['updated_at' => now()];
+
+        if ($lat !== null && $lon !== null) {
+            $update['location'] = DB::raw(sprintf('ST_SetSRID(ST_Point(%F,%F),4326)', $lon, $lat));
+            // Метка «поставлено руками»: по ней парсер пропускает площадку в
+            // venues:refine-point, venues:verify-point и перегеокоде. Без неё
+            // ночная цепочка вернула бы прежнюю неверную точку.
+            $update['source_meta'] = DB::raw(sprintf(
+                "COALESCE(source_meta, '{}'::jsonb) || '%s'::jsonb",
+                json_encode([
+                    'manual_point' => true,
+                    'manual_point_at' => now()->toIso8601String(),
+                    'manual_point_by' => $request->user()?->id,
+                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            ));
+        }
+
+        DB::table('venues')->where('id', $id)->update($update);
+
+        if ($lat !== null && $lon !== null) {
+            $this->moveEventsPinnedToVenue($id, $venue, $lat, $lon);
+        }
 
         TextLock::apply('venues', $id, array_intersect_key($data, array_flip(['description', 'tg_portrait'])));
 
         Log::info('admin:venues:update', [
             'actor_id' => $request->user()?->id,
             'venue_id' => $id,
-            'fields' => array_keys($data),
+            'fields' => array_keys($data + ($lat !== null ? ['lat' => null, 'lon' => null] : [])),
         ]);
 
-        return response()->json(['data' => DB::table('venues')->where('id', $id)->first(['id', 'name', 'address', 'description', 'tg_portrait'])]);
+        return response()->json(['data' => DB::table('venues')->where('id', $id)
+            ->first(['id', 'name', 'address', 'description', 'tg_portrait', 'latitude', 'longitude'])]);
+    }
+
+    /**
+     * События площадки, стоящие ровно на её прежней точке, взяли координату
+     * у неё же — везём вместе, иначе метка переедет, а события останутся в
+     * прежнем месте. События с собственной точкой не трогаем.
+     */
+    private function moveEventsPinnedToVenue(int $venueId, object $venue, float $lat, float $lon): void
+    {
+        if ($venue->latitude === null || $venue->longitude === null) {
+            return;
+        }
+
+        DB::table('events')
+            ->whereNull('deleted_at')
+            ->where('venue_id', $venueId)
+            ->whereRaw('abs(latitude - ?) <= 0.000001 AND abs(longitude - ?) <= 0.000001', [$venue->latitude, $venue->longitude])
+            ->update([
+                'location' => DB::raw(sprintf('ST_SetSRID(ST_Point(%F,%F),4326)', $lon, $lat)),
+                'updated_at' => now(),
+            ]);
     }
 
     /**

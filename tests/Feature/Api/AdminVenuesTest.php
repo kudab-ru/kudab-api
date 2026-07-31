@@ -77,6 +77,79 @@ class AdminVenuesTest extends TestCase
             ->assertJsonPath('data.0.via', 'osm_poi');
     }
 
+    public function test_update_moves_the_point_and_marks_it_manual(): void
+    {
+        // Резолверы ошибаются целыми классами (тёзка в OSM, улица вместо
+        // посёлка), поэтому у человека должен быть способ поставить метку
+        // рукой — и с этого момента автоматика её не трогает.
+        $this->actingAsSuperadmin();
+        $cityId = $this->seedCity();
+        $id = $this->seedVenue($cityId, 'Матрёшка', 'matreshka');
+        DB::update('UPDATE venues SET location = ST_SetSRID(ST_Point(39.202908, 51.673517), 4326) WHERE id = ?', [$id]);
+
+        $this->patchJson("/api/admin/venues/{$id}", ['lat' => 51.676141, 'lon' => 39.205296])
+            ->assertOk();
+
+        $venue = DB::table('venues')->where('id', $id)->first();
+        $this->assertEqualsWithDelta(51.676141, (float) $venue->latitude, 1e-6);
+        $this->assertEqualsWithDelta(39.205296, (float) $venue->longitude, 1e-6);
+
+        $meta = json_decode((string) $venue->source_meta, true) ?: [];
+        $this->assertTrue($meta['manual_point'] ?? false, 'точка помечена как ручная');
+    }
+
+    public function test_moving_the_point_takes_pinned_events_along(): void
+    {
+        $this->actingAsSuperadmin();
+        $cityId = $this->seedCity();
+        $id = $this->seedVenue($cityId, 'Площадка', 'ploshadka');
+        DB::update('UPDATE venues SET location = ST_SetSRID(ST_Point(39.20, 51.67), 4326) WHERE id = ?', [$id]);
+
+        $pinned = $this->seedEventAt($cityId, $id, 51.67, 39.20);
+        $ownPoint = $this->seedEventAt($cityId, $id, 51.60, 39.30);
+
+        $this->patchJson("/api/admin/venues/{$id}", ['lat' => 51.68, 'lon' => 39.21])->assertOk();
+
+        $this->assertEqualsWithDelta(51.68, (float) DB::table('events')->where('id', $pinned)->value('latitude'), 1e-6,
+            'событие стояло на точке площадки — переехало с ней');
+        $this->assertEqualsWithDelta(51.60, (float) DB::table('events')->where('id', $ownPoint)->value('latitude'), 1e-6,
+            'событие со своей точкой не тронуто');
+    }
+
+    public function test_half_a_point_is_rejected(): void
+    {
+        $this->actingAsSuperadmin();
+        $id = $this->seedVenue($this->seedCity(), 'Площадка', 'ploshadka-2');
+
+        $this->patchJson("/api/admin/venues/{$id}", ['lat' => 51.7])->assertStatus(422);
+        $this->patchJson("/api/admin/venues/{$id}", ['lat' => 100, 'lon' => 39.2])->assertStatus(422);
+    }
+
+    private function seedEventAt(int $cityId, int $venueId, float $lat, float $lon): int
+    {
+        $communityId = (int) DB::table('communities')->insertGetId([
+            'name' => 'Организатор '.$lat.'-'.$venueId,
+            'city_id' => $cityId,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $id = (int) DB::table('events')->insertGetId([
+            'community_id' => $communityId,
+            'city_id' => $cityId,
+            'venue_id' => $venueId,
+            'title' => 'Событие '.$lat,
+            'status' => 'active',
+            'start_time' => now()->addDay(),
+            'dedup_key' => 'venue-point-'.$lat.'-'.$lon.'-'.$venueId,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::update('UPDATE events SET location = ST_SetSRID(ST_Point(?, ?), 4326) WHERE id = ?', [$lon, $lat, $id]);
+
+        return $id;
+    }
+
     public function test_update_name_and_address(): void
     {
         $this->actingAsSuperadmin();
