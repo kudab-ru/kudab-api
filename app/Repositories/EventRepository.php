@@ -2378,6 +2378,7 @@ class EventRepository
                         'time_text'      => $r->time_text !== null ? (string) $r->time_text : null,
                     ],
                     'times' => [],
+                    'sessions' => [],
                 ];
 
                 if ($dayPast && count($buckets[$gid]['past']) > $MAX_DAYS) {
@@ -2390,6 +2391,9 @@ class EventRepository
                 $t = $this->sessionTimeLabel($r);
                 if ($t !== null && !in_array($t, $buckets[$gid][$side][$day]['times'], true)) {
                     $buckets[$gid][$side][$day]['times'][] = $t;
+                    // сеанс — отдельное событие со своей страницей; без id время остаётся
+                    // мёртвой подписью и выбрать «в 20:00 вместо 18:00» нельзя
+                    $buckets[$gid][$side][$day]['sessions'][] = ['id' => (int) $r->id, 'time' => $t];
                 }
             }
         }
@@ -2411,6 +2415,9 @@ class EventRepository
                     $item['day_count'] = $sessions;
                     if ($bucket['times']) {
                         $item['day_times'] = $bucket['times'];
+                    }
+                    if ($bucket['sessions']) {
+                        $item['day_sessions'] = $bucket['sessions'];
                     }
                 }
                 $out[] = $item;
@@ -2596,6 +2603,7 @@ class EventRepository
                 'e.start_date',
                 'e.time_precision',
                 'e.time_text',
+                'e.event_group_id',
                 'es.source',
                 'es.post_external_id',
             ])
@@ -2694,9 +2702,15 @@ class EventRepository
             }
             if ($bestKey === null || $bestSize < 2) return;
 
+            // Своя же серия — это НЕ «другое событие из анонса»: у квеста все сеансы
+            // дня лежат в одном посте, и блок показывал сам себя шесть раз. Серия
+            // раскрывается отдельным блоком дат.
+            $ownGroup = (int) ($e->event_group_id ?? 0);
+
             $siblings = [];
             foreach ($clusterMap[$bestKey] as $r) {
                 if ((int) $r->id === $rid) continue; // self — представитель
+                if ($ownGroup > 0 && (int) ($r->event_group_id ?? 0) === $ownGroup) continue;
 
                 // §13p: отбрасываем уже прошедшие siblings — в карусели
                 // «другие даты этого события» прошлые даты бесполезны.
