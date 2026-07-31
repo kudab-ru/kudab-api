@@ -4,16 +4,47 @@ namespace Tests\Feature\Api;
 
 use App\Models\City;
 use App\Models\Community;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Laravel\Sanctum\Sanctum;
+use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
 class AdminCommunitiesTest extends TestCase
 {
     use RefreshDatabase;
 
+    /**
+     * Админские роуты закрыты `auth:sanctum` + `role:admin|superadmin`
+     * (routes/api.php), поэтому тест обязан прийти под ролью — иначе он
+     * проверяет не контроллер, а сам факт защиты, отвечая 401 на всё.
+     */
+    private function actingAsAdmin(): User
+    {
+        Role::findOrCreate('admin', 'web');
+        $user = User::factory()->create();
+        $user->assignRole('admin');
+        Sanctum::actingAs($user);
+
+        return $user;
+    }
+
+    /**
+     * Сторож самой защиты. В феврале middleware сняли с группы мимоходом,
+     * в коммите про статусы городов, и админский API простоял открытым
+     * два с половиной месяца — ни один тест не покраснел, потому что
+     * проверять было нечем.
+     */
+    public function test_unauthenticated_request_is_rejected(): void
+    {
+        $this->postJson('/api/admin/communities', [])->assertStatus(401);
+        $this->getJson('/api/admin/communities')->assertStatus(401);
+    }
+
     public function test_admin_communities_store_validates_required_name(): void
     {
+        $this->actingAsAdmin();
         $response = $this->postJson('/api/admin/communities', []);
 
         $response
@@ -23,6 +54,7 @@ class AdminCommunitiesTest extends TestCase
 
     public function test_admin_communities_store_creates_community_with_minimal_valid_payload(): void
     {
+        $this->actingAsAdmin();
         $city = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
 
         $payload = [
@@ -45,6 +77,7 @@ class AdminCommunitiesTest extends TestCase
 
     public function test_admin_communities_update_changes_fields(): void
     {
+        $this->actingAsAdmin();
         $city = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
         $otherCity = $this->insertCity('Санкт-Петербург', 'spb', 'active', 30.3351, 59.9343);
 
@@ -76,6 +109,7 @@ class AdminCommunitiesTest extends TestCase
 
     public function test_admin_communities_destroy_soft_deletes_community(): void
     {
+        $this->actingAsAdmin();
         $city = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
 
         $community = Community::create([
@@ -97,6 +131,7 @@ class AdminCommunitiesTest extends TestCase
 
     public function test_admin_communities_restore_recovers_soft_deleted_community(): void
     {
+        $this->actingAsAdmin();
         $city = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
 
         $community = Community::create([

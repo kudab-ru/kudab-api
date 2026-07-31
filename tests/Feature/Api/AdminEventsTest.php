@@ -6,16 +6,47 @@ use App\Models\City;
 use App\Models\Community;
 use App\Models\Event;
 use Carbon\Carbon;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Laravel\Sanctum\Sanctum;
+use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
 class AdminEventsTest extends TestCase
 {
     use RefreshDatabase;
 
+    /**
+     * Админские роуты закрыты `auth:sanctum` + `role:admin|superadmin`
+     * (routes/api.php), поэтому тест обязан прийти под ролью — иначе он
+     * проверяет не контроллер, а сам факт защиты, отвечая 401 на всё.
+     */
+    private function actingAsAdmin(): User
+    {
+        Role::findOrCreate('admin', 'web');
+        $user = User::factory()->create();
+        $user->assignRole('admin');
+        Sanctum::actingAs($user);
+
+        return $user;
+    }
+
+    /**
+     * Сторож самой защиты. В феврале middleware сняли с группы мимоходом,
+     * в коммите про статусы городов, и админский API простоял открытым
+     * два с половиной месяца — ни один тест не покраснел, потому что
+     * проверять было нечем.
+     */
+    public function test_unauthenticated_request_is_rejected(): void
+    {
+        $this->postJson('/api/admin/events', [])->assertStatus(401);
+        $this->getJson('/api/admin/events')->assertStatus(401);
+    }
+
     public function test_admin_events_store_validates_required_title(): void
     {
+        $this->actingAsAdmin();
         $response = $this->postJson('/api/admin/events', []);
 
         $response
@@ -25,6 +56,7 @@ class AdminEventsTest extends TestCase
 
     public function test_admin_events_store_creates_event_with_minimal_valid_payload(): void
     {
+        $this->actingAsAdmin();
         $city = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
 
         $community = Community::create([
@@ -59,6 +91,7 @@ class AdminEventsTest extends TestCase
 
     public function test_admin_events_update_changes_fields_and_derives_start_date_from_start_time(): void
     {
+        $this->actingAsAdmin();
         $city = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
 
         $community = Community::create([
@@ -98,6 +131,7 @@ class AdminEventsTest extends TestCase
 
     public function test_admin_events_destroy_soft_deletes_event(): void
     {
+        $this->actingAsAdmin();
         $city = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
 
         $community = Community::create([
@@ -128,6 +162,7 @@ class AdminEventsTest extends TestCase
 
     public function test_admin_events_restore_recovers_soft_deleted_event(): void
     {
+        $this->actingAsAdmin();
         $city = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
 
         $community = Community::create([
