@@ -434,13 +434,17 @@ class EventsController extends Controller
      * Похожие события по интересам (Interests Этап 3). Тот же формат карточки
      * что /events. Пустой список — штатно: фронт показывает фолбэк города.
      * Несуществующий id отдаёт пустой data (не 404) — блок просто скрывается.
+     * grouped / grouped_by_post — как в index: схлопывание по серии и по анонсу,
+     * с теми же обвесами карточки (group.dates, siblings).
      */
     public function related(int $id, Request $request): JsonResponse
     {
         $limit = (int) $request->input('limit', 8);
         $limit = max(1, min($limit, 24));
 
-        $items = $this->service->relatedWeb($id, $limit);
+        [$grouped, $groupedByPost] = $this->railGroupingFlags($request);
+
+        $items = $this->service->relatedWeb($id, $limit, $grouped, $groupedByPost);
 
         return response()->json([
             'data' => WebEventResource::collection($items),
@@ -457,9 +461,11 @@ class EventsController extends Controller
     public function companions(int $id, Request $request): JsonResponse
     {
         $limit = (int) $request->input('limit', 10);
-        $limit = max(8, min($limit, 12));
+        $limit = max(1, min($limit, 24));
 
-        $res = $this->service->companionsWeb($id, $limit);
+        [$grouped, $groupedByPost] = $this->railGroupingFlags($request);
+
+        $res = $this->service->companionsWeb($id, $limit, $grouped, $groupedByPost);
 
         return response()->json([
             'data' => WebEventResource::collection($res['items']),
@@ -470,6 +476,25 @@ class EventsController extends Controller
                 'community_name' => $res['community_name'],
             ],
         ]);
+    }
+
+    /**
+     * Флаги схлопывания для рейлов (/related, /companions) — те же имена и та же
+     * семантика, что у index: grouped = по серии дат, grouped_by_post = по анонсу.
+     *
+     * @return array{0: bool, 1: bool}
+     */
+    private function railGroupingFlags(Request $request): array
+    {
+        $v = validator($request->all(), [
+            'grouped'         => ['sometimes','boolean'],
+            'grouped_by_post' => ['sometimes','boolean'],
+        ])->validate();
+
+        return [
+            filter_var($v['grouped'] ?? false, FILTER_VALIDATE_BOOLEAN),
+            filter_var($v['grouped_by_post'] ?? false, FILTER_VALIDATE_BOOLEAN),
+        ];
     }
 
     /**

@@ -67,7 +67,10 @@ class WebEventDetailResource extends JsonResource
             }
         }
 
-        return [
+        $siblings = $this->getAttribute('siblings');
+        $siblings = is_array($siblings) && count($siblings) > 0 ? $siblings : null;
+
+        $out = [
             // базовый контракт (карточка)
             'id' => (int) $this->id,
             'title' => $this->title,
@@ -139,5 +142,11 @@ class WebEventDetailResource extends JsonResource
             'event_group_id' => $groupId > 0 ? $groupId : null,
             'group' => $this->eventGroupPayload(),
         ];
+
+        if ($siblings !== null) {
+            $out['siblings'] = $siblings;
+        }
+
+        return $out;
     }
 }

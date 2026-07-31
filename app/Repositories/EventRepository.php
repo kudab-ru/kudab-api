@@ -1301,6 +1301,7 @@ class EventRepository
 
         $this->hydrateImages(new EloquentCollection([$event]));
         $this->hydrateGroupDates(new EloquentCollection([$event]));
+        $this->hydrateSiblings(new EloquentCollection([$event]));
 
         $event->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
 
@@ -1322,14 +1323,23 @@ class EventRepository
      *
      * Пустой результат (у события нет интересов / нет пересечений) штатен:
      * вызывающий фронт показывает фолбэк «другие события города».
+     *
+     * $collapseGroups / $collapseByPost — те же две оси, что у ленты
+     * (grouped / grouped_by_post). Схлопывание идёт в PHP по overfetch-выборке
+     * (см. collapseRailDuplicates): рейл короткий, лишний ORDER BY по окну
+     * дороже, чем разобрать 4×limit строк в памяти.
      */
-    public function relatedByInterests(int $eventId, int $limit = 8): EloquentCollection
-    {
+    public function relatedByInterests(
+        int $eventId,
+        int $limit = 8,
+        bool $collapseGroups = false,
+        bool $collapseByPost = false
+    ): EloquentCollection {
         $limit = max(1, min($limit, 24));
 
         $base = Event::query()
             ->whereNull('deleted_at')
-            ->select('id', 'city_id')
+            ->select('id', 'city_id', 'event_group_id')
             ->find($eventId);
 
         if ($base === null) {
@@ -1366,7 +1376,7 @@ class EventRepository
             ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')
             ->where('events.city_id', (int) $base->city_id)
-            ->where('events.id', '<>', $eventId)
+            ->whereNotIn('events.id', $this->railSelfExcludeIds($eventId, $base->event_group_id))
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
                 $w->where('events.start_time', '>=', $cutoffTs)
                     ->orWhere(function ($x) use ($fromDateMsk) {
@@ -1398,7 +1408,9 @@ class EventRepository
             ->orderByRaw('events.start_time asc nulls last')
             ->orderBy('events.id', 'asc');
 
-        $events = $q->limit($limit)->get();
+        $events = $q->limit($this->railFetchLimit($limit, $collapseGroups || $collapseByPost))->get();
+
+        $events = $this->collapseRailDuplicates($events, $collapseGroups, $collapseByPost, $limit);
 
         $this->hydrateImages($events);
 
@@ -1406,7 +1418,189 @@ class EventRepository
             $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__shared_interests']);
         });
 
+        if ($collapseGroups) {
+            $this->hydrateGroupDates($events);
+        }
+        if ($collapseByPost) {
+            $this->hydrateSiblings($events);
+        }
+
         return $events;
+    }
+
+    /**
+     * Сколько строк тянуть из базы под рейл на $limit карточек. Без схлопывания —
+     * ровно $limit. Со схлопыванием берём с запасом: замер 31 июля на боевом
+     * слепке — до 9 повторов на 12 мест, ×4 покрывает и такой рейл.
+     */
+    private function railFetchLimit(int $limit, bool $collapsing): int
+    {
+        return $collapsing ? min($limit * 4, 96) : $limit;
+    }
+
+    /**
+     * Событие + вся его серия (federation-aware) + все соседи по анонсу.
+     * Рейлам это исключать обязательно: даты серии стоят пилюлями в билете,
+     * соседи по анонсу — в блоке «В том же анонсе», и повторять их карточками
+     * ниже значит показывать человеку то, что у него уже перед глазами.
+     *
+     * @return int[]
+     */
+    private function railSelfExcludeIds(int $eventId, ?int $eventGroupId): array
+    {
+        $ids = [$eventId];
+
+        if ($eventGroupId !== null && (int) $eventGroupId > 0) {
+            $fedKey = DB::table('event_groups')
+                ->where('id', (int) $eventGroupId)
+                ->whereNull('deleted_at')
+                ->selectRaw('COALESCE(federation_id, id) as fk')
+                ->value('fk');
+
+            if ($fedKey !== null) {
+                $seriesIds = DB::table('events as e')
+                    ->join('event_groups as eg', 'eg.id', '=', 'e.event_group_id')
+                    ->whereNull('eg.deleted_at')
+                    ->whereRaw('COALESCE(eg.federation_id, eg.id) = ?', [(int) $fedKey])
+                    ->pluck('e.id')
+                    ->all();
+
+                foreach ($seriesIds as $sid) {
+                    $ids[] = (int) $sid;
+                }
+            }
+        }
+
+        $pairs = DB::table('event_sources')
+            ->where('event_id', $eventId)
+            ->whereNotNull('source')
+            ->whereNotNull('post_external_id')
+            ->get(['source', 'post_external_id']);
+
+        if ($pairs->isNotEmpty()) {
+            $postIds = DB::table('event_sources')
+                ->where(function ($w) use ($pairs) {
+                    foreach ($pairs as $p) {
+                        $w->orWhere(function ($x) use ($p) {
+                            $x->where('source', $p->source)
+                                ->where('post_external_id', $p->post_external_id);
+                        });
+                    }
+                })
+                ->pluck('event_id')
+                ->all();
+
+            foreach ($postIds as $pid) {
+                $ids[] = (int) $pid;
+            }
+        }
+
+        return array_values(array_unique($ids));
+    }
+
+    /**
+     * Схлопывает уже отранжированную выборку рейла: одна карточка на серию
+     * (COALESCE(event_groups.federation_id, event_groups.id) — тот же ключ, что
+     * у hydrateGroupDates), одна на анонс (пара source + post_external_id) и одна
+     * на название. Порядок сохраняется, представителем становится первый по
+     * ранжированию.
+     *
+     * Третий ключ — название — ловит то, что первые два поймать не могут: одно и
+     * то же событие, о котором написали два разных организатора (разные посты,
+     * разные серии, в базе это два ряда). В рейле-подсказке одинаковые заголовки
+     * читаются как сбой, даже когда за ними стоят разные ряды.
+     */
+    private function collapseRailDuplicates(
+        EloquentCollection $events,
+        bool $bySeries,
+        bool $byPost,
+        int $limit
+    ): EloquentCollection {
+        if (!$bySeries && !$byPost) {
+            return $events->slice(0, $limit)->values();
+        }
+
+        if ($events->isEmpty()) {
+            return $events;
+        }
+
+        $fedByGroup = [];
+        if ($bySeries) {
+            $groupIds = $events->pluck('event_group_id')
+                ->filter(fn ($v) => is_numeric($v) && (int) $v > 0)
+                ->map(fn ($v) => (int) $v)
+                ->unique()
+                ->values()
+                ->all();
+
+            if ($groupIds) {
+                $fedByGroup = DB::table('event_groups')
+                    ->whereIn('id', $groupIds)
+                    ->whereNull('deleted_at')
+                    ->selectRaw('id, COALESCE(federation_id, id) as fk')
+                    ->pluck('fk', 'id')
+                    ->map(fn ($v) => (int) $v)
+                    ->all();
+            }
+        }
+
+        $pairsByEvent = [];
+        if ($byPost) {
+            $rows = DB::table('event_sources')
+                ->whereIn('event_id', $events->pluck('id')->all())
+                ->whereNotNull('source')
+                ->whereNotNull('post_external_id')
+                ->get(['event_id', 'source', 'post_external_id']);
+
+            foreach ($rows as $r) {
+                $pairsByEvent[(int) $r->event_id][] = $r->source . '|' . $r->post_external_id;
+            }
+        }
+
+        $seenSeries = [];
+        $seenPosts = [];
+        $seenTitles = [];
+        $out = [];
+
+        foreach ($events as $e) {
+            $title = $this->railTitleKey((string) ($e->title ?? ''));
+            if ($title !== '' && isset($seenTitles[$title])) continue;
+
+            if ($bySeries) {
+                $gid = (int) ($e->event_group_id ?? 0);
+                $key = $gid > 0 ? ($fedByGroup[$gid] ?? $gid) : null;
+                if ($key !== null) {
+                    if (isset($seenSeries[$key])) continue;
+                    $seenSeries[$key] = true;
+                }
+            }
+
+            if ($byPost) {
+                $keys = $pairsByEvent[(int) $e->id] ?? [];
+                $clash = false;
+                foreach ($keys as $k) {
+                    if (isset($seenPosts[$k])) { $clash = true; break; }
+                }
+                if ($clash) continue;
+                foreach ($keys as $k) $seenPosts[$k] = true;
+            }
+
+            if ($title !== '') $seenTitles[$title] = true;
+
+            $out[] = $e;
+            if (count($out) >= $limit) break;
+        }
+
+        return new EloquentCollection($out);
+    }
+
+    private function railTitleKey(string $title): string
+    {
+        $t = mb_strtolower(trim($title));
+        $t = preg_replace('/[«»"“”\'`.,:;!?()\[\]—–-]+/u', ' ', $t) ?? $t;
+        $t = preg_replace('/\s+/u', ' ', $t) ?? $t;
+
+        return trim((string) $t);
     }
 
     /**
@@ -1450,9 +1644,10 @@ class EventRepository
      * Web: «соседи» события по оси площадка/организатор (НЕ по интересам, как
      * relatedByInterests — это отдельное измерение). venue-first: есть venue_id →
      * события той же площадки; иначе — того же community_id (у 100% событий он
-     * есть). Исключаем само событие и все события того же event_group_id (это
-     * повторы того же события — не соседи). Видимость — webVisibleBaseQuery,
-     * порядок — ближайшая дата. Пустой/несуществующий id → items пуст, scope
+     * есть). Исключаем само событие, всю его серию (federation-aware) и соседей
+     * по анонсу — всё это у человека уже на экране. Видимость — webVisibleBaseQuery,
+     * порядок — ближайшая дата. $collapseGroups/$collapseByPost — те же две оси,
+     * что у ленты. Пустой/несуществующий id → items пуст, scope
      * (если знаем) отдаём для заголовка; фронт скрывает рейл при пустом data.
      *
      * @return array{
@@ -1463,11 +1658,15 @@ class EventRepository
      *   community_name: ?string
      * }
      */
-    public function companions(int $eventId, int $limit = 10): array
-    {
+    public function companions(
+        int $eventId,
+        int $limit = 10,
+        bool $collapseGroups = false,
+        bool $collapseByPost = false
+    ): array {
         $empty = ['items' => new EloquentCollection, 'scope' => null, 'label' => null, 'venue' => null, 'community_name' => null];
 
-        $limit = max(1, min($limit, 12));
+        $limit = max(1, min($limit, 24));
 
         $base = Event::query()
             ->whereNull('deleted_at')
@@ -1489,7 +1688,7 @@ class EventRepository
         }
 
         $q = $this->webVisibleBaseQuery()
-            ->where('events.id', '<>', $eventId)
+            ->whereNotIn('events.id', $this->railSelfExcludeIds($eventId, $base->event_group_id))
             ->with([
                 'venue:id,slug,name,kind',
                 'interests:id,slug,name',
@@ -1501,16 +1700,6 @@ class EventRepository
             $q->where('events.community_id', (int) $base->community_id);
         }
 
-        // повторы того же события (тот же event_group_id) — не соседи; события без
-        // группы оставляем (null group_id != текущая группа)
-        if ($base->event_group_id !== null) {
-            $groupId = (int) $base->event_group_id;
-            $q->where(function ($w) use ($groupId) {
-                $w->whereNull('events.event_group_id')
-                    ->orWhere('events.event_group_id', '<>', $groupId);
-            });
-        }
-
         $q->orderBy('__past_rank', 'asc')
             ->orderBy('__img_rank', 'asc')
             ->orderBy('__gray_rank', 'asc')
@@ -1518,11 +1707,20 @@ class EventRepository
             ->orderByRaw('events.start_time asc nulls last')
             ->orderBy('events.id', 'asc');
 
-        $items = $q->limit($limit)->get();
+        $items = $q->limit($this->railFetchLimit($limit, $collapseGroups || $collapseByPost))->get();
+        $items = $this->collapseRailDuplicates($items, $collapseGroups, $collapseByPost, $limit);
+
         $this->hydrateImages($items);
         $items->each(function ($e) {
             $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank']);
         });
+
+        if ($collapseGroups) {
+            $this->hydrateGroupDates($items);
+        }
+        if ($collapseByPost) {
+            $this->hydrateSiblings($items);
+        }
 
         if ($scope === 'venue') {
             $venue = Venue::query()->select('id', 'slug', 'name', 'kind')->find((int) $base->venue_id);
@@ -2379,6 +2577,40 @@ class EventRepository
             // да) и всё, что в pool. whereIn по пустому массиву = WHERE 0=1
             // (Laravel) → siblings пустые, что корректно при пустом pool.
             $q->whereIn('e.id', $eligibleEventIds);
+        } else {
+            $q->whereRaw("
+                NOT (
+                    EXISTS (
+                        SELECT 1
+                        FROM event_sources es_bl
+                        JOIN community_social_links csl ON csl.id = es_bl.social_link_id
+                        WHERE es_bl.event_id = e.id
+                          AND csl.status = 'black'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM event_sources es_bl2
+                        LEFT JOIN community_social_links csl2 ON csl2.id = es_bl2.social_link_id
+                        WHERE es_bl2.event_id = e.id
+                          AND (
+                            es_bl2.social_link_id IS NULL
+                            OR COALESCE(csl2.status, 'active') <> 'black'
+                          )
+                    )
+                )
+            ");
+
+            $q->where(function ($w) {
+                $w->whereNull('e.audience')
+                    ->orWhereNotIn('e.audience', ['kids', 'family']);
+            });
+
+            $q->where(function ($w) {
+                $w->whereNull('e.content_kind')
+                    ->orWhereIn('e.content_kind', [
+                        'entertainment', 'culture', 'education', 'sport', 'civic',
+                    ]);
+            });
         }
 
         $rows = $q->get();

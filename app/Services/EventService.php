@@ -59,9 +59,13 @@ class EventService
      * Web: похожие события по интересам (Interests Этап 3).
      * Пустая коллекция — штатно (фронт показывает фолбэк города).
      */
-    public function relatedWeb(int $id, int $limit = 8): EloquentCollection
-    {
-        return $this->repo->relatedByInterests($id, $limit);
+    public function relatedWeb(
+        int $id,
+        int $limit = 8,
+        bool $grouped = false,
+        bool $groupedByPost = false
+    ): EloquentCollection {
+        return $this->repo->relatedByInterests($id, $limit, $grouped, $groupedByPost);
     }
 
     /**
@@ -72,9 +76,13 @@ class EventService
      *
      * @return array{items: EloquentCollection, scope: 'venue'|'community'|null, label: ?string, venue: ?array, community_name: ?string}
      */
-    public function companionsWeb(int $id, int $limit = 10): array
-    {
-        return $this->repo->companions($id, $limit);
+    public function companionsWeb(
+        int $id,
+        int $limit = 10,
+        bool $grouped = false,
+        bool $groupedByPost = false
+    ): array {
+        return $this->repo->companions($id, $limit, $grouped, $groupedByPost);
     }
 
     /**
