@@ -50,6 +50,13 @@ trait BuildsEventGroup
             'dates'      => $dates,
         ];
 
+        // Последний предстоящий день серии. Список дат обрезан на двенадцати днях,
+        // поэтому «идёт до …» без этого поля считать не из чего.
+        $lastDay = $this->getAttribute('group_last_day');
+        if (is_string($lastDay) && $lastDay !== '') {
+            $group['last_day'] = substr($lastDay, 0, 10);
+        }
+
         // вид повторения (регулярные события PR3): фронт строит фразу
         // «по средам в 16:00» / «ежедневно до 10 июля» / «в репертуаре»
         $series = $this->getAttribute('group_series');

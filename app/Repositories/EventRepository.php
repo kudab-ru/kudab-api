@@ -2217,7 +2217,9 @@ class EventRepository
         if ($events->isEmpty()) return;
 
         $MAX_DAYS = 12;
-        $MAX_TIMES_PER_DAY = 4;
+        // Времён в дне отдаём столько, сколько есть: у квестов и кино их 5-6, и обрезка
+        // до четырёх делала подпись «сегодня ещё 6 сеансов» неподтверждаемой на экране.
+        $MAX_TIMES_PER_DAY = 12;
 
         $repGroupIds = $events->pluck('event_group_id')
             ->filter(fn($v) => is_numeric($v) && (int)$v > 0)
@@ -2272,6 +2274,9 @@ class EventRepository
             ->selectRaw('count(*) OVER (PARTITION BY COALESCE(eg.federation_id, eg.id)) as __grp_count')
             ->selectRaw("COALESCE(e.start_date, (e.start_time AT TIME ZONE 'Europe/Moscow')::date) as __day")
             ->selectRaw("(CASE WHEN COALESCE(e.start_date, (e.start_time AT TIME ZONE 'Europe/Moscow')::date) < (now() AT TIME ZONE 'Europe/Moscow')::date THEN 1 ELSE 0 END) as __day_past")
+            // сеанс уже начался: нужен отдельно от «день прошёл», иначе у квеста с шестью
+            // сеансами в 22:00 страница всё ещё обещает шесть
+            ->selectRaw('(CASE WHEN e.start_time IS NOT NULL AND e.start_time < now() THEN 1 ELSE 0 END) as __sess_past')
             ->whereNull('eg.deleted_at')
             ->where('ct.status', 'active')
             ->where('e.status', 'active')
@@ -2319,6 +2324,7 @@ class EventRepository
         $buckets = [];
         $cntMap = [];
         $daySessions = [];
+        $aheadDays = [];
 
         foreach ($rows as $r) {
             $gid = (int) $r->__fed_key; // ключ карты = федерация (или сама группа, если не федерирована)
@@ -2333,11 +2339,20 @@ class EventRepository
             $day = $r->__day !== null ? substr((string) $r->__day, 0, 10) : null;
             if ($day === null || $day === '') continue;
 
+            $dayPast = ((int) ($r->__day_past ?? 0)) === 1;
+
+            // сегодняшние сеансы, которые уже начались, для страницы не существуют:
+            // ни в счётчике дня, ни в списке времён, ни как ссылка дня
+            if (!$dayPast && ((int) ($r->__sess_past ?? 0)) === 1) continue;
+
             $daySessions[$gid][$day] = ($daySessions[$gid][$day] ?? 0) + 1;
+
+            if (!$dayPast) {
+                $aheadDays[$gid][$day] = true; // считаем ДО потолка в 12 дней
+            }
 
             if (!isset($buckets[$gid])) $buckets[$gid] = ['past' => [], 'ahead' => []];
 
-            $dayPast = ((int) ($r->__day_past ?? 0)) === 1;
             $side = $dayPast ? 'past' : 'ahead';
 
             if (!isset($buckets[$gid][$side][$day])) {
@@ -2402,16 +2417,25 @@ class EventRepository
             }
 
             $map[$gid] = $out;
-            $daysMap[$gid] = count($daySessions[$gid] ?? []);
+
+            // Дней ВПЕРЕДИ, а не всех подряд: раньше сюда попадали и прошедшие дни из
+            // окна PAST_LOOKBACK_DAYS, и «идёт N дней» завышалось на неделю.
+            $ahead = array_keys($aheadDays[$gid] ?? []);
+            sort($ahead);
+            $daysMap[$gid] = count($ahead);
+            // Последний предстоящий день считается по ВСЕЙ серии, а список дней обрезан
+            // на MAX_DAYS — без этого поля «идёт до 16 августа» превращалось в «до 11-го».
+            $lastDayMap[$gid] = $ahead ? end($ahead) : null;
         }
 
-        $events->each(function (Event $e) use ($map, $cntMap, $daysMap, $repFed, $seriesByGroup) {
+        $events->each(function (Event $e) use ($map, $cntMap, $daysMap, $lastDayMap, $repFed, $seriesByGroup) {
             $egid = (int) ($e->event_group_id ?? 0);
             $gid = $repFed[$egid] ?? $egid; // event_group_id rep'а → его fed-ключ
             if ($gid > 0 && isset($map[$gid])) {
                 $e->setAttribute('group_dates', $map[$gid]); // уже лимитировано
                 $e->setAttribute('group_count', (int) ($cntMap[$gid] ?? count($map[$gid])));
                 $e->setAttribute('group_days_count', (int) ($daysMap[$gid] ?? count($map[$gid])));
+                $e->setAttribute('group_last_day', $lastDayMap[$gid] ?? null);
 
                 $s = $seriesByGroup->get($egid);
                 if ($s !== null) {
@@ -2420,7 +2444,9 @@ class EventRepository
                         : (array) ($s->series_meta ?? []);
                     $e->setAttribute('group_series', [
                         'kind' => (string) $s->series_kind,
-                        'stable_time' => $meta['stable_time'] ?? null,
+                        // в разборе время лежит по Гринвичу, а фраза на сайте московская:
+                        // «по средам в 07:00» вместо 10:00 — врало на три часа
+                        'stable_time' => $this->stableTimeMsk($meta['stable_time'] ?? null),
                         'dow' => isset($meta['dow']) ? (int) $meta['dow'] : null,
                         'last' => $meta['last'] ?? null,
                         'next_at' => $s->next_at !== null
@@ -2430,6 +2456,19 @@ class EventRepository
                 }
             }
         });
+    }
+
+    private function stableTimeMsk(?string $utc): ?string
+    {
+        if ($utc === null || trim($utc) === '') return null;
+
+        try {
+            return CarbonImmutable::createFromFormat('H:i', trim($utc), 'UTC')
+                ->setTimezone('Europe/Moscow')
+                ->format('H:i');
+        } catch (\Throwable $e) {
+            return $utc;
+        }
     }
 
     private function sessionTimeLabel(object $r): ?string
