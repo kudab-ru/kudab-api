@@ -2404,6 +2404,7 @@ class EventRepository
 
         $map = [];
         $daysMap = [];
+        $lastDayMap = [];
         foreach ($buckets as $gid => $b) {
             $days = $b['ahead'];
             $room = $MAX_DAYS - count($days);
