@@ -2167,14 +2167,6 @@ class EventRepository
             return;
         }
 
-        // Запрос «детям» — единственный, ради которого гейт снимается: он и так
-        // сузит выдачу до детской аудитории, а общий гейт её как раз прячет.
-        if (!empty($filters['kids'])) {
-            $q->whereIn('events.audience', ['kids', 'family']);
-
-            return;
-        }
-
         $q->webMainFeedTaxonomy();
     }
 
