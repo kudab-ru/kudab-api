@@ -212,6 +212,9 @@ class EventRepository
         $q = Event::query()
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
             ->where('ct.status', 'active')
+            // needs_geo — событие без подтверждённого места: показывать его
+            // в ленте нечестно, человек не поймёт, куда идти.
+            ->where('events.status', 'active')
             ->whereNull('events.deleted_at')
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
                 $w->where('events.start_time', '>=', $cutoffTs)
@@ -1067,6 +1070,7 @@ class EventRepository
             ->select('events.*', 'ct.slug as city_slug')
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
             ->where('ct.status', 'active')
+            ->where('events.status', 'active')
             ->whereNull('events.deleted_at')
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
                 $w->where('events.start_time', '>=', $cutoffTs)
@@ -1374,6 +1378,7 @@ class EventRepository
             ->selectRaw("$sharedSql as __shared_interests")
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
             ->where('ct.status', 'active')
+            ->where('events.status', 'active')
             ->whereNull('events.deleted_at')
             ->where('events.city_id', (int) $base->city_id)
             ->whereNotIn('events.id', $this->railSelfExcludeIds($eventId, $base->event_group_id))
@@ -1605,9 +1610,14 @@ class EventRepository
 
     /**
      * Канонический web-скелет видимости для лент/рейлов: select events.* +
-     * city_slug, join active-city, not-deleted, окно PAST_LOOKBACK_DAYS (future),
-     * past/img/gray суб-ранги, blacklist- и taxonomy-гейты. НЕ ставит city_id и
-     * ORDER BY — это делает вызывающий. Пока используется только companions();
+     * city_slug, join active-city, events.status=active, not-deleted, окно
+     * PAST_LOOKBACK_DAYS (future), past/img/gray суб-ранги, blacklist- и
+     * taxonomy-гейты. НЕ ставит city_id и ORDER BY — это делает вызывающий.
+     * status=active обязателен: needs_geo — событие без подтверждённого места,
+     * в подборке оно бесполезно (человеку некуда идти). Прямая ссылка на такое
+     * событие при этом продолжает работать — findWebWithDetails статус не
+     * фильтрует намеренно, иначе ломались бы уже разосланные ссылки.
+     * Пока используется только companions();
      * relatedByInterests/paginateUpcomingWeb на него НЕ переведены намеренно (они
      * покрыты тестами ленты — вынос это отдельный cleanup, не смешиваем с фичей).
      */
@@ -1621,6 +1631,7 @@ class EventRepository
             ->select('events.*', 'ct.slug as city_slug')
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
             ->where('ct.status', 'active')
+            ->where('events.status', 'active')
             ->whereNull('events.deleted_at')
             ->where(function ($w) use ($cutoffTs, $fromDateMsk) {
                 $w->where('events.start_time', '>=', $cutoffTs)
