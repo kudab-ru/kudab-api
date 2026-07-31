@@ -96,14 +96,10 @@ class EventsController extends Controller
 
         unset($v['when']);
 
-        $kids = !empty($v['kids']);
-        unset($v['kids']);
-        if ($kids) {
-            $qVal = trim((string) ($v['q'] ?? ''));
-            if ($qVal === '') {
-                $v['q'] = 'дет';
-            }
-        }
+        // Раньше «детям» подставляло в поиск слово «дет»: приносило «детектив» и
+        // «Дети капитана Гранта» и теряло половину настоящих детских. Отбираем по
+        // полю аудитории — оно заполнено у большинства событий.
+        $v['kids'] = !empty($v['kids']);
 
         if (array_key_exists('q', $v)) {
             $v['q'] = trim((string)$v['q']);
@@ -209,14 +205,10 @@ class EventsController extends Controller
         }
         unset($v['when']);
 
-        $kids = !empty($v['kids']);
-        unset($v['kids']);
-        if ($kids) {
-            $qVal = trim((string) ($v['q'] ?? ''));
-            if ($qVal === '') {
-                $v['q'] = 'дет';
-            }
-        }
+        // Раньше «детям» подставляло в поиск слово «дет»: приносило «детектив» и
+        // «Дети капитана Гранта» и теряло половину настоящих детских. Отбираем по
+        // полю аудитории — оно заполнено у большинства событий.
+        $v['kids'] = !empty($v['kids']);
         if (array_key_exists('q', $v)) {
             $v['q'] = trim((string) $v['q']);
         }
@@ -381,14 +373,10 @@ class EventsController extends Controller
         }
         unset($v['when']);
 
-        $kids = !empty($v['kids']);
-        unset($v['kids']);
-        if ($kids) {
-            $qVal = trim((string) ($v['q'] ?? ''));
-            if ($qVal === '') {
-                $v['q'] = 'дет';
-            }
-        }
+        // Раньше «детям» подставляло в поиск слово «дет»: приносило «детектив» и
+        // «Дети капитана Гранта» и теряло половину настоящих детских. Отбираем по
+        // полю аудитории — оно заполнено у большинства событий.
+        $v['kids'] = !empty($v['kids']);
 
         if (array_key_exists('q', $v)) {
             $v['q'] = trim((string) $v['q']);
