@@ -1300,7 +1300,7 @@ class EventRepository
         $event = $q->firstOrFail();
 
         $this->hydrateImages(new EloquentCollection([$event]));
-        $this->hydrateGroupDates(new EloquentCollection([$event]));
+        $this->hydrateGroupDates(new EloquentCollection([$event]), 62);
         $this->hydrateSiblings(new EloquentCollection([$event]));
 
         $event->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
@@ -2212,11 +2212,15 @@ class EventRepository
         return new EloquentCollection($result);
     }
 
-    private function hydrateGroupDates(EloquentCollection $events): void
+    /**
+     * $maxDays: на карточке ленты хватает двенадцати дней, а страница события
+     * показывает серию целиком — там прятать дни нельзя, человек ищет конкретное число.
+     */
+    private function hydrateGroupDates(EloquentCollection $events, int $maxDays = 12): void
     {
         if ($events->isEmpty()) return;
 
-        $MAX_DAYS = 12;
+        $MAX_DAYS = max(1, $maxDays);
         // Времён в дне отдаём столько, сколько есть: у квестов и кино их 5-6, и обрезка
         // до четырёх делала подпись «сегодня ещё 6 сеансов» неподтверждаемой на экране.
         $MAX_TIMES_PER_DAY = 12;
