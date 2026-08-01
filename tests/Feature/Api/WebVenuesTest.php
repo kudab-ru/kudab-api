@@ -210,6 +210,72 @@ class WebVenuesTest extends TestCase
             ->assertJsonPath('data.0.next_event.title', 'Видимый концерт');
     }
 
+    /**
+     * Сеансы одного события — это одно событие, а не пятнадцать.
+     *
+     * Структурные источники заводят строку на каждый сеанс: у парка
+     * скалодромов «1000 Узлов» их 149 при одном событии, у квест-комнаты 754
+     * при пяти квестах. Пока каталог считал строки, аттракционы стояли в его
+     * начале, а концертные залы с настоящей афишей — в конце, и адрес
+     * ночного клуба на проспекте Революции, 56 читался как парк.
+     */
+    public function test_index_counts_sessions_of_one_event_as_one(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-07-12 14:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        // Аттракцион: одно событие, много ежедневных сеансов.
+        $park = $this->createVenue($vrn->id, 'Парк скалодромов', 'park-skalodromov');
+        $parkGroup = $this->createEventGroup($vrn->id, $community->id, 'park');
+        for ($day = 13; $day <= 22; $day++) {
+            $this->createEvent($vrn->id, $park->id, $community->id, 'Билеты в парк', "2026-07-{$day} 12:00:00")
+                ->forceFill(['event_group_id' => $parkGroup])->save();
+        }
+
+        // Клуб: три разных концерта, по одному сеансу.
+        $club = $this->createVenue($vrn->id, 'Ночной клуб', 'nochnoi-klub');
+        foreach (['Мураками' => 14, 'Шура' => 15, 'Markul' => 16] as $title => $day) {
+            $group = $this->createEventGroup($vrn->id, $community->id, 'club-'.$day);
+            $this->createEvent($vrn->id, $club->id, $community->id, $title, "2026-07-{$day} 19:00:00")
+                ->forceFill(['event_group_id' => $group])->save();
+        }
+
+        $data = collect($this->getJson('/api/web/venues?city_id='.$vrn->id)->assertOk()->json('data'))
+            ->keyBy('name');
+
+        $this->assertSame(1, $data['Парк скалодромов']['events_count'], 'десять сеансов = одно событие');
+        $this->assertSame(1, $data['Парк скалодромов']['upcoming_total']);
+        $this->assertSame(3, $data['Ночной клуб']['events_count'], 'три концерта = три события');
+        $this->assertSame(3, $data['Ночной клуб']['upcoming_total']);
+
+        // И, главное, клуб теперь выше аттракциона в каталоге.
+        $names = collect($this->getJson('/api/web/venues?city_id='.$vrn->id)->json('data'))->pluck('name');
+        $this->assertTrue(
+            $names->search('Ночной клуб') < $names->search('Парк скалодромов'),
+            'настоящая афиша обгоняет ежедневные сеансы',
+        );
+    }
+
+    /** Событие без группы считается само по себе, а не теряется в NULL. */
+    public function test_index_counts_ungrouped_events_individually(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-07-12 14:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+        $venue = $this->createVenue($vrn->id, 'Без групп', 'bez-grupp');
+
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Первое', '2026-07-14 19:00:00');
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Второе', '2026-07-15 19:00:00');
+
+        $this->getJson('/api/web/venues?city_id='.$vrn->id)
+            ->assertOk()
+            ->assertJsonPath('data.0.events_count', 2)
+            ->assertJsonPath('data.0.upcoming_total', 2);
+    }
+
     public function test_index_venue_without_events_has_null_next_event_and_zero_total(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
@@ -656,6 +722,19 @@ class WebVenuesTest extends TestCase
     }
 
     /** Событие на площадке; $startTimeMsk — 'Y-m-d H:i:s' в Europe/Moscow. */
+    /** Группа событий — та единица, которой каталог считает афишу. */
+    private function createEventGroup(int $cityId, int $communityId, string $key): int
+    {
+        return (int) DB::table('event_groups')->insertGetId([
+            'community_id' => $communityId,
+            'city_id' => $cityId,
+            'group_key' => 'grp-'.$key,
+            'title_norm' => $key,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
     private function createEvent(int $cityId, int $venueId, int $communityId, string $title, string $startTimeMsk): Event
     {
         $start = Carbon::parse($startTimeMsk, 'Europe/Moscow');

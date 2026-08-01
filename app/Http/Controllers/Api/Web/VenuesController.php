@@ -276,8 +276,18 @@ class VenuesController extends Controller
      */
     private function baseQuery()
     {
-        $eventsCountSql = '(SELECT COUNT(*) FROM events e
-            WHERE e.venue_id = venues.id AND e.deleted_at IS NULL)';
+        // Считаем СОБЫТИЯ, а не строки. Структурные источники заводят строку
+        // на каждый сеанс: у парка скалодромов «1000 Узлов» их 149 при одном
+        // событии, у квест-комнаты 754 при пяти квестах. По сырому COUNT(*)
+        // каталог возглавляли аттракционы, а концертные залы с настоящей
+        // афишей падали вниз — и на проспекте Революции, 56 адрес ночного
+        // клуба читался как парк.
+        // Единицей события в проекте служит event_group_id; событию без
+        // группы (их единицы) подставляем собственный id, иначе COUNT DISTINCT
+        // проглотил бы все NULL разом.
+        $eventsCountSql = "(SELECT COUNT(DISTINCT COALESCE(e.event_group_id::text, 'e' || e.id))
+            FROM events e
+            WHERE e.venue_id = venues.id AND e.deleted_at IS NULL)";
 
         // Первая картинка из event_sources.images первого (по дате) event'а
         // на этом venue. images — postgres `json` (не jsonb), используем
@@ -331,7 +341,10 @@ class VenuesController extends Controller
 
         $todayMsk = now('Europe/Moscow')->toDateString();
 
-        $inner = Event::query()
+        // Один фильтр на оба запроса — «ближайшее» и «всего предстоящих»
+        // обязаны описывать одно и то же множество, иначе карточка начнёт
+        // противоречить сама себе.
+        $upcoming = fn () => Event::query()
             ->visibleWeb()
             ->whereIn('events.venue_id', $ids)
             ->where(function ($w) use ($todayMsk) {
@@ -341,7 +354,23 @@ class VenuesController extends Controller
                             ->whereNotNull('events.start_date')
                             ->where('events.start_date', '>=', $todayMsk);
                     });
-            })
+            });
+
+        // Отдельным запросом, потому что COUNT(DISTINCT …) OVER (…) postgres
+        // не умеет. Считаем события, а не сеансы: см. events_count в
+        // baseQuery() — там та же причина.
+        $totals = [];
+        $totalRows = $upcoming()
+            ->groupBy('events.venue_id')
+            ->select('events.venue_id')
+            ->selectRaw("COUNT(DISTINCT COALESCE(events.event_group_id::text, 'e' || events.id)) AS distinct_total")
+            ->get();
+
+        foreach ($totalRows as $row) {
+            $totals[(int) $row->venue_id] = (int) $row->distinct_total;
+        }
+
+        $inner = $upcoming()
             ->select([
                 'events.venue_id',
                 'events.id',
@@ -350,7 +379,6 @@ class VenuesController extends Controller
                 'events.start_date',
                 'events.time_precision',
             ])
-            ->selectRaw('COUNT(*) OVER (PARTITION BY events.venue_id) AS upcoming_total')
             // хронология «ближайшего» — как в ленте: start_date, потом start_time
             ->selectRaw('ROW_NUMBER() OVER (
                 PARTITION BY events.venue_id
@@ -370,7 +398,7 @@ class VenuesController extends Controller
             }
 
             $byVenue[(int) $r->venue_id] = [
-                'total' => (int) $r->upcoming_total,
+                'total' => (int) ($totals[(int) $r->venue_id] ?? 0),
                 'next'  => [
                     'id'             => (int) $r->id,
                     'title'          => (string) $r->title,

@@ -16,8 +16,11 @@ use Illuminate\Http\Resources\Json\JsonResource;
  * `next_event` / `upcoming_total` — VenuesController::attachUpcoming()
  * (батч-window-запрос по видимым-в-вебе ПРЕДСТОЯЩИМ событиям). Имена полей
  * зафиксированы фронтом: kudab-frontend useWebVenues.ts (WebVenueDto).
- * `events_count` остаётся архивным тоталом — используется только для
- * сортировки каталога, карточка его не показывает.
+ * `events_count` — архивный тотал за всё время, используется только для
+ * сортировки каталога, карточка его не показывает. Считается по РАЗНЫМ
+ * событиям (`event_group_id`), а не по строкам: структурные источники заводят
+ * строку на каждый сеанс, и по сырому COUNT(*) каталог возглавляли
+ * аттракционы с ежедневными слотами. То же правило у `upcoming_total`.
  */
 class WebVenueResource extends JsonResource
 {
