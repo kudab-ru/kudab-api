@@ -270,6 +270,24 @@ class EventsController extends Controller
                 ->all();
         }
 
+        // Темы точки: карта их не отдавала, и знак темы на метке фронту брать было неоткуда.
+        // Отдаём слоги как есть (включая жанры-листья) — сведение к корню и выбор одной темы
+        // из нескольких живут во фронте, где для этого есть карта алиасов.
+        $eventIds = [];
+        foreach ($items as $e) {
+            $eventIds[] = (int) $e->id;
+        }
+        $interestsById = [];
+        if ($eventIds !== []) {
+            $rows = \Illuminate\Support\Facades\DB::table('event_interest')
+                ->join('interests', 'interests.id', '=', 'event_interest.interest_id')
+                ->whereIn('event_interest.event_id', $eventIds)
+                ->get(['event_interest.event_id as eid', 'interests.slug as slug']);
+            foreach ($rows as $r) {
+                $interestsById[(int) $r->eid][] = (string) $r->slug;
+            }
+        }
+
         $features = [];
         foreach ($items as $e) {
             if ($e->latitude === null || $e->longitude === null) {
@@ -308,6 +326,7 @@ class EventsController extends Controller
                     'venue_id'  => $e->venue_id !== null ? (int) $e->venue_id : null,
                     // ключ группы: фронт схлопывает точки одной группы (серия ИЛИ кросс-пост) в одну
                     'group_key' => $groupKey,
+                    'interests' => $interestsById[(int) $e->id] ?? [],
                 ],
             ];
         }
