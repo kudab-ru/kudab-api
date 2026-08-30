@@ -176,6 +176,10 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('venues/{id}', [\App\Http\Controllers\Api\Web\VenuesController::class, 'show'])->whereNumber('id');
     Route::get('venues/{id}/calendar', [\App\Http\Controllers\Api\Web\VenuesController::class, 'calendar'])->whereNumber('id');
     Route::get('venues/{id}/past-events', [\App\Http\Controllers\Api\Web\VenuesController::class, 'pastEvents'])->whereNumber('id');
+    // Соседние площадки: «раз это место не подошло — вот что рядом». Только с
+    // событиями (площадка-пустышка = тупик и мусор в индексе), сперва те, у
+    // кого есть будущая афиша, потом по расстоянию.
+    Route::get('venues/{id}/nearby', [\App\Http\Controllers\Api\Web\VenuesController::class, 'nearby'])->whereNumber('id');
 
     // Публичный каталог источников для /sources. Порядок важен: index (строка
     // "communities") регистрируем ДО communities/{id} (whereNumber подстрахует).

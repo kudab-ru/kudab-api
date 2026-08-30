@@ -27,6 +27,42 @@ class EventRepository
     public const PAST_LOOKBACK_DAYS = 7;
 
     /**
+     * Предикат «событие уже прошло» — тот самый, по которому /past-events решает,
+     * что показать в блоке «Здесь уже проходило». Public, потому что потребитель
+     * появился снаружи: ритм площадки (VenuesController::attachRhythm) обязан
+     * считать прошлое ровно тем же правилом. Пока правила расходились, страница
+     * Музея Бунина писала «здесь давно тихо» и двумя блоками ниже показывала
+     * события трёхнедельной давности.
+     *
+     * Оба ветвления пишутся ЯВНО (IS NOT NULL / IS NULL), а не через отрицание
+     * «предстоящего»: у события без start_time сравнение `start_time >= …` даёт
+     * NULL, и NOT NULL — тоже NULL, то есть строка молча выпадает из выборки.
+     * Таких событий в базе 247 на 39 площадках — это не редкий край.
+     *
+     * «Сейчас» приходит СВЯЗАННЫМ ПАРАМЕТРОМ из PHP, а не постгресовым now().
+     * Две причины. Первая: now() внутри SQL не двигается Carbon::setTestNow(),
+     * поэтому любой сторож границы прошлого зеленел по настоящим часам вместо
+     * заявленных — так тест ночной щели полгода «проверял» поведение, которого
+     * у кода не было. Вторая: обе границы теперь готовые литералы (инстант с
+     * offset и МСК-дата), и выдача перестаёт зависеть от таймзоны сессии БД.
+     *
+     * @return array{0: string, 1: array{0: string, 1: string}} [sql, bindings]
+     */
+    public static function pastExpression(): array
+    {
+        $now = CarbonImmutable::now();
+
+        return [
+            '((events.start_time IS NOT NULL AND events.start_time < ?)
+                OR (events.start_time IS NULL AND events.start_date IS NOT NULL AND events.start_date < ?::date))',
+            [
+                $now->utc()->subHours(self::PAST_GRACE_HOURS)->format('Y-m-d H:i:sP'),
+                $now->setTimezone('Europe/Moscow')->toDateString(),
+            ],
+        ];
+    }
+
+    /**
      * Порог «событие в области, а не в городе» (метры от центра города события).
      * Агрегаторы (Qtickets) ставят city_id=Воронеж событиям в райцентрах за 50-100 км —
      * coords реальные, city_id это город-скоуп. Такие опускаем вниз ленты (__region_rank),
@@ -1909,28 +1945,24 @@ class EventRepository
      *   - ungrouped: история = каждый показ отдельной приглушённой карточкой
      *     (12 показов ≠ 1 карточка); заодно снимает тяжёлую window-машину групп;
      *   - обратная хронология (свежее прошлое сверху);
-     *   - past-предикат ПОБИТОВО совпадает с CASE в addPastFlags() (grace 1ч,
-     *     SQL-время, НЕ PHP), иначе на границе суток карточка попала бы в ленту с
-     *     __is_past=0 (не приглушена). SYNC с addPastFlags ниже — менять вместе.
+     *   - past-предикат — общий pastExpression() с addPastFlags(): одно выражение
+     *     и одни связанные значения времени на оба, иначе на границе суток
+     *     карточка попала бы в ленту с __is_past=0 (не приглушена).
      *
      * @return array{page: \Illuminate\Contracts\Pagination\LengthAwarePaginator, totalEvents: int}
      */
     public function listVenuePast(int $venueId, int $perPage = 24, int $page = 1): array
     {
-        $graceHours = (int) self::PAST_GRACE_HOURS;
-
         $q = Event::query()
             ->select('events.*', 'ct.slug as city_slug')
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
             ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')
             ->where('events.venue_id', $venueId)
-            // past-предикат = CASE addPastFlags (SQL-время, не PHP → фильтр и флаг
-            // не разъедутся на границе суток). SYNC: addPastFlags $caseSql.
-            ->where(function ($w) use ($graceHours) {
-                $w->whereRaw("events.start_time IS NOT NULL AND events.start_time < (now() - interval '{$graceHours} hours')")
-                    ->orWhereRaw("events.start_time IS NULL AND events.start_date IS NOT NULL AND events.start_date < (now() AT TIME ZONE 'Europe/Moscow')::date");
-            })
+            // past-предикат общий с addPastFlags(): одно выражение и одни и те же
+            // связанные значения времени, поэтому фильтр и флаг __is_past не
+            // разъедутся на границе суток.
+            ->whereRaw(...self::pastExpression())
             ->with(['interests:id,slug,name']);
 
         $this->addPastFlags($q);                    // __is_past=true всем + __past_rank
@@ -1952,18 +1984,18 @@ class EventRepository
         return ['page' => $paginator, 'totalEvents' => (int) $paginator->total()];
     }
 
+    /**
+     * Флаг «карточка про прошлое» для приглушения в ленте. Берёт ровно тот же
+     * предикат и те же связанные значения времени, что фильтр в listVenuePast:
+     * иначе на границе суток событие попадало бы в выборку прошлого с
+     * __is_past=0 и рисовалось бы как предстоящее.
+     */
     private function addPastFlags($q): void
     {
-        $graceHours = (int) self::PAST_GRACE_HOURS;
+        [$pastSql, $bindings] = self::pastExpression();
 
-        $caseSql = "CASE WHEN (
-            (events.start_time IS NOT NULL AND events.start_time < (now() - interval '{$graceHours} hours'))
-            OR
-            (events.start_time IS NULL AND events.start_date IS NOT NULL AND events.start_date < (now() AT TIME ZONE 'Europe/Moscow')::date)
-        ) THEN 1 ELSE 0 END";
-
-        $q->selectRaw("$caseSql as __past_rank");
-        $q->selectRaw("(($caseSql) = 1) as __is_past");
+        $q->selectRaw("CASE WHEN {$pastSql} THEN 1 ELSE 0 END as __past_rank", $bindings);
+        $q->selectRaw("({$pastSql}) as __is_past", $bindings);
     }
 
     private function addGrayRank($q): void

@@ -7,6 +7,7 @@ use App\Http\Resources\WebVenueDetailResource;
 use App\Http\Resources\WebVenueResource;
 use App\Models\Event;
 use App\Models\Venue;
+use App\Repositories\EventRepository;
 use App\Services\EventService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -18,7 +19,8 @@ use Illuminate\Support\Facades\DB;
  * Public-frontend venue endpoints (PR4):
  *   GET /api/web/venues             — каталог с фильтрами;
  *   GET /api/web/venues/map         — geojson FeatureCollection для карты;
- *   GET /api/web/venues/{id}        — детальная карточка + future events.
+ *   GET /api/web/venues/{id}        — детальная карточка + future events;
+ *   GET /api/web/venues/{id}/nearby — соседние площадки по расстоянию.
  *
  * `cover_image_url` (A4(a)) — proxy картинки первого event'а через
  * EventSource.images. Один subquery на запрос, без N+1.
@@ -29,6 +31,36 @@ use Illuminate\Support\Facades\DB;
  */
 class VenuesController extends Controller
 {
+    /**
+     * Предикат «предстоящего» события — буква в букву тот же, что в
+     * attachUpcoming() и в паблик-ленте. Вынесен в константу, потому что
+     * потребителей стало трое (ближайшее событие, ритм площадки, сортировка
+     * соседей), а разъехавшаяся граница дала бы страницу, где в шапке висит
+     * «ближайшее», а место помечено спящим.
+     *
+     * Про саму границу: сравнение timestamptz-колонки с голой датой ставит её
+     * на полночь ТАЙМЗОНЫ СЕССИИ БД (у нас UTC), то есть на 03:00 МСК, а не на
+     * московскую полночь. Это унаследовано от EventRepository, и чинить это
+     * здесь нельзя: /web/events считает так же, а страница площадки, которая
+     * спорит с лентой о том, что такое «сегодня», хуже, чем сдвинутая на три
+     * часа граница. Ниже — оба плейсхолдера получают одну и ту же МСК-дату.
+     */
+    private const UPCOMING_SQL = '(events.start_time >= ?
+        OR (events.start_time IS NULL AND events.start_date IS NOT NULL AND events.start_date >= ?))';
+
+    /** Окно наблюдения за ритмом места и порог «спячки» — те же полгода. */
+    private const RHYTHM_MONTHS = 6;
+
+    /**
+     * Порог правдоподобия для events_per_month. Два события за полгода — это
+     * не ритм, а совпадение: «0 в месяц» после округления соврало бы про место,
+     * где что-то всё-таки было, а «1 в месяц» — про регулярность, которой нет.
+     */
+    private const RHYTHM_MIN_EVENTS = 3;
+
+    /** Меньше месяца наблюдений — делить на месяцы нечего. */
+    private const RHYTHM_MIN_DAYS = 30;
+
     public function __construct(private readonly EventService $events)
     {
     }
@@ -74,10 +106,97 @@ class VenuesController extends Controller
         }
 
         $venue->load('city:id,name,slug');
+        $this->loadSources($venue);
         $venue->setAttribute('genre_profile', $this->genreProfile((int) $venue->id));
+
+        // Ближайшее событие берём тем же батчем, что и каталог: третья копия
+        // хронологии «ближайшего» рано или поздно разъехалась бы с первыми
+        // двумя, и страница места начала бы противоречить карточке в списке.
+        $this->attachUpcoming([$venue]);
+        $this->attachRhythm([$venue]);
 
         return response()->json([
             'data' => (new WebVenueDetailResource($venue))->toArray($request),
+        ]);
+    }
+
+    /**
+     * Соседние площадки: «раз это место не подошло — вот что рядом».
+     *
+     * Зачем фильтр «без единого события не показываем»: страница площадки, где
+     * никогда ничего не проходило, — тупик для человека и малополезный контент
+     * для поисковика. Гнать на неё трафик с соседнего блока значит своими
+     * руками портить главный SEO-актив проекта. Гарантия — INNER JOIN с
+     * агрегатом по видимым событиям: у кого нет ни одного, тот в выдачу
+     * физически не попадает.
+     *
+     * Сортировка двухступенчатая: сперва те, у кого есть будущая афиша, потом
+     * по расстоянию. Музей в 200 метрах без анонсов проигрывает клубу в 900 —
+     * потому что в клуб можно пойти, а в музей пока только посмотреть.
+     *
+     * Радиус ограничен сверху 20 км: это соседи по городу, а не «все площадки
+     * области»; без потолка запрос превращается в выгрузку каталога.
+     */
+    public function nearby(int $id, Request $request): JsonResponse
+    {
+        $venue = Venue::query()->active()->whereKey($id)->first(['id', 'city_id', 'latitude', 'longitude']);
+        if ($venue === null) {
+            return response()->json(['error' => 'venue_not_found'], 404);
+        }
+
+        $limit  = $this->intInput($request, 'limit', 6, 1, 12);
+        $radius = $this->intInput($request, 'radius_m', 3000, 100, 20000);
+
+        // Площадка без точки на карте (или без города) — соседей мерить не от
+        // чего. Пустой список честнее, чем выдача «ближайших» от нуля координат.
+        if ($venue->latitude === null || $venue->longitude === null || $venue->city_id === null) {
+            return response()->json(['data' => []]);
+        }
+
+        $lon      = (float) $venue->longitude;
+        $lat      = (float) $venue->latitude;
+        $todayMsk = now('Europe/Moscow')->toDateString();
+
+        // geography-каст даёт метры (у geometry-версии ST_DWithin радиус был бы
+        // в градусах — на широте Воронежа это разъехалось бы почти вдвое между
+        // осями). GIST-индекс на venues.location при этом не используется, но
+        // выборка и так сужена городом: площадок в городе сотни, не миллионы.
+        $point = 'ST_SetSRID(ST_Point(?, ?), 4326)::geography';
+
+        $geo = fn ($q) => $q
+            ->where('venues.city_id', (int) $venue->city_id)
+            ->where('venues.id', '<>', (int) $venue->id)
+            ->whereNotNull('venues.location')
+            ->whereRaw("ST_DWithin(venues.location::geography, {$point}, ?)", [$lon, $lat, $radius]);
+
+        // Агрегат по событиям сужаем теми же соседями. Без этого группировка
+        // пошла бы по всей таблице events ради полудюжины строк на выходе.
+        $candidates = $geo(Venue::query()->active())->select('venues.id');
+
+        $stats = Event::query()
+            ->visibleWeb()
+            ->whereIn('events.venue_id', $candidates)
+            ->groupBy('events.venue_id')
+            ->select('events.venue_id')
+            ->selectRaw('BOOL_OR'.self::UPCOMING_SQL.' AS has_upcoming', [$todayMsk, $todayMsk]);
+
+        $rows = $geo($this->baseQuery())
+            ->joinSub($stats, 'ev', 'ev.venue_id', '=', 'venues.id')
+            ->selectRaw("ST_Distance(venues.location::geography, {$point}) AS distance_m", [$lon, $lat])
+            // NULLS LAST обязателен: у площадки, все события которой без дат,
+            // BOOL_OR даёт NULL, а postgres при DESC поднимает NULL наверх —
+            // и место без единой известной даты возглавило бы «рядом с вами».
+            ->orderByRaw('ev.has_upcoming DESC NULLS LAST')
+            ->orderByRaw('distance_m ASC')
+            ->orderBy('venues.id')
+            ->limit($limit)
+            ->get();
+
+        // Карточка соседа — та же, что в каталоге, значит и обогащение то же.
+        $this->attachUpcoming($rows->all());
+
+        return response()->json([
+            'data' => WebVenueResource::collection($rows)->toArray($request),
         ]);
     }
 
@@ -414,6 +533,230 @@ class VenuesController extends Controller
             $v->setAttribute('upcoming_total', $hit['total'] ?? 0);
             $v->setAttribute('next_event_payload', $hit['next'] ?? null);
         }
+    }
+
+    /**
+     * Сообщества, связанные с площадкой, — для строки-атрибуции на её странице.
+     *
+     * kudab — агрегатор чужих постов, и назвать источник для него обязанность,
+     * а не украшение: на карточке события атрибуция есть (EventSourceLine), на
+     * странице места её не было вовсе, хотя половина площадок родилась именно
+     * из сообществ. Заодно это первые внешние ссылки на страницах площадок —
+     * сегодня уходить с них некуда.
+     *
+     * Связь берём ТОЛЬКО через FK communities.venue_id. В source_meta у части
+     * площадок лежит from_community_id, но это трассировка происхождения — след
+     * того, кто площадку породил, а не утверждение «этот источник ведёт это
+     * место»: сообщество могли отвязать, слить или переназначить, а след
+     * останется прежним.
+     *
+     * ЧТО ИМЕННО УТВЕРЖДАЕТ ЭТОТ FK — важно не преувеличить. Его ставит парсер,
+     * когда заводит площадку по HQ-адресу сообщества: это «аккаунт места», а не
+     * доказанный поставщик его афиши. Провенанс конкретного события лежит в
+     * events.community_id и совпадает не всегда: из 51 площадки со связью у 32
+     * афиша действительно приходит из этого сообщества, у 4 — только из чужих
+     * (Я.Афиша, Qtickets, сторонние организаторы), у 15 событий нет вовсе.
+     * Поэтому блок называет сообщество места, а не клянётся, что каждое событие
+     * пришло отсюда; фронту подпись «Источник» стоит держать в этом же объёме.
+     *
+     * Гейт качества ссылок обязателен. status='active' отсекает чёрный список,
+     * last_is_active IS DISTINCT FROM false — проверенно мёртвые ссылки
+     * (ночной верификатор их уже пометил). NULL пропускаем: «ещё не проверяли»
+     * — не то же самое, что «не работает». По всей таблице гейт снимает 3
+     * чёрных и 13 мёртвых ссылки из 128; на страницах площадок сегодня режет
+     * ровно одну — у ВГУ (id 14), и площадка остаётся с названным источником
+     * без кликабельной ссылки. Так и надо: ссылка в никуда хуже её отсутствия,
+     * а умолчать про источник нельзя.
+     *
+     * Всё грузится eager-load'ом (3 запроса на любое число сообществ), потому
+     * что блок обязан пережить переезд в каталог: там площадок до полусотни на
+     * страницу, и запрос-на-площадку превратил бы список в сотню round-trip'ов.
+     */
+    private function loadSources(Venue $venue): void
+    {
+        $venue->load([
+            'communities' => function ($q) {
+                $q->select('communities.id', 'communities.venue_id', 'communities.name', 'communities.avatar_url')
+                    // Свежесть — по самому свежему прочитанному посту, ВКЛЮЧАЯ
+                    // мягко удалённые. context:cleanup гасит посты старше 30
+                    // дней, которые не породили ни одного события: это уборка
+                    // хранилища, а не отзыв факта — пост мы прочитали, просто
+                    // не храним его текст. С фильтром deleted_at IS NULL
+                    // свежесть «ТЕАТР. АКТ» съезжала с декабря 2025 на август
+                    // 2024 — на полтора года мимо того, что мы правда читали.
+                    ->withMax('contextPosts as last_post_at', 'published_at')
+                    ->orderBy('communities.id');
+            },
+            'communities.socialLinks' => function ($q) {
+                $q->select(
+                    'community_social_links.id',
+                    'community_social_links.community_id',
+                    'community_social_links.social_network_id',
+                    'community_social_links.url',
+                )
+                    ->where('community_social_links.status', 'active')
+                    ->whereRaw('community_social_links.last_is_active IS DISTINCT FROM false')
+                    ->orderBy('community_social_links.id');
+            },
+            'communities.socialLinks.socialNetwork:id,slug,name',
+        ]);
+    }
+
+    /**
+     * Ритм места: как часто тут что-то происходит, когда было в последний раз
+     * и не заброшено ли оно. Считается по истории событий — единственному
+     * факту, который у площадки есть всегда (описание и контакты есть далеко
+     * не у всех).
+     *
+     * Всё одним группировочным запросом на весь список площадок: блок нужен и
+     * на странице места, и потенциально в каталоге, а запрос-на-площадку
+     * превратил бы каталог в полсотни round-trip'ов.
+     *
+     * День события — та же МСК-дата, что в календаре: start_date, а при её
+     * отсутствии дата из start_time в МСК. Единица счёта — event_group_id (см.
+     * events_count в baseQuery): у квест-комнаты 754 строки на пять квестов, и
+     * без группировки «ритм» такого места был бы 125 событий в месяц.
+     *
+     * ПРОШЛОЕ И БУДУЩЕЕ ЗДЕСЬ ЖИВУТ ПО РАЗНЫМ ПРАВИЛАМ — намеренно, не чините.
+     *
+     * Прошлое (last_event_at, events_per_month, past_total) считается предикатом
+     * EventRepository::pastSql() — тем самым, по которому /past-events набирает
+     * блок «Здесь уже проходило». Человек видит этот блок на той же странице, и
+     * ритм обязан говорить о том, что человеку показано. Пока правила
+     * расходились, Музей Бунина (venue 24) писал «здесь давно тихо», а блок
+     * ниже показывал события от 16 июля.
+     *
+     * Будущее (has_upcoming, а значит is_dormant) считается предикатом
+     * UPCOMING_SQL — тем, по которому живут каталог и лента, чтобы «ближайшее» в
+     * шапке и «спит» в ритме не спорили друг с другом.
+     *
+     * Между двумя правилами есть щель — событие сегодня до 03:00 МСК не
+     * предстоящее и ещё не прошедшее (grace-час у pastSql, полночь сессии БД у
+     * UPCOMING_SQL). Это осознанный размен: щель шириной в три ночных часа
+     * дешевле, чем блок, который спорит с соседним блоком той же страницы.
+     * Единственное поле, которому щель была опасна, — is_dormant (флаг
+     * переворачивался), и оно считается по any_day, а не по last_event_at.
+     *
+     * Щель покрыта тестом: «сейчас» приходит в предикат прошлого связанным
+     * параметром из PHP (EventRepository::pastExpression()), поэтому
+     * Carbon::setTestNow() двигает обе границы разом и ночь 01:30 в тесте
+     * воспроизводится обычным способом.
+     *
+     * Отдельно про NULL: предикат прошлого пишется явными ветками IS NULL /
+     * IS NOT NULL, а не отрицанием предстоящего. У события без start_time
+     * сравнение `start_time >= …` даёт NULL, `NOT NULL` — тоже NULL, и строка
+     * молча выпадает из FILTER. Ровно на этом ритм и терял 231 событие на 33
+     * площадках: у Музея Бунина все события заведены одной датой без времени.
+     *
+     * @param array<int, Venue> $venues
+     */
+    private function attachRhythm(array $venues): void
+    {
+        $ids = array_map(fn ($v) => (int) $v->id, $venues);
+        if ($ids === []) {
+            return;
+        }
+
+        $nowMsk      = now('Europe/Moscow');
+        $todayMsk    = $nowMsk->toDateString();
+        $windowStart = $nowMsk->copy()->subMonths(self::RHYTHM_MONTHS)->toDateString();
+
+        $dayExpr = "COALESCE(events.start_date, (events.start_time AT TIME ZONE 'Europe/Moscow')::date)";
+        $unit    = "COALESCE(events.event_group_id::text, 'e' || events.id)";
+        // предикат прошлого и его связанные значения времени — общие с
+        // /past-events, включая «сейчас»: см. EventRepository::pastExpression()
+        [$past, $pastAt] = EventRepository::pastExpression();
+
+        $rows = Event::query()
+            ->visibleWeb()
+            ->whereIn('events.venue_id', $ids)
+            ->groupBy('events.venue_id')
+            ->select('events.venue_id')
+            ->selectRaw(
+                "COUNT(DISTINCT {$unit}) FILTER (WHERE {$dayExpr} >= ?::date AND {$past}) AS window_events",
+                [$windowStart, ...$pastAt],
+            )
+            ->selectRaw("COUNT(DISTINCT {$unit}) FILTER (WHERE {$past}) AS past_total", $pastAt)
+            ->selectRaw("MIN({$dayExpr}) FILTER (WHERE {$past}) AS first_day", $pastAt)
+            ->selectRaw("MAX({$dayExpr}) FILTER (WHERE {$past}) AS last_day", $pastAt)
+            // Без FILTER, по ВСЕМ событиям: самая свежая дата, которая про это
+            // место вообще известна. Нужна только «спячке» — см. ниже, почему
+            // last_day для неё не годится.
+            ->selectRaw("MAX({$dayExpr}) AS any_day")
+            ->selectRaw('BOOL_OR'.self::UPCOMING_SQL.' AS has_upcoming', [$todayMsk, $todayMsk])
+            ->get();
+
+        $byVenue = [];
+        $pastTotals = [];
+        foreach ($rows as $r) {
+            $firstDay = $r->first_day !== null ? substr((string) $r->first_day, 0, 10) : null;
+            $lastDay  = $r->last_day !== null ? substr((string) $r->last_day, 0, 10) : null;
+            $anyDay   = $r->any_day !== null ? substr((string) $r->any_day, 0, 10) : null;
+
+            $pastTotals[(int) $r->venue_id] = (int) $r->past_total;
+            $byVenue[(int) $r->venue_id] = [
+                'events_per_month' => $this->eventsPerMonth((int) $r->window_events, $firstDay, $windowStart, $todayMsk),
+                'last_event_at'    => $lastDay,
+                // «Спит» — это отсутствие будущего плюс отсутствие любой
+                // известной даты за полгода. Место, которое молчало полгода и
+                // вчера объявило концерт, спящим называть нельзя: как раз оно
+                // и вернулось.
+                //
+                // Считаем по any_day, а НЕ по last_event_at, из-за щели между
+                // двумя предикатами (см. докблок метода): событие сегодня в
+                // 01:30 МСК ещё не прошедшее и уже не предстоящее, и по
+                // last_event_at клуб получал бы «здесь давно тихо» за полчаса
+                // до собственного концерта. Дата известна — значит не спит.
+                'is_dormant'       => ! (bool) $r->has_upcoming && ($anyDay === null || $anyDay < $windowStart),
+            ];
+        }
+
+        foreach ($venues as $v) {
+            // Ни одного видимого события — ритма нет вовсе (null), а не «ноль в
+            // месяц»: про такое место мы просто ничего не знаем, и врать нулём
+            // на странице, которая и так пустая, нельзя.
+            $v->setAttribute('rhythm', $byVenue[(int) $v->id] ?? null);
+            // А вот past_total — всегда число: это серверный гейт блока «Здесь
+            // уже проходило», и «не знаю» фронту тут бесполезно. Ноль значит
+            // ноль: блок не рисуем.
+            $v->setAttribute('past_total', $pastTotals[(int) $v->id] ?? 0);
+        }
+    }
+
+    /**
+     * Среднее число событий в месяц. Делим не на шесть месяцев вслепую, а на
+     * фактически наблюдаемый отрезок: площадка, попавшая в базу пять недель
+     * назад, при делении на 6 выглядела бы впятеро тише, чем есть.
+     */
+    private function eventsPerMonth(int $windowEvents, ?string $firstDay, string $windowStart, string $today): ?int
+    {
+        if ($windowEvents < self::RHYTHM_MIN_EVENTS) {
+            return null;
+        }
+
+        $from = ($firstDay !== null && $firstDay > $windowStart) ? $firstDay : $windowStart;
+        // round, а не приведение к int: diffInDays у Carbon 3 возвращает float,
+        // и ровно 175 суток пришли бы как 174.99… при любом дрейфе часового пояса
+        $days = (int) round(Carbon::parse($from)->diffInDays(Carbon::parse($today)));
+
+        if ($days < self::RHYTHM_MIN_DAYS) {
+            return null;
+        }
+
+        // 30.44 — средняя длина месяца в году; на полугодовом окне разница с
+        // «30» набегает в пятую часть месяца, а число на странице целое.
+        $months = min((float) self::RHYTHM_MONTHS, $days / 30.44);
+
+        return max(1, (int) round($windowEvents / $months));
+    }
+
+    /** Целочисленный query-параметр с дефолтом и потолком: мусор → дефолт. */
+    private function intInput(Request $request, string $key, int $default, int $min, int $max): int
+    {
+        $raw   = $request->input($key);
+        $value = is_numeric($raw) ? (int) $raw : $default;
+
+        return max($min, min($value, $max));
     }
 
     private function resolveCityId(Request $request): ?int

@@ -44,6 +44,11 @@ class WebVenueResource extends JsonResource
             // честное число предстоящих видимых-в-вебе событий (от полуночи
             // сегодня, паритет с /api/web/events?date_from=today)
             'upcoming_total'  => (int) ($this->getAttribute('upcoming_total') ?? 0),
+            // Метры до площадки, от которой искали соседей (/venues/{id}/nearby).
+            // В каталоге точки отсчёта нет — там всегда null.
+            'distance_m'      => $this->getAttribute('distance_m') !== null
+                ? (int) round((float) $this->getAttribute('distance_m'))
+                : null,
         ];
     }
 }

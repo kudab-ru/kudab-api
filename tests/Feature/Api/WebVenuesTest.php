@@ -632,6 +632,922 @@ class WebVenuesTest extends TestCase
         $this->getJson('/api/web/venues/9999999/past-events')->assertStatus(404);
     }
 
+    /* ============ detail: тип, описание, контакты, ритм, ближайшее ============ */
+
+    /**
+     * Площадка без описания, без source_meta и без единого события обязана
+     * отдавать страницу, а не 500: таких в базе большинство, и именно они —
+     * главная цель этой выдачи.
+     */
+    public function test_show_new_fields_are_null_safe_on_bare_venue(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Голая площадка', 'golaya');
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.kind_label', null)
+            ->assertJsonPath('data.description', null)
+            ->assertJsonPath('data.description_source', null)
+            ->assertJsonPath('data.links', [])
+            ->assertJsonPath('data.rhythm', null)
+            ->assertJsonPath('data.next_event', null)
+            ->assertJsonPath('data.upcoming_total', 0)
+            ->assertJsonPath('data.past_total', 0)
+            ->assertJsonPath('data.social_accounts', [])
+            ->assertJsonPath('data.events_count', 0);
+    }
+
+    /** kind — категория каталога («Музеи»), на странице места нужен «Музей». */
+    public function test_show_kind_label_is_singular_and_null_for_unknown_kind(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+
+        $museum = $this->createVenue($vrn->id, 'Музей Крамского', 'muzey-kramskogo');
+        $this->updateVenue($museum->id, ['kind' => 'Музеи']);
+
+        $trampoline = $this->createVenue($vrn->id, 'Батутный центр', 'batutnyi');
+        $this->updateVenue($trampoline->id, ['kind' => 'Батутные центры']);
+
+        $this->getJson('/api/web/venues/' . $museum->id)
+            ->assertOk()
+            ->assertJsonPath('data.kind', 'Музеи')
+            ->assertJsonPath('data.kind_label', 'Музей');
+
+        // незнакомый тип не превращается в заглушку «Площадка» — просто null
+        $this->getJson('/api/web/venues/' . $trampoline->id)
+            ->assertOk()
+            ->assertJsonPath('data.kind_label', null);
+    }
+
+    public function test_show_description_prefers_own_text_over_portrait(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Зелёный театр', 'zelenyi-teatr');
+        $this->updateVenue($venue->id, [
+            'description' => 'Летняя сцена в парке «Динамо».',
+            'tg_portrait' => 'Сюда приходят за концертами под открытым небом.',
+        ]);
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.description', 'Летняя сцена в парке «Динамо».')
+            ->assertJsonPath('data.description_source', 'own');
+    }
+
+    public function test_show_description_falls_back_to_tg_portrait(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Клуб 12', 'klub-12');
+        $this->updateVenue($venue->id, [
+            'description' => '   ', // пробелы — то же, что пусто
+            'tg_portrait' => 'По субботам столы сдвигают и танцуют до закрытия.',
+        ]);
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.description', 'По субботам столы сдвигают и танцуют до закрытия.')
+            ->assertJsonPath('data.description_source', 'portrait');
+    }
+
+    /**
+     * Заготовка «{Тип} в городе.» описанием не считается.
+     *
+     * Её проставили пачкой 23 активным площадкам, и по description_source она
+     * неотличима от написанного человеком, а уезжает в og:description и в
+     * schema.org/Place — то есть в выдачу под видом описания места.
+     */
+    public function test_show_drops_template_description(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+
+        $stub = $this->createVenue($vrn->id, 'С заготовкой', 's-zagotovkoy');
+        $this->updateVenue($stub->id, ['description' => 'Площадка в городе.']);
+
+        $this->getJson('/api/web/venues/' . $stub->id)
+            ->assertOk()
+            ->assertJsonPath('data.description', null)
+            ->assertJsonPath('data.description_source', null);
+
+        // портрет при этом остаётся запасным вариантом — заготовка ему не мешает
+        $withPortrait = $this->createVenue($vrn->id, 'С портретом', 's-portretom');
+        $this->updateVenue($withPortrait->id, [
+            'description' => 'Клуб в городе.',
+            'tg_portrait' => 'По субботам столы сдвигают и танцуют до закрытия.',
+        ]);
+
+        $this->getJson('/api/web/venues/' . $withPortrait->id)
+            ->assertOk()
+            ->assertJsonPath('data.description', 'По субботам столы сдвигают и танцуют до закрытия.')
+            ->assertJsonPath('data.description_source', 'portrait');
+
+        // живой короткий текст, похожий по началу, режется НЕ должен
+        $real = $this->createVenue($vrn->id, 'С живым текстом', 's-zhivym');
+        $this->updateVenue($real->id, ['description' => 'Бар в городе Боброве.']);
+
+        $this->getJson('/api/web/venues/' . $real->id)
+            ->assertOk()
+            ->assertJsonPath('data.description', 'Бар в городе Боброве.')
+            ->assertJsonPath('data.description_source', 'own');
+    }
+
+    /**
+     * Контракт ссылок. В сегодняшней базе таких ключей в source_meta нет ни у
+     * одной площадки (там только трассировка происхождения), поэтому тест
+     * задаёт их руками — он фиксирует форму ответа на момент, когда парсер
+     * начнёт контакты собирать.
+     */
+    public function test_show_links_are_built_from_source_meta_contacts(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Дом актёра', 'dom-aktera');
+        $this->updateVenue($venue->id, [
+            'source_meta' => json_encode([
+                'origin' => 'cold_resolve',
+                'resolved_via' => 'osm_poi',
+                'site' => 'https://www.domaktera.ru/afisha',
+                'vk' => 'https://vk.com/domaktera',
+                'telegram' => 'https://t.me/domaktera',
+                'phone' => '+7 (473) 222-33-44',
+            ], JSON_UNESCAPED_UNICODE),
+        ]);
+
+        $links = collect($this->getJson('/api/web/venues/' . $venue->id)->assertOk()->json('data.links'))
+            ->keyBy('type');
+
+        $this->assertSame(['site', 'vk', 'telegram', 'phone'], $links->keys()->all());
+        $this->assertSame('https://www.domaktera.ru/afisha', $links['site']['url']);
+        $this->assertSame('domaktera.ru', $links['site']['label'], 'подписью сайта служит домен, а не голый url');
+        $this->assertSame('ВКонтакте', $links['vk']['label']);
+        $this->assertSame('tel:+74732223344', $links['phone']['url']);
+        $this->assertSame('+7 (473) 222-33-44', $links['phone']['label']);
+    }
+
+    /** Трассировка происхождения ссылками не притворяется, битый url не отдаём. */
+    public function test_show_links_ignore_provenance_keys_and_broken_urls(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Площадка из холода', 'iz-holoda');
+        $this->updateVenue($venue->id, [
+            'source_meta' => json_encode([
+                'origin' => 'events_materialize',
+                'cluster_key' => 'fias:abc',
+                'raw_name' => 'ДК Железнодорожников',
+                'site' => 'domaktera.ru',      // без схемы — не ссылка
+                'phone' => '222-33',           // не номер
+            ], JSON_UNESCAPED_UNICODE),
+        ]);
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.links', []);
+    }
+
+    public function test_show_rhythm_reports_cadence_and_last_event(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Юбилейный', 'yubileinyi');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        // 12 событий с 10 февраля по 25 июля — два в месяц, окно наблюдения
+        // 175 дней (5.75 месяца) → 12 / 5.75 ≈ 2
+        foreach (['02', '03', '04', '05', '06', '07'] as $month) {
+            foreach (['10', '25'] as $day) {
+                $this->createEvent($vrn->id, $venue->id, $community->id, "Концерт {$month}-{$day}", "2026-{$month}-{$day} 19:00:00");
+            }
+        }
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.rhythm.events_per_month', 2)
+            ->assertJsonPath('data.rhythm.last_event_at', '2026-07-25')
+            ->assertJsonPath('data.rhythm.is_dormant', false);
+    }
+
+    /** Полгода тишины и ни одного анонса — площадка спит. */
+    public function test_show_rhythm_marks_dormant_venue(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Заброшенный ДК', 'zabroshennyi-dk');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Новогодний огонёк', '2026-01-15 19:00:00');
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.rhythm.events_per_month', null) // одно событие за полгода — не ритм
+            ->assertJsonPath('data.rhythm.last_event_at', '2026-01-15')
+            ->assertJsonPath('data.rhythm.is_dormant', true);
+    }
+
+    /** Место, которое молчало полгода и объявило концерт, спящим не считается. */
+    public function test_show_rhythm_is_not_dormant_when_future_event_announced(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Вернувшийся клуб', 'vernuvshiysya');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Старый концерт', '2025-12-20 19:00:00');
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Возвращение', '2026-08-20 19:00:00');
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.rhythm.last_event_at', '2025-12-20')
+            ->assertJsonPath('data.rhythm.is_dormant', false);
+    }
+
+    /**
+     * Ночная щель между предикатами: событие сегодня в 01:30 МСК уже не
+     * предстоящее (граница ленты — полночь сессии БД, то есть 03:00 МСК) и ещё
+     * не прошедшее (grace-час от «сейчас»). Оно не обязано считаться прошедшим —
+     * концерт впереди, — но назвать место спящим за полчаса до его начала
+     * нельзя. Сторож для этого и стоит: is_dormant считается по any_day, самой
+     * свежей ИЗВЕСТНОЙ дате, а не по last_event_at.
+     *
+     * Тест работает только потому, что «сейчас» приходит в предикат прошлого
+     * связанным параметром из PHP: с постгресовым now() Carbon::setTestNow()
+     * не двигал бы границу, и тест зеленел бы по настоящим часам.
+     */
+    public function test_show_rhythm_does_not_call_venue_dormant_on_the_night_of_its_event(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 01:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Ночной клуб', 'nochnoi-klub');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Зимний концерт', '2026-01-15 19:00:00');
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Ночной концерт', '2026-08-04 01:30:00');
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            // концерт ещё не состоялся — в прошлом честно январь
+            ->assertJsonPath('data.rhythm.last_event_at', '2026-01-15')
+            ->assertJsonPath('data.past_total', 1)
+            // но дата сегодня известна, значит место не спит
+            ->assertJsonPath('data.rhythm.is_dormant', false)
+            // а лента ту же ночь предстоящей уже не считает — страница с ней не спорит
+            ->assertJsonPath('data.next_event', null);
+    }
+
+    /**
+     * Ритм обязан видеть события, заведённые одной датой без времени.
+     *
+     * Так живёт весь Музей И.А. Бунина: у 231 события на 33 площадках
+     * start_time пуст, а start_date стоит. Пока прошлое считалось отрицанием
+     * «предстоящего», такие строки давали NULL (start_time >= ? → NULL, NOT
+     * NULL → NULL) и молча выпадали из FILTER: страница писала «здесь давно
+     * тихо», а блок «Здесь уже проходило» двумя секциями ниже показывал
+     * события трёхнедельной давности. Теперь прошлое считается тем же
+     * предикатом, что отдаёт /past-events, — и блоки не спорят.
+     */
+    public function test_show_rhythm_counts_date_only_past_events(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-05 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Музей И.А. Бунина', 'muzey-bunina');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        foreach (['2026-06-04', '2026-07-02', '2026-07-16'] as $day) {
+            $this->createDateOnlyEvent($vrn->id, $venue->id, $community->id, 'Квартирник ' . $day, $day);
+        }
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.rhythm.last_event_at', '2026-07-16')
+            ->assertJsonPath('data.rhythm.is_dormant', false)
+            ->assertJsonPath('data.past_total', 3);
+
+        // и то же самое видит блок «Здесь уже проходило» — сторож их согласия
+        $this->getJson('/api/web/venues/' . $venue->id . '/past-events')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 3);
+    }
+
+    /**
+     * past_total — серверный гейт блока прошлого. Считает СОБЫТИЯ (по группам),
+     * тогда как /past-events листает СЕАНСЫ построчно: число под заголовком и
+     * длина списка отвечают на разные вопросы, и это записано в контракте.
+     */
+    public function test_show_past_total_counts_events_while_past_events_lists_sessions(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-05 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Квест-комната', 'kvest');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        // один квест, четыре прошедших сеанса
+        $group = $this->createEventGroup($vrn->id, $community->id, 'kvest');
+        foreach (['2026-07-01', '2026-07-02', '2026-07-03', '2026-07-04'] as $day) {
+            $this->createEvent($vrn->id, $venue->id, $community->id, 'Квест', $day . ' 18:00:00')
+                ->forceFill(['event_group_id' => $group])->save();
+        }
+        // и один отдельный концерт
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Концерт', '2026-07-20 19:00:00');
+        // будущее в прошлое не просачивается
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Будущее', '2026-08-20 19:00:00');
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.past_total', 2)
+            ->assertJsonPath('data.upcoming_total', 1);
+
+        $this->getJson('/api/web/venues/' . $venue->id . '/past-events')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 5);
+    }
+
+    /** Площадка с одной только будущей афишей: прошлого нет, но и не спит. */
+    public function test_show_rhythm_on_venue_with_only_future_events(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Новая сцена', 'novaya-stsena');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Открытие', '2026-08-20 19:00:00');
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.rhythm.events_per_month', null)
+            ->assertJsonPath('data.rhythm.last_event_at', null)
+            ->assertJsonPath('data.rhythm.is_dormant', false);
+    }
+
+    /**
+     * Ритм считает СОБЫТИЯ, а не сеансы. У квест-комнаты 754 строки на пять
+     * квестов: по строкам «ритм» такого места был бы 125 событий в месяц, и
+     * страница врала бы о нём сильнее, чем если бы молчала.
+     */
+    public function test_show_rhythm_counts_sessions_of_one_event_as_one(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Квест-комната', 'kvest-komnata');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        // три квеста, у каждого по 20 ежедневных сеансов = 60 строк в базе
+        foreach (['03', '04', '05'] as $i => $month) {
+            $group = $this->createEventGroup($vrn->id, $community->id, 'kvest-' . $month);
+            for ($day = 1; $day <= 20; $day++) {
+                $this->createEvent(
+                    $vrn->id,
+                    $venue->id,
+                    $community->id,
+                    'Квест ' . $i,
+                    sprintf('2026-%s-%02d 18:00:00', $month, $day),
+                )->forceFill(['event_group_id' => $group])->save();
+            }
+        }
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            // 3 квеста за 156 дней (5.1 месяца) ≈ 1 в месяц; по строкам вышло бы 12
+            ->assertJsonPath('data.rhythm.events_per_month', 1)
+            ->assertJsonPath('data.rhythm.last_event_at', '2026-05-20');
+    }
+
+    public function test_show_next_event_repeats_catalog_logic_and_carries_url(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Юбилейный', 'yubileinyi');
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Прошедший', '2026-07-30 19:00:00');
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Поздний', '2026-08-20 19:00:00');
+        $sooner = $this->createEvent($vrn->id, $venue->id, $community->id, 'Ближний', '2026-08-10 18:00:00');
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.next_event.id', $sooner->id)
+            ->assertJsonPath('data.next_event.title', 'Ближний')
+            ->assertJsonPath('data.next_event.start_at', '2026-08-10T18:00:00+03:00')
+            ->assertJsonPath('data.next_event.start_date', '2026-08-10')
+            ->assertJsonPath('data.next_event.url', '/events/' . $sooner->id)
+            ->assertJsonPath('data.upcoming_total', 2);
+    }
+
+    /** Старые поля detail не переименованы и не потеряны — фронт уже их читает. */
+    public function test_show_keeps_existing_contract_fields(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Юбилейный', 'yubileinyi');
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonStructure(['data' => [
+                'id', 'slug', 'name', 'kind', 'description', 'address', 'street', 'house',
+                'house_fias_id', 'city' => ['id', 'name', 'slug'], 'lat', 'lng',
+                'cover_image_url', 'avatar_url', 'events_count', 'genre_profile',
+            ]]);
+    }
+
+    /* ============ nearby (соседние площадки) ============ */
+
+    public function test_nearby_puts_venues_with_future_events_first_then_by_distance(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $base = $this->createVenue($vrn->id, 'Точка отсчёта', 'tochka', 39.0, 51.0);
+
+        // 222 м, но афиши нет — ближе всех и всё равно последний
+        $close = $this->createVenue($vrn->id, 'Музей рядом', 'muzey-ryadom', 39.0, 51.002);
+        $this->createEvent($vrn->id, $close->id, $community->id, 'Выставка прошла', '2026-07-01 12:00:00');
+
+        // 1113 м, есть будущее
+        $far = $this->createVenue($vrn->id, 'Дальний клуб', 'dalniy-klub', 39.0, 51.010);
+        $this->createEvent($vrn->id, $far->id, $community->id, 'Концерт', '2026-08-15 19:00:00');
+
+        // 557 м, есть будущее
+        $mid = $this->createVenue($vrn->id, 'Средний зал', 'sredniy-zal', 39.0, 51.005);
+        $this->createEvent($vrn->id, $mid->id, $community->id, 'Спектакль', '2026-08-12 19:00:00');
+
+        $data = $this->getJson('/api/web/venues/' . $base->id . '/nearby')->assertOk()->json('data');
+
+        $this->assertSame(
+            ['Средний зал', 'Дальний клуб', 'Музей рядом'],
+            array_column($data, 'name'),
+            'сначала те, куда можно пойти, и уже внутри — по расстоянию',
+        );
+        $this->assertEqualsWithDelta(557, $data[0]['distance_m'], 15);
+        $this->assertSame(1, $data[0]['upcoming_total']);
+        $this->assertSame(0, $data[2]['upcoming_total']);
+    }
+
+    public function test_nearby_excludes_self_eventless_venues_and_other_cities(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $base = $this->createVenue($vrn->id, 'Точка отсчёта', 'tochka', 39.0, 51.0);
+        // у самой площадки события есть — она всё равно не сосед сама себе
+        $this->createEvent($vrn->id, $base->id, $community->id, 'Своё событие', '2026-08-10 19:00:00');
+
+        $good = $this->createVenue($vrn->id, 'Живой сосед', 'zhivoy', 39.0, 51.003);
+        $this->createEvent($vrn->id, $good->id, $community->id, 'Концерт', '2026-08-11 19:00:00');
+
+        // ни одного события — тупик для пользователя, в выдачу не берём
+        $this->createVenue($vrn->id, 'Пустой сосед', 'pustoy', 39.0, 51.001);
+
+        // события есть, но ни одно не видно в вебе — то же самое, что пусто
+        $invisible = $this->createVenue($vrn->id, 'Невидимый сосед', 'nevidimyi', 39.0, 51.0015);
+        $deleted = $this->createEvent($vrn->id, $invisible->id, $community->id, 'Удалённое', '2026-08-12 19:00:00');
+        $deleted->delete();
+        $kids = $this->createEvent($vrn->id, $invisible->id, $community->id, 'Детское', '2026-08-13 10:00:00');
+        $kids->audience = 'kids';
+        $kids->save();
+
+        // чужой город, координаты рядом — «соседей» ищем только по своему городу
+        $mskCommunity = Community::create(['name' => 'Мск', 'city_id' => $msk->id]);
+        $alien = $this->createVenue($msk->id, 'Чужой город', 'chuzhoy', 39.0, 51.0005);
+        $this->createEvent($msk->id, $alien->id, $mskCommunity->id, 'Московское', '2026-08-14 19:00:00');
+
+        $data = $this->getJson('/api/web/venues/' . $base->id . '/nearby')->assertOk()->json('data');
+
+        $this->assertSame(['Живой сосед'], array_column($data, 'name'));
+    }
+
+    public function test_nearby_limit_defaults_to_six_and_caps_at_twelve(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $base = $this->createVenue($vrn->id, 'Точка отсчёта', 'tochka', 39.0, 51.0);
+
+        // 14 соседей в шаге ~22 м друг от друга — все в дефолтном радиусе
+        for ($i = 1; $i <= 14; $i++) {
+            $name = sprintf('Сосед %02d', $i);
+            $v = $this->createVenue($vrn->id, $name, 'sosed-' . $i, 39.0, 51.0 + $i * 0.0002);
+            $this->createEvent($vrn->id, $v->id, $community->id, 'Событие ' . $i, '2026-08-10 19:00:00');
+        }
+
+        $default = $this->getJson('/api/web/venues/' . $base->id . '/nearby')->assertOk()->json('data');
+        $this->assertCount(6, $default);
+        $this->assertSame('Сосед 01', $default[0]['name'], 'первым идёт ближайший');
+
+        $limited = $this->getJson('/api/web/venues/' . $base->id . '/nearby?limit=2')->assertOk()->json('data');
+        $this->assertSame(['Сосед 01', 'Сосед 02'], array_column($limited, 'name'));
+
+        // потолок — 12: запрос сотни соседей его не поднимает
+        $capped = $this->getJson('/api/web/venues/' . $base->id . '/nearby?limit=100')->assertOk()->json('data');
+        $this->assertCount(12, $capped);
+    }
+
+    public function test_nearby_radius_cuts_off_distant_venues(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $base = $this->createVenue($vrn->id, 'Точка отсчёта', 'tochka', 39.0, 51.0);
+
+        // ~11 км — за дефолтным радиусом 3000 м, но внутри расширенного
+        $outer = $this->createVenue($vrn->id, 'За городом', 'za-gorodom', 39.0, 51.1);
+        $this->createEvent($vrn->id, $outer->id, $community->id, 'Загородное', '2026-08-16 19:00:00');
+
+        $this->getJson('/api/web/venues/' . $base->id . '/nearby')
+            ->assertOk()
+            ->assertJsonPath('data', []);
+
+        $wide = $this->getJson('/api/web/venues/' . $base->id . '/nearby?radius_m=20000')->assertOk()->json('data');
+        $this->assertSame(['За городом'], array_column($wide, 'name'));
+        $this->assertEqualsWithDelta(11130, $wide[0]['distance_m'], 200);
+    }
+
+    public function test_nearby_returns_empty_for_venue_without_coordinates(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $base = $this->createVenue($vrn->id, 'Без точки', 'bez-tochki', 39.0, 51.0);
+        DB::table('venues')->where('id', $base->id)->update(['location' => null]);
+
+        $neighbour = $this->createVenue($vrn->id, 'Сосед', 'sosed', 39.0, 51.002);
+        $this->createEvent($vrn->id, $neighbour->id, $community->id, 'Концерт',
+            Carbon::now('Europe/Moscow')->addDays(5)->format('Y-m-d H:i:s'));
+
+        $this->getJson('/api/web/venues/' . $base->id . '/nearby')
+            ->assertOk()
+            ->assertJsonPath('data', []);
+    }
+
+    public function test_nearby_404_for_unknown_venue(): void
+    {
+        $this->getJson('/api/web/venues/9999999/nearby')->assertStatus(404);
+    }
+
+    /* ============ social_accounts (аккаунты места в соцсетях) ============ */
+
+    public function test_show_social_accounts_returns_community_links_and_freshness(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'ТЕАТР. АКТ', 'teatr-akt');
+
+        $community = $this->attachCommunityToVenue($vrn->id, $venue->id, 'ТЕАТР. АКТ', 'https://vk.cc/ava.jpg');
+        $this->attachSocialLink($community->id, 'vk', 'https://vk.com/teatract');
+        $this->addContextPost($community->id, '2026-07-20 08:00:00');
+        $this->addContextPost($community->id, '2026-08-01 09:30:00');
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonCount(1, 'data.social_accounts')
+            ->assertJsonPath('data.social_accounts.0.community.id', $community->id)
+            ->assertJsonPath('data.social_accounts.0.community.name', 'ТЕАТР. АКТ')
+            ->assertJsonPath('data.social_accounts.0.community.avatar_url', 'https://vk.cc/ava.jpg')
+            ->assertJsonPath('data.social_accounts.0.links.0.network', 'vk')
+            ->assertJsonPath('data.social_accounts.0.links.0.url', 'https://vk.com/teatract')
+            ->assertJsonPath('data.social_accounts.0.links.0.label', 'ВКонтакте')
+            ->assertJsonPath('data.social_accounts.0.last_post_at', '2026-08-01');
+    }
+
+    /**
+     * Свежесть — московская дата. context_posts.published_at лежит в UTC без
+     * таймзоны, и пост в 21:30 UTC — это уже половина первого ночи следующего
+     * дня по Москве. Весь остальной ответ (календарь, ритм, ближайшее) считает
+     * дни по МСК, и «обновлено вчера» не должно означать разные вчера.
+     */
+    public function test_show_social_accounts_last_post_at_is_a_moscow_date(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'LOFT36', 'loft36');
+
+        $community = $this->attachCommunityToVenue($vrn->id, $venue->id, 'LOFT36');
+        $this->addContextPost($community->id, '2026-08-01 21:30:00'); // = 2026-08-02 00:30 МСК
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.social_accounts.0.last_post_at', '2026-08-02');
+    }
+
+    /**
+     * Гейт качества: чёрный список и проверенно мёртвые ссылки на страницу не
+     * попадают. Ссылка в никуда со страницы места хуже, чем её отсутствие.
+     */
+    public function test_show_social_accounts_quality_gate_drops_black_and_dead_links(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Дом актёра', 'dom-aktera');
+
+        $community = $this->attachCommunityToVenue($vrn->id, $venue->id, 'Дом актёра');
+        $this->attachSocialLink($community->id, 'vk', 'https://vk.com/live', 'active', true);
+        $this->attachSocialLink($community->id, 'telegram', 'https://t.me/black', 'black', true);
+        $this->attachSocialLink($community->id, 'site', 'https://dead.example', 'active', false);
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonCount(1, 'data.social_accounts.0.links')
+            ->assertJsonPath('data.social_accounts.0.links.0.url', 'https://vk.com/live');
+    }
+
+    /** Непроверенная ссылка (last_is_active IS NULL) — не то же, что мёртвая. */
+    public function test_show_social_accounts_keeps_unverified_link(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Новое место', 'novoe-mesto');
+
+        $community = $this->attachCommunityToVenue($vrn->id, $venue->id, 'Новое место');
+        $this->attachSocialLink($community->id, 'telegram', 'https://t.me/novoe', 'active', null);
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonCount(1, 'data.social_accounts.0.links')
+            ->assertJsonPath('data.social_accounts.0.links.0.network', 'telegram')
+            ->assertJsonPath('data.social_accounts.0.links.0.label', 'Telegram');
+    }
+
+    /** Нет сообществ (55 площадок из 106) — пустой массив, а не null. */
+    public function test_show_social_accounts_is_empty_array_without_communities(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $bare = $this->createVenue($vrn->id, 'Без источников', 'bez-istochnikov');
+
+        $this->getJson('/api/web/venues/' . $bare->id)
+            ->assertOk()
+            ->assertJsonPath('data.social_accounts', []);
+
+        // отвязанное (удалённое) сообщество источником быть перестаёт
+        $archived = $this->createVenue($vrn->id, 'С архивным', 's-arhivnym');
+        $community = $this->attachCommunityToVenue($vrn->id, $archived->id, 'Ушедшее сообщество');
+        $this->attachSocialLink($community->id, 'vk', 'https://vk.com/gone');
+        $community->delete();
+
+        $this->getJson('/api/web/venues/' . $archived->id)
+            ->assertOk()
+            ->assertJsonPath('data.social_accounts', []);
+    }
+
+    /**
+     * Трассировка происхождения источником не становится.
+     *
+     * from_community_id лежит в source_meta у 56 площадок из 121 — это след
+     * того, кто площадку породил, а не утверждение «отсюда мы берём её афишу».
+     * Сообщество с тех пор могли отвязать, слить или переназначить: сегодня у 7
+     * площадок этот id указывает на сообщество, которое живёт уже при ДРУГОМ
+     * месте (venue 33 «Сити-парк „Град“» → сообщество 70, у которого
+     * venue_id = 87). Прочитай мы source_meta — страница назвала бы источником
+     * чужое сообщество. Связь только через FK communities.venue_id.
+     */
+    public function test_show_social_accounts_ignore_source_meta_provenance(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+
+        $grad  = $this->createVenue($vrn->id, 'Сити-парк «Град»', 'grad');
+        $other = $this->createVenue($vrn->id, 'Другое место', 'drugoe');
+
+        // сообщество переназначено на другую площадку, а след в source_meta остался
+        $moved = $this->attachCommunityToVenue($vrn->id, $other->id, 'Переехавшее сообщество');
+        $this->attachSocialLink($moved->id, 'vk', 'https://vk.com/moved');
+        $this->addContextPost($moved->id, '2026-08-01 09:00:00');
+
+        $this->updateVenue($grad->id, [
+            'source_meta' => json_encode([
+                'origin'              => 'venues_backfill',
+                'from_community_id'   => $moved->id,
+                'from_community_name' => 'Переехавшее сообщество',
+            ], JSON_UNESCAPED_UNICODE),
+        ]);
+
+        $this->getJson('/api/web/venues/' . $grad->id)
+            ->assertOk()
+            ->assertJsonPath('data.social_accounts', []);
+
+        // сторож фикстуры: сообщество живое и на своей площадке по FK видно
+        $this->getJson('/api/web/venues/' . $other->id)
+            ->assertOk()
+            ->assertJsonCount(1, 'data.social_accounts')
+            ->assertJsonPath('data.social_accounts.0.community.id', $moved->id);
+    }
+
+    /**
+     * Тот же запрет со стороны сообщества-сироты: след в source_meta ведёт на
+     * сообщество, которое не привязано вообще ни к одной площадке. Источником
+     * оно от этого не становится — связь живёт только в FK.
+     */
+    public function test_show_social_accounts_ignores_unlinked_community_from_source_meta(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'По следу', 'po-sledu');
+
+        // сообщество живое и со ссылкой, но venue_id у него не проставлен
+        $orphan = Community::create(['name' => 'Только след', 'city_id' => $vrn->id]);
+        $this->attachSocialLink($orphan->id, 'vk', 'https://vk.com/sled');
+        $this->updateVenue($venue->id, [
+            'source_meta' => json_encode([
+                'origin'            => 'community_backfill',
+                'from_community_id' => $orphan->id,
+            ], JSON_UNESCAPED_UNICODE),
+        ]);
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonPath('data.social_accounts', []);
+    }
+
+    /**
+     * Источник без свежести всё равно называется: мы правда собираем отсюда
+     * афишу, просто давно ничего не прочитали. Скрыть его — умолчать об
+     * атрибуции, а это ровно то, чего агрегатору делать нельзя.
+     */
+    public function test_show_social_accounts_keeps_community_without_posts(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+
+        $silent = $this->createVenue($vrn->id, 'Молчун', 'molchun');
+        $noPosts = $this->attachCommunityToVenue($vrn->id, $silent->id, 'Сообщество без постов');
+        $this->attachSocialLink($noPosts->id, 'vk', 'https://vk.com/silent');
+
+        $this->getJson('/api/web/venues/' . $silent->id)
+            ->assertOk()
+            ->assertJsonCount(1, 'data.social_accounts')
+            ->assertJsonPath('data.social_accounts.0.community.name', 'Сообщество без постов')
+            ->assertJsonPath('data.social_accounts.0.last_post_at', null);
+
+    }
+
+    /**
+     * Погашенный уборкой пост свежесть всё равно даёт.
+     *
+     * context:cleanup гасит посты старше 30 дней, не породившие событий, — это
+     * TTL хранилища, а не отзыв факта: пост мы прочитали. Если такие не
+     * считать, у «ТЕАТР. АКТ» свежесть съезжает с декабря 2025 на август 2024,
+     * и страница сообщает, что источник молчит два года, — при живом источнике.
+     */
+    public function test_show_social_accounts_freshness_counts_pruned_posts(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'С отозванным', 's-otozvannym');
+
+        $community = $this->attachCommunityToVenue($vrn->id, $venue->id, 'Сообщество с погашенным постом');
+        $this->addContextPost($community->id, '2026-06-01 09:00:00');
+        $this->addContextPost($community->id, '2026-08-01 09:00:00', deleted: true);
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonCount(1, 'data.social_accounts')
+            ->assertJsonPath('data.social_accounts.0.last_post_at', '2026-08-01');
+    }
+
+    /** Сообщество без живых ссылок остаётся источником — просто некликабельным. */
+    public function test_show_social_accounts_keeps_community_without_links(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Площадка', 'ploschadka');
+
+        $community = $this->attachCommunityToVenue($vrn->id, $venue->id, 'Сообщество без ссылок');
+        $this->attachSocialLink($community->id, 'vk', 'https://vk.com/dead', 'active', false);
+        $this->addContextPost($community->id, '2026-08-01 09:00:00');
+
+        $this->getJson('/api/web/venues/' . $venue->id)
+            ->assertOk()
+            ->assertJsonCount(1, 'data.social_accounts')
+            ->assertJsonPath('data.social_accounts.0.community.name', 'Сообщество без ссылок')
+            ->assertJsonPath('data.social_accounts.0.links', [])
+            ->assertJsonPath('data.social_accounts.0.last_post_at', '2026-08-01');
+    }
+
+    /** Порядок обязан быть один и тот же между запросами, иначе блок прыгает. */
+    public function test_show_social_accounts_order_is_deterministic(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Многоисточниковая', 'mnogo');
+
+        $old = $this->attachCommunityToVenue($vrn->id, $venue->id, 'Старый');
+        $this->addContextPost($old->id, '2026-08-01 09:00:00');
+
+        $mute1 = $this->attachCommunityToVenue($vrn->id, $venue->id, 'Молчун раньше');
+        $fresh = $this->attachCommunityToVenue($vrn->id, $venue->id, 'Свежий');
+        $this->addContextPost($fresh->id, '2026-08-03 09:00:00');
+        $mute2 = $this->attachCommunityToVenue($vrn->id, $venue->id, 'Молчун позже');
+
+        $names = collect($this->getJson('/api/web/venues/' . $venue->id)->assertOk()->json('data.social_accounts'))
+            ->pluck('community.name')->all();
+
+        // свежие сверху; без даты — в конец и там по id
+        $this->assertSame(['Свежий', 'Старый', 'Молчун раньше', 'Молчун позже'], $names);
+        $this->assertTrue($mute1->id < $mute2->id, 'порядок молчунов проверяется по возрастанию id');
+    }
+
+    /** Три сообщества стоят столько же запросов, сколько одно. */
+    public function test_show_social_accounts_are_eager_loaded_without_n_plus_one(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+
+        $one = $this->createVenue($vrn->id, 'С одним', 's-odnim');
+        $single = $this->attachCommunityToVenue($vrn->id, $one->id, 'Единственное');
+        $this->attachSocialLink($single->id, 'vk', 'https://vk.com/one');
+        $this->addContextPost($single->id, '2026-08-01 09:00:00');
+
+        $many = $this->createVenue($vrn->id, 'С тремя', 's-tremya');
+        foreach (['vk', 'telegram', 'site'] as $i => $network) {
+            $c = $this->attachCommunityToVenue($vrn->id, $many->id, 'Источник ' . $i);
+            $this->attachSocialLink($c->id, $network, 'https://example.test/' . $network);
+            $this->addContextPost($c->id, '2026-08-0' . ($i + 1) . ' 09:00:00');
+        }
+
+        $this->getJson('/api/web/venues/' . $one->id)->assertOk(); // прогрев
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $this->getJson('/api/web/venues/' . $one->id)->assertOk();
+        $queriesOne = count(DB::getQueryLog());
+        DB::disableQueryLog();
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $this->getJson('/api/web/venues/' . $many->id)->assertOk()->assertJsonCount(3, 'data.social_accounts');
+        $queriesThree = count(DB::getQueryLog());
+        DB::disableQueryLog();
+
+        $this->assertSame(
+            $queriesOne,
+            $queriesThree,
+            "Число запросов растёт с числом аккаунтов ({$queriesOne} → {$queriesThree}): грузятся не батчем (N+1)",
+        );
+    }
+
+    /** Сообщество-источник площадки: связь ставит FK communities.venue_id. */
+    private function attachCommunityToVenue(int $cityId, int $venueId, string $name, ?string $avatarUrl = null): Community
+    {
+        $community = Community::create(['name' => $name, 'city_id' => $cityId, 'avatar_url' => $avatarUrl]);
+        // venue_id нет в $fillable: связь проставляет парсер, не веб-слой
+        DB::table('communities')->where('id', $community->id)->update(['venue_id' => $venueId]);
+
+        return $community->refresh();
+    }
+
+    private function socialNetworkId(string $slug): int
+    {
+        $id = DB::table('social_networks')->where('slug', $slug)->value('id');
+        if ($id !== null) {
+            return (int) $id;
+        }
+
+        return (int) DB::table('social_networks')->insertGetId([
+            'name'       => $slug,
+            'slug'       => $slug,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
+    private function attachSocialLink(
+        int $communityId,
+        string $networkSlug,
+        string $url,
+        string $status = 'active',
+        ?bool $lastIsActive = null,
+    ): int {
+        return (int) DB::table('community_social_links')->insertGetId([
+            'community_id'      => $communityId,
+            'social_network_id' => $this->socialNetworkId($networkSlug),
+            'url'               => $url,
+            'status'            => $status,
+            'last_is_active'    => $lastIsActive,
+            'created_at'        => now(),
+            'updated_at'        => now(),
+        ]);
+    }
+
+    /** Прочитанный пост источника; $publishedAtUtc — 'Y-m-d H:i:s' в UTC. */
+    private function addContextPost(int $communityId, string $publishedAtUtc, bool $deleted = false): void
+    {
+        DB::table('context_posts')->insert([
+            'community_id' => $communityId,
+            'published_at' => $publishedAtUtc,
+            'status'       => 'active',
+            'created_at'   => now(),
+            'updated_at'   => now(),
+            'deleted_at'   => $deleted ? now() : null,
+        ]);
+    }
+
+    /** Правка полей площадки мимо Eloquent: tg_portrait/kind не в $fillable. */
+    private function updateVenue(int $venueId, array $columns): void
+    {
+        DB::table('venues')->where('id', $venueId)->update($columns + ['updated_at' => now()]);
+    }
+
     /** Нормальный (active) source с картинками — для гидрации poster/images. */
     private function attachSourceWithImages(int $eventId, int $communityId, array $images): void
     {
@@ -733,6 +1649,26 @@ class WebVenuesTest extends TestCase
             'created_at' => now(),
             'updated_at' => now(),
         ]);
+    }
+
+    /**
+     * Событие, заведённое одной ДАТОЙ без времени. Так живёт заметная часть
+     * базы (231 событие на 33 площадках): у музеев в посте стоит «16 июля»,
+     * часа нет. Именно на таких строках трёхзначная логика SQL и подводит.
+     */
+    private function createDateOnlyEvent(int $cityId, int $venueId, int $communityId, string $title, string $dateMsk): Event
+    {
+        $event = new Event();
+        $event->community_id = $communityId;
+        $event->venue_id     = $venueId;
+        $event->title        = $title;
+        $event->status       = 'active';
+        $event->city_id      = $cityId;
+        $event->start_time   = null;
+        $event->start_date   = $dateMsk;
+        $event->save();
+
+        return $event;
     }
 
     private function createEvent(int $cityId, int $venueId, int $communityId, string $title, string $startTimeMsk): Event

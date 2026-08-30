@@ -42,6 +42,21 @@ class Community extends Model
         return $this->hasMany(CommunitySocialLink::class);
     }
 
+    /**
+     * Посты, которые мы с этого сообщества прочитали. Нужны свежестью: на
+     * странице площадки max(published_at) отвечает на вопрос «а вы вообще ещё
+     * следите за этим местом» (см. VenuesController::show).
+     *
+     * ContextPost НЕ использует SoftDeletes, хотя колонка deleted_at в таблице
+     * есть: гашение постов делает context:cleanup (посты старше 30 дней, не
+     * породившие событий) — это TTL хранилища, и для свежести такие посты
+     * считаются наравне с живыми. Кому нужно иное — фильтрует явно.
+     */
+    public function contextPosts()
+    {
+        return $this->hasMany(ContextPost::class);
+    }
+
     public function interests()
     {
         return $this->belongsToMany(Interest::class, 'community_interest')
