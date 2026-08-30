@@ -41,24 +41,34 @@ class EventRepository
     {
         $limit = max(1, min($limit, 50000));
 
+        // Имена колонок квалифицируем таблицей: после join с cities колонки id,
+        // created_at и updated_at есть у обеих сторон, и Postgres отвечает
+        // «column reference is ambiguous». Запрос падал в 500, sitemap молча
+        // уходил на запасной путь через /api/web/events и тянул всё подряд.
         $q = Event::query()
-            ->select(['id', 'updated_at', 'created_at', 'start_time', 'start_date'])
+            ->select([
+                'events.id',
+                'events.updated_at',
+                'events.created_at',
+                'events.start_time',
+                'events.start_date',
+            ])
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
             ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')
-            ->where('id', '>', $afterId)
-            ->orderBy('id', 'asc')
+            ->where('events.id', '>', $afterId)
+            ->orderBy('events.id', 'asc')
             ->limit($limit + 1);
 
         if ($mode !== 'all') {
             $todayMsk = now('Europe/Moscow')->toDateString();
 
             $q->where(function ($w) use ($todayMsk) {
-                $w->where('start_time', '>=', now()->subDay())
+                $w->where('events.start_time', '>=', now()->subDay())
                     ->orWhere(function ($x) use ($todayMsk) {
-                        $x->whereNull('start_time')
-                            ->whereNotNull('start_date')
-                            ->where('start_date', '>=', $todayMsk);
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $todayMsk);
                     });
             });
         }
