@@ -408,17 +408,36 @@ class VenuesController extends Controller
             FROM events e
             WHERE e.venue_id = venues.id AND e.deleted_at IS NULL)";
 
-        // Первая картинка из event_sources.images первого (по дате) event'а
-        // на этом venue. images — postgres `json` (не jsonb), используем
-        // json_array_length + ->>0 для безопасного доступа.
-        $coverSql = "(SELECT es.images->>0
+        // Картинка места. Раньше здесь стоял ORDER BY start_time ASC БЕЗ фильтра по
+        // дате, то есть бралось самое старое событие за всю историю площадки: на 83
+        // страницах из 108 в превью ссылки и в разметке висел постер уже прошедшего.
+        // Теперь берём ближайшее БУДУЩЕЕ. День события считаем тем же выражением, что
+        // и ритм площадки: у части событий времени нет, есть только дата.
+        // images — postgres `json` (не jsonb), поэтому json_array_length и ->>0.
+        $dayExpr = "COALESCE(e.start_date, (e.start_time AT TIME ZONE 'Europe/Moscow')::date)";
+
+        $coverEventSql = "(SELECT es.images->>0
             FROM events e
             JOIN event_sources es ON es.event_id = e.id
             WHERE e.venue_id = venues.id
               AND e.deleted_at IS NULL
               AND es.images IS NOT NULL
               AND json_array_length(es.images) > 0
-            ORDER BY e.start_time ASC NULLS LAST
+              AND {$dayExpr} >= ?::date
+            ORDER BY {$dayExpr} ASC
+            LIMIT 1)";
+
+        // Запасной путь — обложка привязанного сообщества. Это широкий баннер паблика
+        // (1920×768), а не фотография места, поэтому в карточки каталога и рельса он
+        // НЕ идёт: там слот 3:4, и от баннера со сплошным текстом остался бы обрезок.
+        // Его назначение — превью ссылки, где 1200×630 почти впору. Куда его пускать,
+        // решает ресурс по cover_source, а не этот запрос.
+        $coverCommunitySql = "(SELECT c.image_url
+            FROM communities c
+            WHERE c.venue_id = venues.id
+              AND c.deleted_at IS NULL
+              AND COALESCE(c.image_url, '') <> ''
+            ORDER BY c.id ASC
             LIMIT 1)";
 
         return Venue::query()
@@ -428,8 +447,9 @@ class VenuesController extends Controller
                 'venues.*',
                 DB::raw('ct.slug as city_slug'),
                 DB::raw($eventsCountSql . ' as events_count'),
-                DB::raw($coverSql . ' as cover_image_url'),
-            ]);
+                DB::raw($coverCommunitySql . ' as cover_community_url'),
+            ])
+            ->selectRaw($coverEventSql . ' as cover_event_url', [now('Europe/Moscow')->toDateString()]);
     }
 
     /**

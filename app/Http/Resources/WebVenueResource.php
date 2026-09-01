@@ -37,7 +37,17 @@ class WebVenueResource extends JsonResource
             'lat'             => $this->latitude !== null ? (float) $this->latitude : null,
             'lng'             => $this->longitude !== null ? (float) $this->longitude : null,
             'events_count'    => (int) ($this->getAttribute('events_count') ?? 0),
-            'cover_image_url' => $this->getAttribute('cover_image_url') ?: null,
+            'cover_image_url' => $this->getAttribute('cover_event_url')
+                ?: ($this->getAttribute('cover_community_url') ?: null),
+            // Откуда картинка: 'event' — постер ближайшего будущего события,
+            // 'community' — обложка паблика-источника. Различать обязательно:
+            // баннер паблика широкий (1920×768) и в слот карточки 3:4 не лезет,
+            // поэтому карточки рисуют картинку только при 'event', а превью
+            // ссылки берёт любую. Ни того ни другого нет — null, и карточка
+            // показывает монограмму.
+            'cover_source'    => $this->getAttribute('cover_event_url')
+                ? 'event'
+                : ($this->getAttribute('cover_community_url') ? 'community' : null),
             // ближайшее ПРЕДСТОЯЩЕЕ видимое-в-вебе событие: {id,title,start_at,
             // start_date,time_precision} | null. start_at — ISO8601 в МСК.
             'next_event'      => $this->getAttribute('next_event_payload'),
