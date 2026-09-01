@@ -1962,6 +1962,15 @@ class EventRepository
 
         $q = Event::query()
             ->select('events.*', 'ct.slug as city_slug')
+            // Сколько сеансов у серии, к которой принадлежит строка. Оконная функция
+            // считает по ВСЕЙ отфильтрованной выборке, ДО LIMIT, поэтому число верное и
+            // на первой странице из шести строк. Клиенту оно нужно, чтобы написать
+            // «прошло 53 раза»: страница схлопывает серию в одну строку и сама может
+            // сосчитать только загруженное. Ключ тот же, что у ритма площадки:
+            // событие без серии считается само по себе.
+            ->selectRaw(
+                "COUNT(*) OVER (PARTITION BY COALESCE(events.event_group_id::text, 'e' || events.id)) AS series_sessions"
+            )
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
             ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')

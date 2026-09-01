@@ -111,6 +111,14 @@ class WebEventResource extends JsonResource
             // hero/«Куда на выходных» — у представителя серии в каждом окне свой events.id.
             'event_group_id' => $gid > 0 ? $gid : null,
 
+            // Сколько сеансов у серии. Считает только /past-events (оконная функция в
+            // listVenuePast), в остальных выборках колонки нет и поле молчит. Нужно
+            // странице площадки: она схлопывает серию архива в одну строку и без этого
+            // числа не может сказать «прошло 53 раза», потому что видит лишь загруженное.
+            'series_sessions' => $this->getAttribute('series_sessions') !== null
+                ? (int) $this->getAttribute('series_sessions')
+                : null,
+
             'group' => $group,
 
             'interests' => $interests,
