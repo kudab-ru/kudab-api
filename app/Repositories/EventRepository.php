@@ -1945,27 +1945,34 @@ class EventRepository
      *   - ungrouped: история = каждый показ отдельной приглушённой карточкой
      *     (12 показов ≠ 1 карточка); заодно снимает тяжёлую window-машину групп;
      *   - обратная хронология (свежее прошлое сверху);
-     *   - past-предикат — общий pastExpression() с addPastFlags(): одно выражение
-     *     и одни связанные значения времени на оба, иначе на границе суток
-     *     карточка попала бы в ленту с __is_past=0 (не приглушена).
+     *   - past-предикат — pastExpression() вычисляется ЗДЕСЬ ОДИН РАЗ и тем же
+     *     массивом [sql, bindings] отдаётся в addPastFlags(). Именно один раз:
+     *     каждый вызов pastExpression() берёт CarbonImmutable::now() заново, и
+     *     два вызова подряд дают разное «сейчас» — на границе суток фильтр и
+     *     флаг разъехались бы, карточка попала бы в ленту с __is_past=0
+     *     (не приглушена). В тестах Carbon::setTestNow() замораживает время и
+     *     расхождение не воспроизводится — сторожа тут нет, держится кодом.
      *
      * @return array{page: \Illuminate\Contracts\Pagination\LengthAwarePaginator, totalEvents: int}
      */
     public function listVenuePast(int $venueId, int $perPage = 24, int $page = 1): array
     {
+        // ОДИН вызов на весь запрос: «сейчас» берётся ровно однажды.
+        $past = self::pastExpression();
+
         $q = Event::query()
             ->select('events.*', 'ct.slug as city_slug')
             ->join('cities as ct', 'ct.id', '=', 'events.city_id')
             ->where('ct.status', 'active')
             ->whereNull('events.deleted_at')
             ->where('events.venue_id', $venueId)
-            // past-предикат общий с addPastFlags(): одно выражение и одни и те же
-            // связанные значения времени, поэтому фильтр и флаг __is_past не
-            // разъедутся на границе суток.
-            ->whereRaw(...self::pastExpression())
+            // тот же $past, что уйдёт в addPastFlags() ниже: одно выражение и
+            // одни и те же связанные значения времени, поэтому фильтр и флаг
+            // __is_past не разъедутся на границе суток.
+            ->whereRaw(...$past)
             ->with(['interests:id,slug,name']);
 
-        $this->addPastFlags($q);                    // __is_past=true всем + __past_rank
+        $this->addPastFlags($q, $past);             // __is_past=true всем + __past_rank
         $this->excludeBlacklistedSources($q);       // = webNotBlacklisted
         $this->applyMainFeedTaxonomyFilter($q, []); // дефолтный taxonomy-гейт ленты
 
@@ -1985,14 +1992,20 @@ class EventRepository
     }
 
     /**
-     * Флаг «карточка про прошлое» для приглушения в ленте. Берёт ровно тот же
-     * предикат и те же связанные значения времени, что фильтр в listVenuePast:
-     * иначе на границе суток событие попадало бы в выборку прошлого с
-     * __is_past=0 и рисовалось бы как предстоящее.
+     * Флаг «карточка про прошлое» для приглушения в ленте.
+     *
+     * $past — готовое [sql, bindings] от pastExpression(). Передавать его
+     * ОБЯЗАТЕЛЬНО там, где тем же предикатом уже фильтруется выборка
+     * (listVenuePast): каждый вызов pastExpression() берёт «сейчас» заново, и
+     * на границе суток событие попало бы в выборку прошлого с __is_past=0 и
+     * рисовалось бы как предстоящее. Где предиката в WHERE нет, аргумент можно
+     * опустить — сравнивать не с чем.
+     *
+     * @param array{0: string, 1: array{0: string, 1: string}}|null $past
      */
-    private function addPastFlags($q): void
+    private function addPastFlags($q, ?array $past = null): void
     {
-        [$pastSql, $bindings] = self::pastExpression();
+        [$pastSql, $bindings] = $past ?? self::pastExpression();
 
         $q->selectRaw("CASE WHEN {$pastSql} THEN 1 ELSE 0 END as __past_rank", $bindings);
         $q->selectRaw("({$pastSql}) as __is_past", $bindings);
