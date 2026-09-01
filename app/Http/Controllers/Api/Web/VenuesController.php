@@ -163,34 +163,64 @@ class VenuesController extends Controller
         // выборка и так сужена городом: площадок в городе сотни, не миллионы.
         $point = 'ST_SetSRID(ST_Point(?, ?), 4326)::geography';
 
-        $geo = fn ($q) => $q
+        // Отсекаем не только саму площадку по номеру, но и её близнеца по ТОЧКЕ.
+        // Одно место заведено в каталоге несколькими записями: 13 записей стоят
+        // на 6 точках. Без этого условия блок «афиша рядом» рекламировал площадке
+        // её же саму под другим именем и с расстоянием 0 м — так выходило на 7
+        // страницах. Порог метровый, а не в десятках метров: пар «разные площадки
+        // ближе 25 м» в каталоге ровно одна, и резать её незачем.
+        $geoAt = fn (int $r) => fn ($q) => $q
             ->where('venues.city_id', (int) $venue->city_id)
             ->where('venues.id', '<>', (int) $venue->id)
             ->whereNotNull('venues.location')
-            ->whereRaw("ST_DWithin(venues.location::geography, {$point}, ?)", [$lon, $lat, $radius]);
+            ->whereRaw("ST_Distance(venues.location::geography, {$point}) > 1", [$lon, $lat])
+            ->whereRaw("ST_DWithin(venues.location::geography, {$point}, ?)", [$lon, $lat, $r]);
 
-        // Агрегат по событиям сужаем теми же соседями. Без этого группировка
-        // пошла бы по всей таблице events ради полудюжины строк на выходе.
-        $candidates = $geo(Venue::query()->active())->select('venues.id');
+        $fetch = function (int $r) use ($geoAt, $point, $lon, $lat, $todayMsk, $limit) {
+            $geo = $geoAt($r);
 
-        $stats = Event::query()
-            ->visibleWeb()
-            ->whereIn('events.venue_id', $candidates)
-            ->groupBy('events.venue_id')
-            ->select('events.venue_id')
-            ->selectRaw('BOOL_OR'.self::UPCOMING_SQL.' AS has_upcoming', [$todayMsk, $todayMsk]);
+            // Агрегат по событиям сужаем теми же соседями. Без этого группировка
+            // пошла бы по всей таблице events ради полудюжины строк на выходе.
+            $candidates = $geo(Venue::query()->active())->select('venues.id');
 
-        $rows = $geo($this->baseQuery())
-            ->joinSub($stats, 'ev', 'ev.venue_id', '=', 'venues.id')
-            ->selectRaw("ST_Distance(venues.location::geography, {$point}) AS distance_m", [$lon, $lat])
-            // NULLS LAST обязателен: у площадки, все события которой без дат,
-            // BOOL_OR даёт NULL, а postgres при DESC поднимает NULL наверх —
-            // и место без единой известной даты возглавило бы «рядом с вами».
-            ->orderByRaw('ev.has_upcoming DESC NULLS LAST')
-            ->orderByRaw('distance_m ASC')
-            ->orderBy('venues.id')
-            ->limit($limit)
-            ->get();
+            $stats = Event::query()
+                ->visibleWeb()
+                ->whereIn('events.venue_id', $candidates)
+                ->groupBy('events.venue_id')
+                ->select('events.venue_id')
+                ->selectRaw('BOOL_OR'.self::UPCOMING_SQL.' AS has_upcoming', [$todayMsk, $todayMsk]);
+
+            return $geo($this->baseQuery())
+                ->joinSub($stats, 'ev', 'ev.venue_id', '=', 'venues.id')
+                ->selectRaw("ST_Distance(venues.location::geography, {$point}) AS distance_m", [$lon, $lat])
+                ->selectRaw('ev.has_upcoming AS ev_has_upcoming')
+                // NULLS LAST обязателен: у площадки, все события которой без дат,
+                // BOOL_OR даёт NULL, а postgres при DESC поднимает NULL наверх —
+                // и место без единой известной даты возглавило бы «рядом с вами».
+                ->orderByRaw('ev.has_upcoming DESC NULLS LAST')
+                ->orderByRaw('distance_m ASC')
+                ->orderBy('venues.id')
+                ->limit($limit)
+                ->get();
+        };
+
+        $rows = $fetch($radius);
+
+        // Второй проход по области. У площадки без своей афиши блок «афиша рядом»
+        // и есть ответ страницы, а в трёх километрах соседа С ДАТАМИ не нашлось на
+        // 9 пустых площадках из 65. Двадцать километров дают дату пятерым из девяти;
+        // оставшимся четверым не помогает ничто, и они честно остаются пустыми.
+        // Расстояние человек видит в строке, так что «рядом» себя не выдаёт за
+        // соседний квартал. Явный radius_m из запроса не переопределяем.
+        if (! $request->has('radius_m') && $rows->every(fn ($v) => ! $v->ev_has_upcoming)) {
+            $wide = $fetch(20000);
+            if ($wide->contains(fn ($v) => (bool) $v->ev_has_upcoming)) {
+                $rows = $wide;
+            }
+        }
+
+        // Служебный флаг сортировки наружу не отдаём.
+        $rows->each(fn ($v) => $v->makeHidden(['ev_has_upcoming']));
 
         // Карточка соседа — та же, что в каталоге, значит и обогащение то же.
         $this->attachUpcoming($rows->all());

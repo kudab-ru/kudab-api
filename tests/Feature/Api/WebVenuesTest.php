@@ -1098,17 +1098,71 @@ class WebVenuesTest extends TestCase
 
         $base = $this->createVenue($vrn->id, 'Точка отсчёта', 'tochka', 39.0, 51.0);
 
+        // Ближний сосед С ДАТОЙ обязателен: без него блок «афиша рядом» пуст, и
+        // ручка нарочно расширяет круг до 20 км (см. соседний тест). Радиус режет
+        // дальних ровно тогда, когда рядом есть что показать.
+        $near = $this->createVenue($vrn->id, 'Через дорогу', 'cherez-dorogu', 39.0, 51.002);
+        $this->createEvent($vrn->id, $near->id, $community->id, 'Близкое', '2026-08-16 19:00:00');
+
         // ~11 км — за дефолтным радиусом 3000 м, но внутри расширенного
         $outer = $this->createVenue($vrn->id, 'За городом', 'za-gorodom', 39.0, 51.1);
         $this->createEvent($vrn->id, $outer->id, $community->id, 'Загородное', '2026-08-16 19:00:00');
 
-        $this->getJson('/api/web/venues/' . $base->id . '/nearby')
-            ->assertOk()
-            ->assertJsonPath('data', []);
+        $names = $this->getJson('/api/web/venues/' . $base->id . '/nearby')->assertOk()->json('data');
+        $this->assertSame(['Через дорогу'], array_column($names, 'name'));
 
         $wide = $this->getJson('/api/web/venues/' . $base->id . '/nearby?radius_m=20000')->assertOk()->json('data');
-        $this->assertSame(['За городом'], array_column($wide, 'name'));
-        $this->assertEqualsWithDelta(11130, $wide[0]['distance_m'], 200);
+        $this->assertSame(['Через дорогу', 'За городом'], array_column($wide, 'name'));
+        $this->assertEqualsWithDelta(11130, $wide[1]['distance_m'], 200);
+    }
+
+    /**
+     * Круг расширяется сам, когда в трёх километрах не нашлось соседа С ДАТАМИ.
+     * У площадки без своей афиши блок «афиша рядом» и есть ответ страницы, а на
+     * девяти пустых площадках из 65 в дефолтном радиусе дат не было вовсе.
+     * Двадцать километров дают дату пятерым из девяти.
+     */
+    public function test_nearby_widens_when_nothing_dated_nearby(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $base = $this->createVenue($vrn->id, 'Точка отсчёта', 'tochka', 39.0, 51.0);
+
+        $outer = $this->createVenue($vrn->id, 'За городом', 'za-gorodom', 39.0, 51.1);
+        $this->createEvent($vrn->id, $outer->id, $community->id, 'Загородное', '2026-08-16 19:00:00');
+
+        $data = $this->getJson('/api/web/venues/' . $base->id . '/nearby')->assertOk()->json('data');
+        $this->assertSame(['За городом'], array_column($data, 'name'));
+
+        // Явный радиус из запроса не переопределяем: попросили три километра —
+        // отвечаем по трём, даже если ответ пустой.
+        $this->getJson('/api/web/venues/' . $base->id . '/nearby?radius_m=3000')
+            ->assertOk()
+            ->assertJsonPath('data', []);
+    }
+
+    /**
+     * Одно место заведено в каталоге несколькими записями: 13 записей стоят на
+     * 6 точках. Без отсечения по точке блок «афиша рядом» рекламировал площадке
+     * её же саму под другим именем и с расстоянием 0 м.
+     */
+    public function test_nearby_excludes_twin_at_the_same_point(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-04 12:00:00', 'Europe/Moscow'));
+
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+
+        $base = $this->createVenue($vrn->id, 'Музей-заповедник', 'muzei', 39.0, 51.0);
+        // Тот же адрес, другая запись — близнец.
+        $twin = $this->createVenue($vrn->id, 'Он же под другим именем', 'twin', 39.0, 51.0);
+        $this->createEvent($vrn->id, $twin->id, $community->id, 'Своё же событие', '2026-08-16 19:00:00');
+
+        $data = $this->getJson('/api/web/venues/' . $base->id . '/nearby')->assertOk()->json('data');
+        $this->assertSame([], array_column($data, 'name'));
     }
 
     public function test_nearby_returns_empty_for_venue_without_coordinates(): void
