@@ -174,7 +174,6 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('venues', [\App\Http\Controllers\Api\Web\VenuesController::class, 'index']);
     Route::get('venues/map', [\App\Http\Controllers\Api\Web\VenuesController::class, 'map']);
     Route::get('venues/{id}', [\App\Http\Controllers\Api\Web\VenuesController::class, 'show'])->whereNumber('id');
-    Route::get('venues/{id}/calendar', [\App\Http\Controllers\Api\Web\VenuesController::class, 'calendar'])->whereNumber('id');
     Route::get('venues/{id}/past-events', [\App\Http\Controllers\Api\Web\VenuesController::class, 'pastEvents'])->whereNumber('id');
     // Соседние площадки: «раз это место не подошло — вот что рядом». Только с
     // событиями (площадка-пустышка = тупик и мусор в индексе), сперва те, у
