@@ -85,6 +85,7 @@ Route::prefix('admin')
         Route::patch('/broadcast/channels/{id}', [AdminBroadcastController::class, 'updateChannel']);
         Route::post('/broadcast/channels/{id}/enqueue', [AdminBroadcastController::class, 'enqueue']);
         Route::post('/broadcast/channels/{id}/rebuild', [AdminBroadcastController::class, 'rebuild']);
+        Route::post('/broadcast/channels/{id}/move', [AdminBroadcastController::class, 'move']);
         Route::patch('/broadcast/items/{id}', [AdminBroadcastController::class, 'update']);
         Route::delete('/broadcast/items/{id}', [AdminBroadcastController::class, 'remove']);
 

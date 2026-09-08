@@ -13,6 +13,7 @@ use App\Services\Telegram\TelegramChatBroadcastService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -418,6 +419,119 @@ class AdminBroadcastController extends Controller
         );
 
         return response()->json(['data' => ['dropped' => $dropped] + $filled]);
+    }
+
+    /**
+     * Перенести пост на другой день — под перетаскивание в ленте.
+     *
+     * Одной ручкой, а не двумя PATCH подряд: если на целевом дне уже стоит
+     * пост, дни МЕНЯЮТСЯ МЕСТАМИ, и делать это двумя запросами нельзя —
+     * между ними лента окажется с двумя постами на одном дне и дырой на
+     * другом, а при обрыве так и останется.
+     *
+     * Текст обоих пересобирается: в нём есть «сегодня» и «завтра», и они
+     * считаются от дня публикации. Свой текст не трогаем.
+     */
+    public function move(Request $request, int $broadcastId): JsonResponse
+    {
+        $data = $request->validate([
+            'item_id' => ['required', 'integer'],
+            'publish_at' => ['required', 'date'],
+        ]);
+
+        $broadcast = TelegramChatBroadcast::query()->findOrFail($broadcastId);
+
+        $item = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->findOrFail((int) $data['item_id']);
+
+        if ($item->posted_at !== null) {
+            return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
+        }
+
+        $target = $this->toUtc($data['publish_at']);
+        if ($target === null) {
+            return response()->json(['ok' => false, 'error' => 'Не разобрал дату.'], 422);
+        }
+
+        // Пост не может уйти ПОСЛЕ события — получится анонс задним числом.
+        // Перетаскивание в ленте позволяло это сделать в один жест: пост про
+        // концерт 9-го уезжал на 10-е и говорил «9 сен» в прошедшем времени.
+        // Правило то же, что у подбора: день в день можно, пока не началось.
+        $event = $item->event_id ? Event::query()->find($item->event_id) : null;
+        if ($event && $event->start_time) {
+            $endsAt = $event->end_time ?: $event->start_time;
+            if (Carbon::parse($endsAt)->lt($target)) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => 'К этому дню событие уже пройдёт — пост будет про прошлое.',
+                ], 422);
+            }
+        }
+
+        $targetDay = $target->copy()->setTimezone('Europe/Moscow')->toDateString();
+
+        // Кто уже занимает этот день.
+        $occupant = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereIn('status', $this->openStatuses())
+            ->whereNull('posted_at')
+            ->whereNotNull('publish_at')
+            ->where('id', '<>', $item->id)
+            ->get()
+            ->first(fn (TelegramChatBroadcastItem $x) => Carbon::parse($x->publish_at)
+                ->setTimezone('Europe/Moscow')->toDateString() === $targetDay);
+
+        $from = $item->publish_at;
+
+        // Обмен двусторонний: второй пост тоже не должен уехать за своё
+        // событие. Иначе одним перетаскиванием ломается соседний день.
+        if ($occupant && $from !== null && $occupant->event_id) {
+            $otherEvent = Event::query()->find($occupant->event_id);
+            if ($otherEvent && $otherEvent->start_time) {
+                $otherEnds = $otherEvent->end_time ?: $otherEvent->start_time;
+                if (Carbon::parse($otherEnds)->lt($from)) {
+                    return response()->json([
+                        'ok' => false,
+                        'error' => 'Обмен невозможен: второй пост уехал бы за своё событие.',
+                    ], 422);
+                }
+            }
+        }
+
+        DB::transaction(function () use ($item, $occupant, $target, $from) {
+            $item->publish_at = $target;
+            $item->save();
+
+            if ($occupant) {
+                // Меняемся местами. Если у переносимого дня не было, соседу
+                // достаётся пустая дата — он вернётся в общую очередь.
+                $occupant->publish_at = $from;
+                $occupant->save();
+            }
+        });
+
+        foreach (array_filter([$item, $occupant]) as $changed) {
+            $this->regenerateCaption($changed, $broadcast);
+        }
+
+        return response()->json(['ok' => true, 'data' => ['swapped' => $occupant !== null]]);
+    }
+
+    /** Пересобрать шаблонный текст под новый день публикации. */
+    private function regenerateCaption(TelegramChatBroadcastItem $item, TelegramChatBroadcast $broadcast): void
+    {
+        if ($item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            return;
+        }
+        $event = Event::query()->find($item->event_id);
+        if (! $event) {
+            return;
+        }
+        $item->caption = null;
+        $item->caption_source = null;
+        $item->save();
+        $this->fillCaption($item, $broadcast, $event);
     }
 
     /** Настройки канала. */
