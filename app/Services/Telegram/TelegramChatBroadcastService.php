@@ -21,8 +21,26 @@ use RuntimeException;
 
 class TelegramChatBroadcastService
 {
-    /** Кап кандидатного пула под скоринг (на канал — события одного города). */
-    private const SCORING_CANDIDATE_LIMIT = 100;
+    /**
+     * Кап кандидатного пула под скоринг (на канал — события одного города).
+     *
+     * Было 100, и этого хватало, пока за раз выбиралось ОДНО событие. Для
+     * ленты на неделю мало: замер по Воронежу — сотое ближайшее событие
+     * стартует через четыре дня, то есть вторая половина недели в поле зрения
+     * не попадала вовсе, и все семь постов набирались бы из первых дней.
+     * Всего впереди 338 событий, так что 400 покрывает город целиком и
+     * остаётся страховкой от «слишком плотного» города.
+     */
+    private const SCORING_CANDIDATE_LIMIT = 400;
+
+    /**
+     * Насколько вперёд смотрим, набирая кандидатов, в днях.
+     *
+     * Кап по количеству сам по себе не спасает: в плотном городе 400
+     * ближайших снова уложатся в пару дней. Поэтому смотрим на окно времени,
+     * а кап оставляем предохранителем.
+     */
+    private const CANDIDATE_HORIZON_DAYS = 14;
 
     /** Окно cross-time анти-дубля: не повторять тот же заголовок в канале N дней. */
     private const CROSS_TIME_WINDOW_DAYS = 14;
@@ -635,16 +653,16 @@ class TelegramChatBroadcastService
                 continue;
             }
 
-            // Одно событие в полёте: если в очереди уже есть незакрытый item — не плодим
-            // (ревью-статусы тоже «в полёте» до фактического поста).
-            $open = $this->broadcastItemRepository->countForBroadcast($broadcast->id, [
-                TelegramChatBroadcastItem::STATUS_PENDING,
-                TelegramChatBroadcastItem::STATUS_PLANNED,
-                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
-                TelegramChatBroadcastItem::STATUS_APPROVED,
-                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
-            ]);
-            if ($open > 0) {
+            // Лента канала: держим в очереди до feed_limit СОБЫТИЙНЫХ записей.
+            // Раньше здесь стояло жёсткое «одно в полёте» (open > 0), из-за
+            // которого одна отравленная запись остановила канал на 33 дня и
+            // из-за которого нельзя было собрать план на неделю.
+            //
+            // Портреты площадок в этот счёт НЕ входят: у них свой недельный
+            // каденс, и общий счётчик заблокировал бы их навсегда, стоит ленте
+            // заполниться. Их гейт живёт в TelegramVenuePortraitService.
+            $openEvents = $this->broadcastItemRepository->countOpenForBroadcast($broadcast->id, 'event');
+            if ($openEvents >= $broadcast->feed_limit) {
                 $summary['skipped_queue_busy']++;
 
                 continue;
@@ -889,6 +907,9 @@ class TelegramChatBroadcastService
             $query->whereNotIn('id', array_values(array_unique(array_map('intval', $excludeEventIds))));
         }
 
+        // Горизонт: не тащим всё будущее, но и не упираемся в первые дни.
+        $query->where('start_time', '<=', Carbon::now()->addDays(self::CANDIDATE_HORIZON_DAYS));
+
         // Кандидатный пул — ближайшие, кап; качество выбираем скорингом в PHP.
         $candidates = $query
             ->with(['sources:id,event_id,images,published_at'])
@@ -923,8 +944,14 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * Нормализованные заголовки событий, ПОСТНУТЫХ в этом канале за окно $since..now.
-     * Для cross-time анти-дубля повторяющихся событий.
+     * Нормализованные заголовки, которые в этом канале уже прозвучали или
+     * вот-вот прозвучат: постнутые за окно $since..now ПЛЮС всё, что стоит
+     * в ленте незакрытым.
+     *
+     * Незакрытые добавлены вместе с недельной лентой. Пока в очереди висела
+     * одна запись, хватало и одних постнутых. Теперь неделя кладётся семью
+     * записями разом, и друг для друга они были бы невидимы: два одинаковых
+     * заголовка в одной неделе не остановил бы никто.
      *
      * @return string[]
      */
@@ -934,8 +961,18 @@ class TelegramChatBroadcastService
             ->from('telegram.chat_broadcast_items as i')
             ->join('events as e', 'e.id', '=', 'i.event_id')
             ->where('i.broadcast_id', $broadcastId)
-            ->where('i.status', TelegramChatBroadcastItem::STATUS_POSTED)
-            ->where('i.posted_at', '>=', $since)
+            ->where(function ($q) use ($since) {
+                $q->where(function ($w) use ($since) {
+                    $w->where('i.status', TelegramChatBroadcastItem::STATUS_POSTED)
+                        ->where('i.posted_at', '>=', $since);
+                })->orWhereIn('i.status', [
+                    TelegramChatBroadcastItem::STATUS_PENDING,
+                    TelegramChatBroadcastItem::STATUS_PLANNED,
+                    TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                    TelegramChatBroadcastItem::STATUS_APPROVED,
+                    TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+                ]);
+            })
             ->pluck('e.title');
 
         return $titles

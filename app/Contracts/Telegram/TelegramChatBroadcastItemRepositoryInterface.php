@@ -136,6 +136,15 @@ interface TelegramChatBroadcastItemRepositoryInterface
      * Количество элементов очереди для одного broadcast'а
      * по заданным статусам.
      */
+    /**
+     * Сколько незакрытых записей у канала. Событийные и venue считаются
+     * раздельно: у портретов площадок свой каденс, и общий счёт заблокировал
+     * бы их при заполненной ленте.
+     *
+     * @param  'event'|'venue'|null  $kind
+     */
+    public function countOpenForBroadcast(int $broadcastId, ?string $kind = null): int;
+
     public function countForBroadcast(
         int $broadcastId,
         array $statuses,

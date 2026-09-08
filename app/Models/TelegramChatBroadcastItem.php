@@ -31,6 +31,7 @@ class TelegramChatBroadcastItem extends Model
         'photo_url',
         'status',
         'planned_at',
+        'publish_at',
         'posted_at',
         'error_message',
         'review_reviewer_telegram_id',
@@ -40,14 +41,18 @@ class TelegramChatBroadcastItem extends Model
         'review_action',
         'claimed_at',
         'claim_token',
+        'caption_source',
+        'is_pinned',
     ];
 
     protected $casts = [
         'planned_at' => 'datetime',
+        'publish_at' => 'datetime',
         'posted_at' => 'datetime',
         'review_deadline_at' => 'datetime',
         'reviewed_at' => 'datetime',
         'claimed_at' => 'datetime',
+        'is_pinned' => 'bool',
     ];
 
     public const STATUS_PENDING = 'pending'; // создано, но ещё не запланировано

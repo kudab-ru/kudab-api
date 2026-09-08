@@ -263,6 +263,39 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
     /**
      * {@inheritdoc}
      */
+    /**
+     * Сколько незакрытых записей у канала, с разделением по виду.
+     *
+     * Событийные и venue-записи обязаны считаться ОТДЕЛЬНО: у портретов
+     * площадок свой недельный каденс, и если считать их вместе с лентой, то
+     * заполненная неделя заблокирует портреты навсегда.
+     *
+     * @param  'event'|'venue'|null  $kind  null — считать всё, как раньше
+     */
+    public function countOpenForBroadcast(int $broadcastId, ?string $kind = null): int
+    {
+        $q = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                TelegramChatBroadcastItem::STATUS_APPROVED,
+                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+            ]);
+
+        if ($kind === TelegramChatBroadcastItem::KIND_VENUE) {
+            $q->where('kind', TelegramChatBroadcastItem::KIND_VENUE);
+        } elseif ($kind === 'event') {
+            // У событийных записей kind исторически бывает NULL.
+            $q->where(function ($w) {
+                $w->whereNull('kind')->orWhere('kind', '<>', TelegramChatBroadcastItem::KIND_VENUE);
+            });
+        }
+
+        return (int) $q->count();
+    }
+
     public function countForBroadcast(
         int $broadcastId,
         array $statuses,
@@ -289,7 +322,13 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
                 $q->whereNull('planned_at')
                     ->orWhere('planned_at', '<=', $now);
             })
-            ->orderByRaw('COALESCE(planned_at, created_at) ASC')
+            // Настоящая дата публикации. NULL = «по расписанию канала», как
+            // было раньше. Не путать с planned_at: та — техническая придержка
+            // на время генерации текста, живёт минуты и снимается сама.
+            ->where(function ($q) use ($now) {
+                $q->whereNull('publish_at')->orWhere('publish_at', '<=', $now);
+            })
+            ->orderByRaw('COALESCE(publish_at, planned_at, created_at) ASC')
             ->first();
     }
 

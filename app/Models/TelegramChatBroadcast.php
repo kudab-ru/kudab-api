@@ -36,6 +36,37 @@ class TelegramChatBroadcast extends Model
 
     // ---- удобные геттеры/сеттеры поверх JSON settings ----
 
+    /**
+     * Сколько постов держать в ленте канала одновременно.
+     *
+     * Раньше действовало жёсткое «одно событие в полёте»: пока висела любая
+     * незакрытая запись, канал пропускался. Из-за этого одна отравленная
+     * запись остановила рассылку Воронежа на 33 дня, и из-за этого же нельзя
+     * было собрать план на неделю вперёд.
+     *
+     * Считается ТОЛЬКО по событийным записям. Портреты площадок живут своим
+     * недельным каденсом и считаются отдельно — иначе заполненная лента
+     * заблокировала бы их навсегда.
+     */
+    public function getFeedLimitAttribute(): int
+    {
+        $settings = $this->settings ?? [];
+        $raw = $settings['feed_limit'] ?? null;
+
+        if (! is_numeric($raw)) {
+            return 1;
+        }
+
+        return max(1, min(31, (int) $raw));
+    }
+
+    public function setFeedLimitAttribute(int $limit): void
+    {
+        $settings = $this->settings ?? [];
+        $settings['feed_limit'] = max(1, min(31, $limit));
+        $this->settings = $settings;
+    }
+
     public function getPeriodAttribute(): string
     {
         $settings = $this->settings ?? [];

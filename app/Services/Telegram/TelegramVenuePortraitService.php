@@ -5,7 +5,6 @@ namespace App\Services\Telegram;
 use App\Contracts\Telegram\TelegramChatBroadcastRepositoryInterface;
 use App\Models\Event;
 use App\Models\TelegramChat;
-use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\Venue;
 use Carbon\Carbon;
@@ -89,9 +88,11 @@ class TelegramVenuePortraitService
                 continue;
             }
 
-            // Одно в полёте: делим очередь с событиями. Пока висит любой незакрытый
-            // айтем (событие или прошлый портрет) — не плодим второй.
-            if ($this->openItemsCount($broadcast->id) > 0) {
+            // Одно в полёте — но ТОЛЬКО среди портретов. Раньше здесь считались
+            // и событийные записи, и с недельной лентой это убило бы портреты
+            // насовсем: лента почти всегда непуста, значит портрет не встал бы
+            // в очередь никогда.
+            if ($this->openVenueItemsCount($broadcast->id) > 0) {
                 $summary['skipped_queue_busy']++;
 
                 continue;
@@ -162,10 +163,19 @@ class TelegramVenuePortraitService
     }
 
     /** Незакрытые айтемы канала (любого типа) — «в полёте». */
-    private function openItemsCount(int $broadcastId): int
+    /**
+     * Незакрытые записи ПОРТРЕТОВ у канала.
+     *
+     * Раньше считались все записи подряд, вместе с событийными. Пока в очереди
+     * держалась ровно одна запись, это работало; с лентой на неделю вперёд
+     * событийные записи есть почти всегда, и портрет не встал бы в очередь
+     * никогда. Поэтому считаем только свой вид.
+     */
+    private function openVenueItemsCount(int $broadcastId): int
     {
         return (int) TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcastId)
+            ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
             ->whereIn('status', [
                 TelegramChatBroadcastItem::STATUS_PENDING,
                 TelegramChatBroadcastItem::STATUS_PLANNED,
@@ -293,7 +303,7 @@ class TelegramVenuePortraitService
         $addr = (string) preg_replace('/^\s*\d{5,6}\s*,\s*/u', '', $addr);          // индекс
         $addr = (string) preg_replace('/^[^,]*\bобл[^,]*,\s*/ui', '', $addr);        // область
         $addr = (string) preg_replace('/^\s*г\.?\s+[^,]+,\s*/ui', '', $addr);        // город
-        $addr = trim($addr, " ,");
+        $addr = trim($addr, ' ,');
 
         return mb_strlen($addr) > 60 ? mb_substr($addr, 0, 57).'…' : $addr;
     }
@@ -407,8 +417,11 @@ class TelegramVenuePortraitService
         bool $reviewGate = false,
         ?int $reviewerTelegramId = null,
     ): TelegramChatBroadcastItem {
-        if (! $force && $this->openItemsCount($broadcastId) > 0) {
-            throw new RuntimeException('В очереди уже есть незакрытый пост — дождитесь отправки (защита от двойного поста). --force чтобы всё равно.');
+        // Считаем только портреты: с лентой на неделю событийные записи в
+        // очереди есть почти всегда, и общий счёт запретил бы ручную
+        // постановку портрета навсегда.
+        if (! $force && $this->openVenueItemsCount($broadcastId) > 0) {
+            throw new RuntimeException('В очереди уже есть незакрытый портрет площадки — дождитесь отправки (защита от двойного поста). --force чтобы всё равно.');
         }
 
         $venue = Venue::query()->active()->whereKey($venueId)->first();
