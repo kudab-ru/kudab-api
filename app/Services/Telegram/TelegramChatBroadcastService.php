@@ -42,6 +42,15 @@ class TelegramChatBroadcastService
      */
     private const CANDIDATE_HORIZON_DAYS = 14;
 
+    /**
+     * Сколько дней не предлагать снова отклонённое или снятое.
+     *
+     * Раньше отказ действовал вечно, и пул тихо истощался. Тридцать дней —
+     * достаточно, чтобы отказ не выглядел проигнорированным, и мало, чтобы
+     * событие не пропало навсегда.
+     */
+    private const REJECTED_COOLDOWN_DAYS = 30;
+
     /** Окно cross-time анти-дубля: не повторять тот же заголовок в канале N дней. */
     private const CROSS_TIME_WINDOW_DAYS = 14;
 
@@ -857,18 +866,23 @@ class TelegramChatBroadcastService
         int $broadcastId,
         array $excludeEventIds = [],
     ): ?int {
+        // Навсегда исключаем только то, что уже прозвучало или стоит в ленте.
+        // (error — НЕ включаем: отправку можно ретраить.)
         $usedStatuses = [
             TelegramChatBroadcastItem::STATUS_PENDING,
             TelegramChatBroadcastItem::STATUS_PLANNED,
             TelegramChatBroadcastItem::STATUS_POSTED,
-            TelegramChatBroadcastItem::STATUS_SKIPPED,
-            // ревью-гейт: уже в работе / отклонённое не предлагаем повторно
-            // (error — НЕ включаем: отправку можно ретраить).
             TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
             TelegramChatBroadcastItem::STATUS_APPROVED,
             TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
-            TelegramChatBroadcastItem::STATUS_REJECTED,
         ];
+
+        // А отклонённое и снятое — только на срок. Раньше они лежали в том же
+        // списке без всякой давности: событие, один раз отклонённое, выпадало
+        // из пула НАВСЕГДА. Пока лента собиралась сама, это было почти
+        // незаметно; как только её начнут править руками из админки, каждый
+        // отказ будет отъедать пул безвозвратно.
+        $rejectedSince = Carbon::now()->subDays(self::REJECTED_COOLDOWN_DAYS);
 
         $query = Event::query()
             ->active()
@@ -876,6 +890,14 @@ class TelegramChatBroadcastService
             ->whereDoesntHave('broadcastItems', function ($q) use ($broadcastId, $usedStatuses) {
                 $q->where('broadcast_id', $broadcastId)
                     ->whereIn('status', $usedStatuses);
+            })
+            ->whereDoesntHave('broadcastItems', function ($q) use ($broadcastId, $rejectedSince) {
+                $q->where('broadcast_id', $broadcastId)
+                    ->whereIn('status', [
+                        TelegramChatBroadcastItem::STATUS_REJECTED,
+                        TelegramChatBroadcastItem::STATUS_SKIPPED,
+                    ])
+                    ->where('updated_at', '>=', $rejectedSince);
             })
             ->whereHas('community', function ($q) use ($chat) {
                 $q->where('city_id', $chat->city_id);
@@ -912,7 +934,7 @@ class TelegramChatBroadcastService
 
         // Кандидатный пул — ближайшие, кап; качество выбираем скорингом в PHP.
         $candidates = $query
-            ->with(['sources:id,event_id,images,published_at'])
+            ->with(['sources:id,event_id,images,published_at', 'venue:id,name'])
             ->withCount('interests')
             ->orderBy('start_time')
             ->limit(self::SCORING_CANDIDATE_LIMIT)
@@ -940,7 +962,101 @@ class TelegramChatBroadcastService
             }
         }
 
+        // Анти-однообразие (Layer 4). Заголовки в ленте уже не повторяются, но
+        // этого мало: на живой сборке недели вышло семь разных заголовков и
+        // всего четыре площадки — «Матрёшка» три раза из семи. По заголовкам
+        // концентрация площадки не ловится в принципе.
+        //
+        // Soft, как и слой выше: если после фильтра не осталось ничего, лучше
+        // повторить площадку, чем не запостить вовсе.
+        [$usedVenueIds, $usedChains] = $this->venuesAlreadyInFeed($broadcastId);
+        if ($usedVenueIds !== [] || $usedChains !== []) {
+            $diverse = $pool->reject(function (Event $e) use ($usedVenueIds, $usedChains) {
+                if ($e->venue_id !== null && in_array((int) $e->venue_id, $usedVenueIds, true)) {
+                    return true;
+                }
+                $chain = $this->venueChainKey((string) ($e->venue?->name ?? ''));
+
+                return $chain !== '' && in_array($chain, $usedChains, true);
+            });
+            if ($diverse->isNotEmpty()) {
+                $pool = $diverse;
+            }
+        }
+
         return $this->scorer->pickBest($pool)?->id;
+    }
+
+    /**
+     * Площадки и сети, уже занятые в ленте канала.
+     *
+     * Считаем по незакрытым записям и по недавно опубликованным: в пределах
+     * одной недели повтор площадки виден так же, как повтор заголовка.
+     *
+     * @return array{0: list<int>, 1: list<string>}
+     */
+    private function venuesAlreadyInFeed(int $broadcastId): array
+    {
+        $rows = TelegramChatBroadcastItem::query()
+            ->from('telegram.chat_broadcast_items as i')
+            ->join('events as e', 'e.id', '=', 'i.event_id')
+            ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
+            ->where('i.broadcast_id', $broadcastId)
+            ->where(function ($q) {
+                $q->whereIn('i.status', [
+                    TelegramChatBroadcastItem::STATUS_PENDING,
+                    TelegramChatBroadcastItem::STATUS_PLANNED,
+                    TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                    TelegramChatBroadcastItem::STATUS_APPROVED,
+                    TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+                ])->orWhere(function ($w) {
+                    $w->where('i.status', TelegramChatBroadcastItem::STATUS_POSTED)
+                        ->where('i.posted_at', '>=', now()->subDays(7));
+                });
+            })
+            ->get(['e.venue_id as venue_id', 'v.name as venue_name']);
+
+        $ids = [];
+        $chains = [];
+        foreach ($rows as $row) {
+            if ($row->venue_id !== null) {
+                $ids[] = (int) $row->venue_id;
+            }
+            $chain = $this->venueChainKey((string) ($row->venue_name ?? ''));
+            if ($chain !== '') {
+                $chains[] = $chain;
+            }
+        }
+
+        return [array_values(array_unique($ids)), array_values(array_unique($chains))];
+    }
+
+    /**
+     * Ключ сети площадок из названия.
+     *
+     * Отдельного поля владельца или сети в данных нет: у филиалов Quest
+     * Brothers сообщество одно и то же — «Яндекс.Афиша», то есть источник, а
+     * не хозяин. Единственная связь — имя: «Quest Brothers на Республиканской»,
+     * «Quest brothers на Невского», «Quest Brothers на Московском».
+     *
+     * Отрезаем хвост по « на », но ТОЛЬКО если в остатке хотя бы два слова:
+     * иначе «Театр на Таганке» схлопнулся бы в «театр» и утащил за собой все
+     * театры города. Замер по базе: приём «X на Y» встречается у четырёх
+     * площадок, у всех префикс из двух слов, и все четыре сходятся в одну
+     * группу «quest brothers». Ложных склеек нет.
+     */
+    private function venueChainKey(string $name): string
+    {
+        $name = trim(mb_strtolower($name));
+        if ($name === '') {
+            return '';
+        }
+
+        $head = trim((string) preg_split('/\s+на\s+/u', $name, 2)[0]);
+        $words = preg_split('/\s+/u', $head) ?: [];
+
+        // Один-два символа или одно слово в остатке — не сеть, а просто имя.
+        return count($words) >= 2 ? preg_replace('/\s+/u', ' ', $head) : $name;
     }
 
     /**

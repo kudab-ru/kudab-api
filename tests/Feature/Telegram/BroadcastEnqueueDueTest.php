@@ -67,7 +67,27 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertTrue($items->first()->planned_at->isFuture(), 'придержка должна быть в будущем');
     }
 
-    public function test_skips_channel_with_pending_item_in_queue(): void
+    public function test_fills_feed_up_to_limit(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $e1 = $this->createEvent($city->id, $community->id, 'Событие 1', now()->addDay());
+        $this->createEvent($city->id, $community->id, 'Событие 2', now()->addDays(2));
+
+        $chat = $this->createChannelChat($city->id, -1003);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+
+        // Одна запись в ленте на семь постов — это не «занято».
+        $this->makeItem($broadcast->id, $e1->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $summary = $this->service()->enqueueDueForAllChannels(now());
+
+        $this->assertSame(0, $summary['skipped_queue_busy'], 'лента ещё не полна');
+        $this->assertSame(1, $summary['enqueued']);
+        $this->assertSame(2, TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->count());
+    }
+
+    public function test_skips_channel_when_feed_is_full(): void
     {
         $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $community = $this->createCommunity($city->id, 'Организатор');
@@ -77,7 +97,12 @@ class BroadcastEnqueueDueTest extends TestCase
         $chat = $this->createChannelChat($city->id, -1002);
         $broadcast = $this->createBroadcast($chat->id, 'daily_10');
 
-        // Уже есть незакрытый item — не должны плодить второй.
+        // Лента на один пост — тогда одна незакрытая запись её заполняет.
+        // Раньше «занято» означало «есть хоть что-то», теперь — «лента полна»:
+        // канал держит до feed_limit постов вперёд.
+        $broadcast->feed_limit = 1;
+        $broadcast->save();
+
         $this->makeItem($broadcast->id, $e1->id, TelegramChatBroadcastItem::STATUS_PENDING);
 
         $summary = $this->service()->enqueueDueForAllChannels(now());

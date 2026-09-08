@@ -53,8 +53,11 @@ class TelegramChatBroadcast extends Model
         $settings = $this->settings ?? [];
         $raw = $settings['feed_limit'] ?? null;
 
+        // Умолчание — семь: неделя вперёд, по посту в день. Раньше здесь
+        // стояла единица (прежнее «одно событие в полёте»), она нужна была
+        // только чтобы переход не менял поведение молча.
         if (! is_numeric($raw)) {
-            return 1;
+            return 7;
         }
 
         return max(1, min(31, (int) $raw));
