@@ -865,6 +865,7 @@ class TelegramChatBroadcastService
         TelegramChat $chat,
         int $broadcastId,
         array $excludeEventIds = [],
+        ?Carbon $notBefore = null,
     ): ?int {
         // Навсегда исключаем только то, что уже прозвучало или стоит в ленте.
         // (error — НЕ включаем: отправку можно ретраить.)
@@ -933,6 +934,18 @@ class TelegramChatBroadcastService
 
         // Горизонт: не тащим всё будущее, но и не упираемся в первые дни.
         $query->where('start_time', '<=', Carbon::now()->addDays(self::CANDIDATE_HORIZON_DAYS));
+
+        // Нижняя граница — момент публикации, если он известен. upcoming()
+        // отсекает по «сейчас», а пост может уйти через неделю, и к тому дню
+        // событие уже пройдёт.
+        if ($notBefore !== null) {
+            $query->where(function ($w) use ($notBefore) {
+                $w->where('start_time', '>=', $notBefore)
+                    ->orWhere(function ($x) use ($notBefore) {
+                        $x->whereNotNull('end_time')->where('end_time', '>=', $notBefore);
+                    });
+            });
+        }
 
         // Кандидатный пул — ближайшие, кап; качество выбираем скорингом в PHP.
         $candidates = $query
@@ -1269,7 +1282,14 @@ class TelegramChatBroadcastService
                 continue;
             }
 
-            $eventId = $this->pickBestEventIdForChat($chat, $broadcast->id, $exclude);
+            // Событие не должно начаться раньше публикации: день в день
+            // можно, но не «пост в 10:00 про концерт в 08:00».
+            $eventId = $this->pickBestEventIdForChat(
+                $chat,
+                $broadcast->id,
+                $exclude,
+                $day->copy()->setTime($hour, 0)->utc(),
+            );
             if (! $eventId) {
                 $summary['no_candidate']++;
 
@@ -1278,8 +1298,23 @@ class TelegramChatBroadcastService
             $exclude[] = $eventId;
 
             $publishAt = $day->copy()->setTime($hour, 0, 0);
+
+            // enqueue() возвращает СУЩЕСТВУЮЩУЮ запись, если событие когда-то
+            // уже ставили: на (broadcast_id, event_id) стоит UNIQUE. Такая
+            // запись приходит со старым статусом — обычно skipped после
+            // прошлой пересборки. Если её не оживить, пост осядет невидимым,
+            // а счётчик «заполнено» соврёт: ровно это и случилось на проверке.
             $item = $this->broadcastItemRepository->enqueue($broadcast->id, $eventId, null);
+            $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+            $item->error_message = null;
+            $item->claimed_at = null;
+            $item->claim_token = null;
             $item->publish_at = $publishAt->copy()->utc();
+            // Текст пересобираем: он зависит от дня публикации. Свой не трогаем.
+            if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
+                $item->caption = null;
+                $item->caption_source = null;
+            }
             $item->save();
 
             $this->ensureEventCaption($item, $broadcast);

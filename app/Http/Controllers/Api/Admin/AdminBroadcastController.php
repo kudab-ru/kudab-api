@@ -105,11 +105,21 @@ class AdminBroadcastController extends Controller
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
         $chat = $broadcast->chat;
 
-        // День слота, под который подбираем. Событие, которое к этому дню уже
-        // прошло, предлагать бессмысленно: пост про вчерашний концерт.
-        $forDate = $request->query('date')
-            ? Carbon::parse((string) $request->query('date'))->utc()->startOfDay()
-            : null;
+        // МОМЕНТ публикации, под который подбираем: день слота плюс час
+        // расписания канала. Сравнивать с началом дня мало — пост уходит в
+        // 10:00, и событие, которое было в 08:00 того же дня, предлагать
+        // нельзя. День в день можно, но только пока событие не началось.
+        $publishAt = null;
+        if ($request->query('date')) {
+            $hour = 10;
+            if (preg_match('/_(\d{1,2})$/', (string) $broadcast->period, $m)) {
+                $hour = max(0, min(23, (int) $m[1]));
+            }
+            $publishAt = Carbon::parse((string) $request->query('date'), 'Europe/Moscow')
+                ->startOfDay()
+                ->setTime($hour, 0)
+                ->utc();
+        }
 
         if (! $chat || ! $chat->city_id) {
             return response()->json(['data' => [], 'meta' => ['reason' => 'у канала не задан город']]);
@@ -148,13 +158,13 @@ class AdminBroadcastController extends Controller
             })
             ->where('start_time', '<=', now()->addDays(14))
             ->when(
-                $forDate !== null,
-                // Событие должно ещё не закончиться к дню публикации:
-                // сравниваем с концом, если он есть, иначе с началом.
-                fn ($q) => $q->where(function ($w) use ($forDate) {
-                    $w->where('end_time', '>=', $forDate)
-                        ->orWhere(function ($x) use ($forDate) {
-                            $x->whereNull('end_time')->where('start_time', '>=', $forDate);
+                $publishAt !== null,
+                // Событие ещё не должно начаться к моменту публикации.
+                // Многодневное считаем годным, пока не кончилось.
+                fn ($q) => $q->where(function ($w) use ($publishAt) {
+                    $w->where('start_time', '>=', $publishAt)
+                        ->orWhere(function ($x) use ($publishAt) {
+                            $x->whereNotNull('end_time')->where('end_time', '>=', $publishAt);
                         });
                 }),
             )
