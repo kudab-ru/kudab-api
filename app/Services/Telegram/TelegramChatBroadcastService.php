@@ -877,7 +877,7 @@ class TelegramChatBroadcastService
             TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
         ];
 
-        // А отклонённое и снятое — только на срок. Раньше они лежали в том же
+        // А ОТКЛОНЁННОЕ — на срок. Раньше отклонённое и снятое лежали в общем
         // списке без всякой давности: событие, один раз отклонённое, выпадало
         // из пула НАВСЕГДА. Пока лента собиралась сама, это было почти
         // незаметно; как только её начнут править руками из админки, каждый
@@ -893,10 +893,12 @@ class TelegramChatBroadcastService
             })
             ->whereDoesntHave('broadcastItems', function ($q) use ($broadcastId, $rejectedSince) {
                 $q->where('broadcast_id', $broadcastId)
-                    ->whereIn('status', [
-                        TelegramChatBroadcastItem::STATUS_REJECTED,
-                        TelegramChatBroadcastItem::STATUS_SKIPPED,
-                    ])
+                    // ТОЛЬКО rejected. skipped — это «снято из очереди», а не
+                    // «не предлагать»: так помечается и снятое руками, и
+                    // вытесненное пересборкой, и запись под удалённым событием.
+                    // Держать их в остывании значило бы прятать событие на
+                    // месяц каждый раз, когда его просто убрали из ленты.
+                    ->where('status', TelegramChatBroadcastItem::STATUS_REJECTED)
                     ->where('updated_at', '>=', $rejectedSince);
             })
             ->whereHas('community', function ($q) use ($chat) {

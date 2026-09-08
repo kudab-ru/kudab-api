@@ -99,9 +99,19 @@ final class EventCaptionBuilder
         $eventId = trim((string) ($raw['id'] ?? $raw['event_id'] ?? ''));
 
         return [
-            // Заголовок БЕЗ экранирования — так в боте. Событие с «<» в названии
-            // сломает разметку Telegram; это известный дефект, чиним отдельно.
-            'title' => $this->firstNonEmpty($raw, ['title', 'name']) ?: 'Без названия',
+            // Заголовок ЭКРАНИРУЕМ. В боте он подставлялся сырым, и событие с
+            // «<» или «&» в названии ломало разметку Telegram: пост уходил
+            // битым или не уходил вовсе. Названия приходят из парсеров, то
+            // есть это чужой текст, а шаблон оборачивает его в <b>…</b>.
+            //
+            // Это единственное осознанное отступление от побайтового переноса.
+            // Оно меняет вывод ТОЛЬКО у событий, где в названии есть & < >, —
+            // у остальных строка совпадает с прежней символ в символ.
+            'title' => htmlspecialchars(
+                $this->firstNonEmpty($raw, ['title', 'name']) ?: 'Без названия',
+                ENT_NOQUOTES | ENT_SUBSTITUTE,
+                'UTF-8',
+            ),
             'description' => $this->firstNonEmpty($raw, ['tg_description', 'description', 'short_description', 'excerpt', 'body', 'text']),
             'address' => $loc,
             'place' => $loc,

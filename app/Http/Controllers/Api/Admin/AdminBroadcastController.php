@@ -100,10 +100,16 @@ class AdminBroadcastController extends Controller
      * потолке 120, и сортировка по нему почти случайна. Человеку полезнее
      * знать, чем событие отличается от того, что уже стоит в ленте.
      */
-    public function suggestions(int $broadcastId): JsonResponse
+    public function suggestions(Request $request, int $broadcastId): JsonResponse
     {
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
         $chat = $broadcast->chat;
+
+        // День слота, под который подбираем. Событие, которое к этому дню уже
+        // прошло, предлагать бессмысленно: пост про вчерашний концерт.
+        $forDate = $request->query('date')
+            ? Carbon::parse((string) $request->query('date'))->utc()->startOfDay()
+            : null;
 
         if (! $chat || ! $chat->city_id) {
             return response()->json(['data' => [], 'meta' => ['reason' => 'у канала не задан город']]);
@@ -134,13 +140,24 @@ class AdminBroadcastController extends Controller
             // расходились бы во мнениях.
             ->whereDoesntHave('broadcastItems', function ($q) use ($broadcast) {
                 $q->where('broadcast_id', $broadcast->id)
-                    ->whereIn('status', [
-                        TelegramChatBroadcastItem::STATUS_REJECTED,
-                        TelegramChatBroadcastItem::STATUS_SKIPPED,
-                    ])
+                    // Только rejected: skipped значит «снято из ленты», и
+                    // прятать за это событие на месяц было бы наказанием
+                    // за обычную перестановку.
+                    ->where('status', TelegramChatBroadcastItem::STATUS_REJECTED)
                     ->where('updated_at', '>=', now()->subDays(30));
             })
             ->where('start_time', '<=', now()->addDays(14))
+            ->when(
+                $forDate !== null,
+                // Событие должно ещё не закончиться к дню публикации:
+                // сравниваем с концом, если он есть, иначе с началом.
+                fn ($q) => $q->where(function ($w) use ($forDate) {
+                    $w->where('end_time', '>=', $forDate)
+                        ->orWhere(function ($x) use ($forDate) {
+                            $x->whereNull('end_time')->where('start_time', '>=', $forDate);
+                        });
+                }),
+            )
             ->orderBy('start_time')
             ->limit(self::SUGGESTIONS_LIMIT)
             ->get();
@@ -297,8 +314,20 @@ class AdminBroadcastController extends Controller
         ]);
     }
 
-    /** Убрать пост из ленты. Не удаляем: снятое учитывается при подборе. */
-    public function remove(int $itemId): JsonResponse
+    /**
+     * Убрать пост из ленты.
+     *
+     * Два РАЗНЫХ действия, и путать их нельзя:
+     *   ?reject=0 (по умолчанию) — просто снять из очереди. Событие сразу
+     *     возвращается в пул предложений: человек переставляет ленту, а не
+     *     отказывается от события.
+     *   ?reject=1 — «больше не предлагать». Событие уходит из подбора на
+     *     30 дней (REJECTED_COOLDOWN_DAYS).
+     *
+     * Раньше «убрать» всегда ставило skipped и вместе с остыванием прятало
+     * событие на месяц — то есть переставить пост было нельзя, не потеряв его.
+     */
+    public function remove(Request $request, int $itemId): JsonResponse
     {
         $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
 
@@ -306,13 +335,17 @@ class AdminBroadcastController extends Controller
             return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
         }
 
-        $item->status = TelegramChatBroadcastItem::STATUS_SKIPPED;
-        $item->error_message = 'снято из админки';
+        $reject = $request->boolean('reject');
+
+        $item->status = $reject
+            ? TelegramChatBroadcastItem::STATUS_REJECTED
+            : TelegramChatBroadcastItem::STATUS_SKIPPED;
+        $item->error_message = $reject ? 'отклонено в админке' : 'снято из ленты';
         $item->claimed_at = null;
         $item->claim_token = null;
         $item->save();
 
-        return response()->json(['ok' => true]);
+        return response()->json(['ok' => true, 'data' => ['rejected' => $reject]]);
     }
 
     /**
@@ -460,6 +493,15 @@ class AdminBroadcastController extends Controller
             'title' => $event?->title,
             'venue' => $event?->venue?->name,
             'event_start_time' => optional($event?->start_time)?->toIso8601String(),
+            'event_end_time' => optional($event?->end_time)?->toIso8601String(),
+            'event_address' => $event?->address,
+            'event_city' => $event?->city,
+            'price_status' => $event?->price_status,
+            'price_min' => $event?->price_min,
+            'price_max' => $event?->price_max,
+            // Ссылка на карточку события: из админки удобно уйти посмотреть,
+            // что именно уходит в канал.
+            'event_url' => $event ? rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/').'/events/'.$event->id : null,
             'caption' => $i->caption,
             'caption_source' => $i->caption_source,
             'is_pinned' => (bool) $i->is_pinned,
