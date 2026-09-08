@@ -15,13 +15,15 @@ class TelegramChatBroadcast extends Model
         'settings',
         'last_run_at',
         'last_preview_at',
+        'idle_notified_at',
     ];
 
     protected $casts = [
-        'enabled'         => 'bool',
-        'settings'        => 'array',
-        'last_run_at'     => 'datetime',
+        'enabled' => 'bool',
+        'settings' => 'array',
+        'last_run_at' => 'datetime',
         'last_preview_at' => 'datetime',
+        'idle_notified_at' => 'datetime',
     ];
 
     /**
@@ -38,7 +40,7 @@ class TelegramChatBroadcast extends Model
     {
         $settings = $this->settings ?? [];
 
-        return (string)($settings['period'] ?? 'off');
+        return (string) ($settings['period'] ?? 'off');
     }
 
     public function setPeriodAttribute(string $period): void
@@ -52,7 +54,7 @@ class TelegramChatBroadcast extends Model
     {
         $settings = $this->settings ?? [];
 
-        return (string)($settings['template_code'] ?? 'basic');
+        return (string) ($settings['template_code'] ?? 'basic');
     }
 
     public function setTemplateCodeAttribute(string $templateCode): void

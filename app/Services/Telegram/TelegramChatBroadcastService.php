@@ -435,6 +435,15 @@ class TelegramChatBroadcastService
                 continue;
             }
 
+            // Канал молчит дольше положенного — говорим об этом владельцу, пока
+            // он не увидел это сам через месяц. Проверка стоит ДО поиска активного
+            // айтема: молчание чаще всего означает, что активного как раз нет
+            // (или он застрял), и ниже по коду мы бы просто вышли по `continue`.
+            $idleNotice = $this->buildIdleNoticeTask($broadcast, $chat, $now);
+            if ($idleNotice !== null) {
+                $tasks[] = $idleNotice;
+            }
+
             // Активный (в полёте) элемент канала — pending/planned/pending_review/approved/auto_approved.
             $item = $this->broadcastItemRepository->findActiveForBroadcast($broadcast->id, $now);
             if (! $item) {
@@ -937,6 +946,114 @@ class TelegramChatBroadcastService
      *  - period (daily_10 / weekly_fri_12 / …)
      *  - last_run_at
      */
+    /**
+     * Сколько длится одно окно расписания канала, в часах.
+     * null — период выключен или незнаком, простой считать не от чего.
+     */
+    private function periodWindowHours(TelegramChatBroadcast $broadcast): ?int
+    {
+        $period = trim((string) $broadcast->period);
+
+        if (str_starts_with($period, 'daily_')) {
+            return 24;
+        }
+
+        if (str_starts_with($period, 'weekly_')) {
+            return 24 * 7;
+        }
+
+        return null;
+    }
+
+    /**
+     * Задача «канал молчит» — или null, если молчания нет либо о нём уже писали.
+     *
+     * Порог — два пропущенных окна подряд: для дневного канала это 48 часов
+     * тишины, и это уже однозначно поломка, а не выходной. Именно столько
+     * не хватило в июле: рассылка встала на одной отравленной записи очереди,
+     * в логи 1892 раза написалось event_load_failed, и никто их не читал —
+     * простой заметили через 33 дня.
+     *
+     * Напоминаем раз в сутки: поллер тикает раз в минуту, и без этого владелец
+     * получил бы 1440 сообщений в день вместо одного.
+     */
+    private function buildIdleNoticeTask(
+        TelegramChatBroadcast $broadcast,
+        TelegramChat $chat,
+        Carbon $now,
+    ): ?array {
+        if (! $broadcast->enabled) {
+            return null;
+        }
+
+        $windowHours = $this->periodWindowHours($broadcast);
+        if ($windowHours === null) {
+            return null;
+        }
+
+        $ownerTelegramId = $chat->owner?->telegram_id ?? null;
+        if (! $ownerTelegramId) {
+            return null;
+        }
+
+        /** @var Carbon|null $lastRun */
+        $lastRun = $broadcast->last_run_at instanceof Carbon
+            ? $broadcast->last_run_at
+            : null;
+
+        // Ни одного поста за всё время — считаем простой от создания канала,
+        // иначе только что заведённый канал молчал бы «бесконечно долго».
+        $since = $lastRun ?? ($broadcast->created_at instanceof Carbon ? $broadcast->created_at : null);
+        if ($since === null) {
+            return null;
+        }
+
+        // diffInHours отдаёт float — приводим явно, иначе PHP 8.4 ругается
+        // на потерю точности при неявном приведении.
+        $silentHours = (int) $since->diffInHours($now);
+        if ($silentHours < $windowHours * 2) {
+            return null;
+        }
+
+        /** @var Carbon|null $notifiedAt */
+        $notifiedAt = $broadcast->idle_notified_at instanceof Carbon
+            ? $broadcast->idle_notified_at
+            : null;
+        if ($notifiedAt !== null && (int) $notifiedAt->diffInHours($now) < 24) {
+            return null;
+        }
+
+        $broadcast->idle_notified_at = $now;
+        $broadcast->save();
+
+        $where = $chat->username ? '@'.$chat->username : (string) $chat->telegram_chat_id;
+        $days = intdiv($silentHours, 24);
+
+        Log::warning('broadcast.idle_detected', [
+            'broadcast_id' => $broadcast->id,
+            'telegram_chat_id' => $chat->telegram_chat_id,
+            'silent_hours' => $silentHours,
+            'period' => $broadcast->period,
+        ]);
+
+        return [
+            'type' => 'notice',
+            'kind' => 'idle',
+            'broadcast_id' => (int) $broadcast->id,
+            'telegram_chat_id' => (int) $chat->telegram_chat_id,
+            'notify_telegram_id' => (int) $ownerTelegramId,
+            'text' => sprintf(
+                "⚠️ Канал %s молчит %s\n\nПоследний пост: %s. Расписание: %s. "
+                .'Обычно это значит, что очередь встала — посмотри незакрытые записи '
+                .'канала и логи bot-cron.',
+                $where,
+                $days > 0 ? $days.' дн.' : $silentHours.' ч.',
+                $lastRun ? $lastRun->format('d.m.Y H:i') : 'ни одного',
+                (string) $broadcast->period,
+            ),
+        ];
+    }
+
     private function isSingleRunDue(
         TelegramChatBroadcast $broadcast,
         Carbon $now,
