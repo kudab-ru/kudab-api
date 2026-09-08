@@ -42,7 +42,9 @@ class AdminBroadcastController extends Controller
     /** Каналы со сводкой: что в ленте, когда последний пост, молчит ли. */
     public function channels(): JsonResponse
     {
-        $rows = TelegramChatBroadcast::query()->with('chat')->get();
+        // Порядок стабильный: без него список приходил как ляжет, и в
+        // интерфейсе первым оказывался выключенный канал.
+        $rows = TelegramChatBroadcast::query()->with('chat')->orderBy('id')->get();
 
         return response()->json([
             'data' => $rows->map(fn (TelegramChatBroadcast $b) => $this->channelPayload($b))->values(),
