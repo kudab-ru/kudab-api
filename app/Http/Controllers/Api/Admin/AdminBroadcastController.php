@@ -774,6 +774,11 @@ class AdminBroadcastController extends Controller
             ->whereNotNull('posted_at')
             ->max('posted_at');
 
+        $errors = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $b->id)
+            ->where('status', TelegramChatBroadcastItem::STATUS_ERROR)
+            ->count();
+
         $postedTotal = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $b->id)
             ->whereNotNull('posted_at')
@@ -798,11 +803,75 @@ class AdminBroadcastController extends Controller
             'silent_days' => $lastPosted ? (int) Carbon::parse($lastPosted)->diffInDays(now()) : null,
             'posted_total' => $postedTotal,
             'venue_in_feed' => $openVenue,
+            'errors_count' => $errors,
+            'idle_notified_at' => optional($b->idle_notified_at)?->toIso8601String(),
+            // Признаки неблагополучия считаем ЗДЕСЬ, а не в админке: правила
+            // (сколько окон пропущено, что считается простоем) заданы сервером,
+            // и разъезжаться двум их версиям нельзя.
+            'problems' => $this->channelProblems($b, $lastPosted, $errors, $openEvents),
             // Ревью-гейт — ГЛОБАЛЬНЫЙ env-флаг, а не настройка канала. Отдаём
             // только для показа: рисовать тумблер, за которым ничего нет,
             // было бы враньём.
             'review_gate' => (bool) config('services.bot.broadcast_review_gate'),
         ];
+    }
+
+    /**
+     * Что не так с каналом — человеческими фразами.
+     *
+     * Сигнал о простое уже существовал: бот пишет владельцу в личку, когда
+     * канал молчит дольше двух своих окон. Но в админке этого не было видно
+     * вовсе — раздел про рассылку не показывал, что рассылка стоит.
+     *
+     * @return list<array{level: string, text: string}>
+     */
+    private function channelProblems(
+        TelegramChatBroadcast $b,
+        mixed $lastPosted,
+        int $errors,
+        int $openEvents,
+    ): array {
+        $out = [];
+
+        if (! $b->enabled || $b->period === 'off') {
+            $out[] = ['level' => 'info', 'text' => 'Автопостинг выключен — посты не уходят.'];
+
+            return $out;
+        }
+
+        if (! $b->chat?->city_id) {
+            $out[] = ['level' => 'danger', 'text' => 'У канала не задан город — подбирать события не из чего.'];
+        }
+
+        // Порог тот же, что у ЛС-сигнала: два пропущенных окна.
+        $windowHours = str_starts_with((string) $b->period, 'weekly_') ? 24 * 7 : 24;
+        if ($lastPosted) {
+            $silent = (int) Carbon::parse($lastPosted)->diffInHours(now());
+            if ($silent >= $windowHours * 2) {
+                $days = intdiv($silent, 24);
+                $out[] = [
+                    'level' => 'danger',
+                    'text' => "Канал молчит {$days} дн. — это дольше двух окон расписания.",
+                ];
+            }
+        } else {
+            $out[] = ['level' => 'warning', 'text' => 'В канале не было ни одного поста.'];
+        }
+
+        if ($errors > 0) {
+            $out[] = [
+                'level' => 'danger',
+                'text' => $errors === 1
+                    ? 'Один пост не удалось отправить — посмотрите причину в ленте.'
+                    : "{$errors} постов не удалось отправить — посмотрите причины в ленте.",
+            ];
+        }
+
+        if ($openEvents === 0) {
+            $out[] = ['level' => 'warning', 'text' => 'Лента пуста — следующего поста нет.'];
+        }
+
+        return $out;
     }
 
     /** @return array<string, mixed> */
