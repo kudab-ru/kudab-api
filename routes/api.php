@@ -7,14 +7,14 @@ use App\Http\Controllers\Api\CityController;
 use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Api\Web\CitiesController;
 use App\Http\Controllers\Api\Web\CommunitiesController as WebCommunitiesController;
+use App\Http\Controllers\Api\Web\EventGroupsController as WebEventGroupsController;
+use App\Http\Controllers\Api\Web\EventsController as WebEventsController;
 use App\Http\Controllers\Api\Web\TelegramResolveController;
 use App\Http\Controllers\Api\Web\WebSitemapController;
 use App\Http\Controllers\Bot\RoleController;
 use App\Http\Controllers\Bot\TelegramChatBroadcastController;
 use App\Http\Controllers\Bot\TelegramChatController;
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\Api\Web\EventsController as WebEventsController;
-use App\Http\Controllers\Api\Web\EventGroupsController as WebEventGroupsController;
 
 Route::get('/ping', function () {
     return response()->json([
@@ -24,6 +24,7 @@ Route::get('/ping', function () {
 });
 
 use App\Http\Controllers\Api\Admin\AdminAuthController;
+use App\Http\Controllers\Api\Admin\AdminBroadcastController;
 use App\Http\Controllers\Api\Admin\AdminCommunitiesController;
 use App\Http\Controllers\Api\Admin\AdminCommunityLinksController;
 use App\Http\Controllers\Api\Admin\AdminDashboardController;
@@ -74,6 +75,18 @@ Route::prefix('admin')
         Route::patch('/events/{id}', [AdminEventsController::class, 'update']);
         Route::delete('/events/{id}', [AdminEventsController::class, 'destroy']);
         Route::post('/events/{id}/restore', [AdminEventsController::class, 'restore']);
+
+        // Рассылка в телеграм. Отдельная группа, а не /api/bot/broadcast/*:
+        // те авторизуются общим токеном бота и считают права по telegram_id
+        // оператора, то есть админка ходила бы туда «от имени» человека.
+        Route::get('/broadcast/channels', [AdminBroadcastController::class, 'channels']);
+        Route::get('/broadcast/channels/{id}/feed', [AdminBroadcastController::class, 'feed']);
+        Route::get('/broadcast/channels/{id}/suggestions', [AdminBroadcastController::class, 'suggestions']);
+        Route::patch('/broadcast/channels/{id}', [AdminBroadcastController::class, 'updateChannel']);
+        Route::post('/broadcast/channels/{id}/enqueue', [AdminBroadcastController::class, 'enqueue']);
+        Route::post('/broadcast/channels/{id}/rebuild', [AdminBroadcastController::class, 'rebuild']);
+        Route::patch('/broadcast/items/{id}', [AdminBroadcastController::class, 'update']);
+        Route::delete('/broadcast/items/{id}', [AdminBroadcastController::class, 'remove']);
 
         // community-social-links (статус active|gray|black, аналог make link-ban/unban/gray)
         Route::patch('/community-links/{id}/status', [AdminCommunityLinksController::class, 'updateStatus']);
@@ -204,7 +217,7 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     Route::get('/events/{id}', [EventController::class, 'show']);
 
     Route::get('/telegram-chats/by-telegram/{telegram_id}', [TelegramChatController::class, 'listByTelegram']);
-    Route::post('/telegram-chats/link',   [TelegramChatController::class, 'link']);
+    Route::post('/telegram-chats/link', [TelegramChatController::class, 'link']);
     Route::post('/telegram-chats/unlink', [TelegramChatController::class, 'unlink']);
     Route::post('/telegram-chats/set-city', [TelegramChatController::class, 'setCity']);
 
