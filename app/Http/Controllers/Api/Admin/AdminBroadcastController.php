@@ -610,6 +610,110 @@ class AdminBroadcastController extends Controller
         return response()->json(['ok' => true]);
     }
 
+    /** Шаблоны постов: тексты, которыми собираются все неправленые посты. */
+    public function templates(): JsonResponse
+    {
+        $rows = \App\Models\TelegramMessageTemplate::query()
+            ->where('locale', 'ru')
+            ->orderBy('code')
+            ->get();
+
+        return response()->json([
+            'data' => $rows->map(fn ($t) => [
+                'code' => (string) $t->code,
+                'name' => $t->name,
+                'description' => $t->description,
+                'body' => (string) $t->body,
+                'is_active' => (bool) $t->is_active,
+                'max_images' => $t->max_images,
+                // Каналы, которые сейчас на этом шаблоне: правка коснётся их.
+                'used_by' => TelegramChatBroadcast::query()->get()
+                    ->filter(fn (TelegramChatBroadcast $b) => $b->template_code === $t->code)
+                    ->map(fn (TelegramChatBroadcast $b) => $b->chat?->username ?: (string) $b->id)
+                    ->values(),
+            ])->values(),
+            'meta' => ['placeholders' => $this->placeholderHelp()],
+        ]);
+    }
+
+    /** Сохранить текст шаблона. */
+    public function updateTemplate(Request $request, string $code): JsonResponse
+    {
+        $data = $request->validate([
+            'body' => ['required', 'string', 'max:4096'],
+        ]);
+
+        $tpl = \App\Models\TelegramMessageTemplate::query()
+            ->where('locale', 'ru')
+            ->where('code', $code)
+            ->firstOrFail();
+
+        $tpl->body = (string) $data['body'];
+        $tpl->save();
+
+        Log::info('admin.broadcast.template_updated', ['code' => $code]);
+
+        return response()->json(['ok' => true]);
+    }
+
+    /**
+     * Превью шаблона на настоящем событии, БЕЗ сохранения.
+     *
+     * Собирается тем же кодом, что и настоящий пост (EventCaptionBuilder),
+     * иначе превью врало бы — а ради «увидеть, что получится» редактор и
+     * делается. Событие берём ближайшее из ленты канала, чтобы текст был
+     * похож на то, что реально уходит.
+     */
+    public function previewTemplate(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'body' => ['required', 'string', 'max:4096'],
+            'event_id' => ['nullable', 'integer'],
+        ]);
+
+        $event = isset($data['event_id'])
+            ? Event::query()->find((int) $data['event_id'])
+            : Event::query()->active()->upcoming()->orderBy('start_time')->first();
+
+        if (! $event) {
+            return response()->json(['ok' => false, 'error' => 'Не нашёл события для превью.'], 404);
+        }
+
+        try {
+            $text = $this->captions->buildWithBody($event, (string) $data['body']);
+        } catch (\Throwable $e) {
+            return response()->json(['ok' => false, 'error' => 'Шаблон не собрался: '.$e->getMessage()], 422);
+        }
+
+        return response()->json(['data' => [
+            'text' => $text,
+            'event' => [
+                'id' => (int) $event->id,
+                'title' => (string) $event->title,
+                'start_time' => optional($event->start_time)?->toIso8601String(),
+            ],
+        ]]);
+    }
+
+    /**
+     * Подсказка по плейсхолдерам. Держим здесь, а не в админке: список
+     * задаётся сборщиком текста, и разъезжаться им нельзя.
+     *
+     * @return list<array{name: string, about: string}>
+     */
+    private function placeholderHelp(): array
+    {
+        return [
+            ['name' => '{title}', 'about' => 'название события, экранируется'],
+            ['name' => '{address}', 'about' => 'город и площадка одной строкой'],
+            ['name' => '{start_time|human}', 'about' => '«сегодня, 19:00», «12 сен» — от дня публикации'],
+            ['name' => '{price_label}', 'about' => '«Бесплатно», «от 500 ₽», «800 ₽–1500 ₽»'],
+            ['name' => '{description|slice:0..400|escape_html}', 'about' => 'описание, обрезка по числу символов'],
+            ['name' => '{url}', 'about' => 'ссылка на событие на сайте'],
+            ['name' => '{tags|prepend:"🏷 "}', 'about' => 'сейчас всегда пусто — строка не печатается'],
+        ];
+    }
+
     /** Настройки канала. */
     public function updateChannel(Request $request, int $broadcastId): JsonResponse
     {

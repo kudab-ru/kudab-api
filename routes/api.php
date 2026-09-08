@@ -79,6 +79,10 @@ Route::prefix('admin')
         // Рассылка в телеграм. Отдельная группа, а не /api/bot/broadcast/*:
         // те авторизуются общим токеном бота и считают права по telegram_id
         // оператора, то есть админка ходила бы туда «от имени» человека.
+        Route::get('/broadcast/templates', [AdminBroadcastController::class, 'templates']);
+        Route::patch('/broadcast/templates/{code}', [AdminBroadcastController::class, 'updateTemplate']);
+        Route::post('/broadcast/templates/preview', [AdminBroadcastController::class, 'previewTemplate']);
+
         Route::get('/broadcast/channels', [AdminBroadcastController::class, 'channels']);
         Route::get('/broadcast/channels/{id}/feed', [AdminBroadcastController::class, 'feed']);
         Route::get('/broadcast/channels/{id}/suggestions', [AdminBroadcastController::class, 'suggestions']);

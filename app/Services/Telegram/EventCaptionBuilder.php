@@ -53,10 +53,32 @@ final class EventCaptionBuilder
     public function build(Event $event, string $templateCode = 'basic', ?CarbonImmutable $asOf = null): string
     {
         $raw = $event->toArray();
-        $ctx = $this->context($raw, $asOf);
 
         $body = $this->templateBody($templateCode);
-        if ($body === null) {
+
+        return $this->assemble($raw, $body, $templateCode, $asOf);
+    }
+
+    /**
+     * Собрать текст по ПРОИЗВОЛЬНОМУ шаблону, не сохраняя его.
+     *
+     * Нужно редактору шаблонов: превью обязано идти тем же кодом, что и
+     * настоящий пост, иначе оно врёт — а именно ради «увидеть, что получится»
+     * редактор и делается.
+     */
+    public function buildWithBody(Event $event, string $body, ?CarbonImmutable $asOf = null): string
+    {
+        return $this->assemble($event->toArray(), $body, 'preview', $asOf);
+    }
+
+    /**
+     * @param  array<string, mixed>  $raw
+     */
+    private function assemble(array $raw, ?string $body, string $templateCode, ?CarbonImmutable $asOf): string
+    {
+        $ctx = $this->context($raw, $asOf);
+
+        if ($body === null || trim($body) === '') {
             // Бот в этом случае уходит в _build_event_caption_fallback, который
             // даёт ДРУГОЙ текст. Здесь это не воспроизводим: шаблоны лежат в
             // той же базе, и их отсутствие — авария, а не штатная ветка.
