@@ -45,10 +45,15 @@ final class EventCaptionBuilder
         private readonly TelegramMessageTemplateService $templates,
     ) {}
 
-    public function build(Event $event, string $templateCode = 'basic'): string
+    /**
+     * @param  CarbonImmutable|null  $asOf  день, КОГДА пост увидят. От него
+     *                                      считаются «сегодня» и «завтра»: текст собирается заранее, иногда за
+     *                                      неделю, и относительно момента сборки эти слова врут подписчику.
+     */
+    public function build(Event $event, string $templateCode = 'basic', ?CarbonImmutable $asOf = null): string
     {
         $raw = $event->toArray();
-        $ctx = $this->context($raw);
+        $ctx = $this->context($raw, $asOf);
 
         $body = $this->templateBody($templateCode);
         if ($body === null) {
@@ -81,7 +86,7 @@ final class EventCaptionBuilder
      * @param  array<string, mixed>  $raw
      * @return array<string, string>
      */
-    private function context(array $raw): array
+    private function context(array $raw, ?CarbonImmutable $asOf = null): array
     {
         $city = $this->firstNonEmpty($raw, ['city', 'city_name']);
         $addressRaw = trim((string) ($raw['address'] ?? ''));
@@ -116,7 +121,7 @@ final class EventCaptionBuilder
             'address' => $loc,
             'place' => $loc,
             'location' => $loc,
-            'start_time' => $this->startHuman($raw),
+            'start_time' => $this->startHuman($raw, $asOf),
             'price_label' => $this->priceLabel($raw, $canonicalUrl),
             'price_url' => trim((string) ($raw['price_url'] ?? '')),
             'price_status' => trim((string) ($raw['price_status'] ?? '')),
@@ -143,7 +148,7 @@ final class EventCaptionBuilder
     /**
      * @param  array<string, mixed>  $raw
      */
-    private function startHuman(array $raw): string
+    private function startHuman(array $raw, ?CarbonImmutable $asOf = null): string
     {
         $rawStart = $this->firstNonEmpty($raw, ['start_time', 'start_date', 'start_at', 'start', 'date']);
         if ($rawStart === '') {
@@ -156,7 +161,10 @@ final class EventCaptionBuilder
             return $rawStart;
         }
 
-        $today = CarbonImmutable::now(self::TZ)->startOfDay();
+        // Точка отсчёта — день публикации, а не «сейчас». Пост про концерт
+        // 12-го, поставленный 8-го на 11-е, обязан читаться «завтра», а не
+        // «12 сен» и уж точно не «сегодня».
+        $today = ($asOf ?? CarbonImmutable::now(self::TZ))->setTimezone(self::TZ)->startOfDay();
         $day = $dt->startOfDay();
 
         // Полночь по МСК — признак «время неизвестно», а не «в 00:00».

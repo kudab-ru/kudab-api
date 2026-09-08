@@ -46,6 +46,15 @@ return [
         // кладёт pending (как сейчас); ON — pending_review + превью владельцу в ЛС +
         // авто-пост по таймауту. Включать на проде после деплоя бота с веткой по type.
         'broadcast_review_gate' => (bool) env('BROADCAST_REVIEW_GATE_ENABLED', false),
+
+        /*
+         * Адрес сайта ДЛЯ ССЫЛОК В АДМИНКЕ. Отдельно от APP_URL: тот стоит
+         * https://kudab.ru и в разработке тоже, потому что попадает в текст
+         * постов — подписчик обязан видеть боевой домен. А ссылка «карточка
+         * события» нужна админу здесь и сейчас, и на стенде она должна вести
+         * на стенд. Пусто = APP_URL, то есть прежнее поведение.
+         */
+        'admin_site_url' => env('KUDAB_ADMIN_SITE_URL', ''),
         'broadcast_review_timeout_minutes' => (int) env('BROADCAST_REVIEW_TIMEOUT_MINUTES', 120),
 
         // Придержка айтема после постановки в очередь: за это окно парсер успевает
@@ -57,7 +66,7 @@ return [
     ],
 
     'vk' => [
-        'token'   => env('VK_ACCESS_TOKEN'),
+        'token' => env('VK_ACCESS_TOKEN'),
         'version' => env('VK_API_VERSION', '5.131'),
     ],
 ];

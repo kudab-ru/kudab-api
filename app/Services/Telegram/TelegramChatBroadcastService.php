@@ -1195,6 +1195,8 @@ class TelegramChatBroadcastService
             $item->caption = $this->captionBuilder->build(
                 $event,
                 (string) $broadcast->template_code,
+                // «Сегодня» и «завтра» считаем от дня, когда пост увидят.
+                $this->itemShowDay($item),
             );
             $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
             $item->save();
@@ -1208,6 +1210,120 @@ class TelegramChatBroadcastService
                 'error' => $e->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Заполнить ленту канала по дням недели — для кнопки «Пересобрать неделю».
+     *
+     * Отличается от enqueueDueForAllChannels принципиально. Тот подчиняется
+     * расписанию: добавляет пост, только если окно «пора», и за один вызов
+     * ровно один. Для автопостинга это верно, а для кнопки — нет: человек
+     * нажал её сейчас и ждёт, что неделя заполнится. Раньше кнопка дёргала
+     * планировщик в цикле и часто добавляла ноль.
+     *
+     * Каждому дню сразу проставляем publish_at: от него считаются «сегодня» и
+     * «завтра» в тексте, иначе пост про пятничный концерт, поставленный на
+     * понедельник, скажет «завтра» про вторник.
+     *
+     * @return array{filled: int, days: int, no_candidate: int}
+     */
+    public function fillFeedDays(TelegramChatBroadcast $broadcast, Carbon $now): array
+    {
+        $chat = $broadcast->chat;
+        $summary = ['filled' => 0, 'days' => 0, 'no_candidate' => 0];
+
+        if (! $chat instanceof TelegramChat || ! $chat->city_id) {
+            return $summary;
+        }
+        if (! BroadcastSafety::postingAllowed((int) $chat->telegram_chat_id)) {
+            return $summary;
+        }
+
+        $hour = $this->periodHour($broadcast);
+        $weekday = $this->periodWeekday($broadcast);
+
+        // Дни, уже занятые в ленте: второй пост на тот же день не ставим.
+        $taken = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                TelegramChatBroadcastItem::STATUS_APPROVED,
+                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+            ])
+            ->whereNotNull('publish_at')
+            ->pluck('publish_at')
+            ->map(fn ($d) => Carbon::parse($d)->setTimezone('Europe/Moscow')->toDateString())
+            ->all();
+
+        $exclude = [];
+        for ($i = 0; $i < $broadcast->feed_limit; $i++) {
+            $day = $now->copy()->setTimezone('Europe/Moscow')->addDays($i)->startOfDay();
+
+            if ($weekday !== null && $day->dayOfWeek !== $weekday) {
+                continue;
+            }
+            $summary['days']++;
+            if (in_array($day->toDateString(), $taken, true)) {
+                continue;
+            }
+
+            $eventId = $this->pickBestEventIdForChat($chat, $broadcast->id, $exclude);
+            if (! $eventId) {
+                $summary['no_candidate']++;
+
+                continue;
+            }
+            $exclude[] = $eventId;
+
+            $publishAt = $day->copy()->setTime($hour, 0, 0);
+            $item = $this->broadcastItemRepository->enqueue($broadcast->id, $eventId, null);
+            $item->publish_at = $publishAt->copy()->utc();
+            $item->save();
+
+            $this->ensureEventCaption($item, $broadcast);
+            $summary['filled']++;
+        }
+
+        return $summary;
+    }
+
+    /** Час публикации из расписания канала. */
+    private function periodHour(TelegramChatBroadcast $broadcast): int
+    {
+        $period = trim((string) $broadcast->period);
+        if (preg_match('/_(\d{1,2})$/', $period, $m)) {
+            return max(0, min(23, (int) $m[1]));
+        }
+
+        return 10;
+    }
+
+    /** День недели у weekly-расписания; null у daily. */
+    private function periodWeekday(TelegramChatBroadcast $broadcast): ?int
+    {
+        $map = ['sun' => 0, 'mon' => 1, 'tue' => 2, 'wed' => 3, 'thu' => 4, 'fri' => 5, 'sat' => 6];
+        if (preg_match('/^weekly_([a-z]{3})_/', trim((string) $broadcast->period), $m)) {
+            return $map[$m[1]] ?? null;
+        }
+
+        return null;
+    }
+
+    /**
+     * День, когда пост увидят: из publish_at, если он задан, иначе сегодня.
+     *
+     * Нужен сборке текста: «сегодня» и «завтра» в посте, поставленном на
+     * следующую пятницу, обязаны считаться от пятницы, а не от дня сборки.
+     */
+    private function itemShowDay(TelegramChatBroadcastItem $item): \Carbon\CarbonImmutable
+    {
+        $at = $item->publish_at ?? $item->planned_at;
+
+        return $at
+            ? \Carbon\CarbonImmutable::parse($at)->setTimezone('Europe/Moscow')
+            : \Carbon\CarbonImmutable::now('Europe/Moscow');
     }
 
     /**

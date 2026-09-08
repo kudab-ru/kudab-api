@@ -197,6 +197,7 @@ class AdminBroadcastController extends Controller
                     'start_time' => optional($e->start_time)?->toIso8601String(),
                     'price_status' => $e->price_status,
                     'reasons' => $this->reasons($e, $feedVenueIds),
+                    'event_url' => $this->siteUrl().'/events/'.$e->id,
                 ];
             })->values(),
         ]);
@@ -300,7 +301,27 @@ class AdminBroadcastController extends Controller
         }
 
         if ($request->has('publish_at')) {
+            $before = optional($item->publish_at)?->toDateString();
             $item->publish_at = $this->toUtc($data['publish_at']);
+            $after = optional($item->publish_at)?->toDateString();
+
+            // Дата поменялась — шаблонный текст пересобираем: в нём есть
+            // «сегодня» и «завтра», и они считаются от дня публикации.
+            // Свой текст не трогаем: его писал человек.
+            if (
+                $before !== $after
+                && $item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL
+                && ! $request->has('caption')
+            ) {
+                $item->caption = null;
+                $item->caption_source = null;
+                $bc = TelegramChatBroadcast::query()->find($item->broadcast_id);
+                $ev = Event::query()->find($item->event_id);
+                if ($bc && $ev) {
+                    $item->save();
+                    $this->fillCaption($item, $bc, $ev);
+                }
+            }
         }
 
         if ($request->has('is_pinned')) {
@@ -378,17 +399,15 @@ class AdminBroadcastController extends Controller
                 'updated_at' => now(),
             ]);
 
-        $summary = ['rounds' => 0, 'enqueued' => 0];
-        for ($i = 0; $i < $broadcast->feed_limit; $i++) {
-            $s = $this->broadcasts->enqueueDueForAllChannels(Carbon::now(), false);
-            $summary['rounds']++;
-            $summary['enqueued'] += (int) ($s['enqueued'] ?? 0);
-            if ((int) ($s['enqueued'] ?? 0) === 0) {
-                break;
-            }
-        }
+        // Заполняем ПО ДНЯМ, а не дёргаем планировщик. Тот подчиняется
+        // расписанию и добавляет пост, только если окно «пора», — для кнопки,
+        // которую человек нажал сейчас, это неверно: она часто добавляла ноль.
+        $filled = $this->broadcasts->fillFeedDays(
+            $broadcast->fresh('chat'),
+            Carbon::now(),
+        );
 
-        return response()->json(['data' => ['dropped' => $dropped] + $summary]);
+        return response()->json(['data' => ['dropped' => $dropped] + $filled]);
     }
 
     /** Настройки канала. */
@@ -501,7 +520,7 @@ class AdminBroadcastController extends Controller
             'price_max' => $event?->price_max,
             // Ссылка на карточку события: из админки удобно уйти посмотреть,
             // что именно уходит в канал.
-            'event_url' => $event ? rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/').'/events/'.$event->id : null,
+            'event_url' => $event ? $this->siteUrl().'/events/'.$event->id : null,
             'caption' => $i->caption,
             'caption_source' => $i->caption_source,
             'is_pinned' => (bool) $i->is_pinned,
@@ -577,10 +596,29 @@ class AdminBroadcastController extends Controller
         return Carbon::parse((string) $value)->utc();
     }
 
+    /**
+     * Адрес сайта для ссылок В АДМИНКЕ. Не app.url: тот боевой и в разработке
+     * тоже, потому что уходит в текст постов. Здесь нужен тот сайт, который
+     * админ может открыть прямо сейчас.
+     */
+    private function siteUrl(): string
+    {
+        $custom = trim((string) config('services.bot.admin_site_url'));
+
+        return rtrim($custom !== '' ? $custom : (string) (config('app.url') ?: 'https://kudab.ru'), '/');
+    }
+
     private function fillCaption(TelegramChatBroadcastItem $item, TelegramChatBroadcast $broadcast, Event $event): void
     {
         try {
-            $item->caption = $this->captions->build($event, (string) $broadcast->template_code);
+            $item->caption = $this->captions->build(
+                $event,
+                (string) $broadcast->template_code,
+                // «Сегодня»/«завтра» — от дня публикации, а не от дня сборки.
+                $item->publish_at
+                    ? \Carbon\CarbonImmutable::parse($item->publish_at)->setTimezone('Europe/Moscow')
+                    : null,
+            );
             $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
             $item->save();
         } catch (\Throwable $e) {
