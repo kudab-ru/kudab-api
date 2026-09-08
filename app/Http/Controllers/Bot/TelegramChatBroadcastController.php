@@ -585,6 +585,39 @@ class TelegramChatBroadcastController extends Controller
     }
 
     /**
+     * Пометить айтем ошибкой — ПОСТОЯННЫЙ отказ Telegram.
+     *
+     * POST /api/bot/broadcast/single/mark-item-failed
+     * Body: { "item_id": 123, "reason": "chat not found" }
+     *
+     * Временные сбои сюда не приходят: они лечатся повтором на следующем тике,
+     * и claim держит окно от дублей. Сюда приходит то, что повтором не
+     * лечится — бота выгнали из канала, чат не найден. Без этой ручки такой
+     * пост повторялся бы каждые пять минут бесконечно, и увидеть это можно
+     * было только в логах: статус error существовал, но его никто не ставил.
+     */
+    public function markItemFailed(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'item_id' => ['required', 'integer'],
+            'reason' => ['nullable', 'string', 'max:400'],
+        ]);
+
+        try {
+            $ok = $this->broadcastService->markItemFailed(
+                (int) $validated['item_id'],
+                (string) ($validated['reason'] ?? 'отказ Telegram'),
+            );
+
+            return response()->json(['ok' => $ok]);
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json(['ok' => false, 'error' => 'Не удалось пометить ошибку.']);
+        }
+    }
+
+    /**
      * Забрать пачку задач одиночной рассылки, которые должны отработать "сейчас".
      *
      * POST /api/bot/broadcast/single/run/poll

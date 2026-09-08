@@ -88,6 +88,7 @@ Route::prefix('admin')
         Route::post('/broadcast/channels/{id}/move', [AdminBroadcastController::class, 'move']);
         Route::patch('/broadcast/items/{id}', [AdminBroadcastController::class, 'update']);
         Route::post('/broadcast/items/{id}/publish-now', [AdminBroadcastController::class, 'publishNow']);
+        Route::post('/broadcast/items/{id}/retry', [AdminBroadcastController::class, 'retry']);
         Route::delete('/broadcast/items/{id}', [AdminBroadcastController::class, 'remove']);
 
         // community-social-links (статус active|gray|black, аналог make link-ban/unban/gray)
@@ -232,6 +233,7 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     Route::post('/broadcast/single/mark-sent', [TelegramChatBroadcastController::class, 'markSingleSent']);
     // Портрет площадки: mark по item_id (у venue-поста нет event_id)
     Route::post('/broadcast/single/mark-item-sent', [TelegramChatBroadcastController::class, 'markItemSent']);
+    Route::post('/broadcast/single/mark-item-failed', [TelegramChatBroadcastController::class, 'markItemFailed']);
 
     Route::post('/broadcast/single/enqueue', [TelegramChatBroadcastController::class, 'enqueueSingle']);
     Route::post('/broadcast/single/queue', [TelegramChatBroadcastController::class, 'listQueue']);

@@ -1226,6 +1226,31 @@ class TelegramChatBroadcastService
     }
 
     /**
+     * Пометить айтем ошибкой при постоянном отказе отправки.
+     *
+     * Статус error существовал в модели с самого начала, но не ставился
+     * НИКОГДА: за всё время ноль таких записей. Пост, который нельзя
+     * отправить, молча повторялся каждые пять минут.
+     */
+    public function markItemFailed(int $itemId, string $reason): bool
+    {
+        $item = $this->broadcastItemRepository->findById($itemId);
+        if (! $item || $item->posted_at !== null) {
+            return false;
+        }
+
+        $this->broadcastItemRepository->markError($item, $reason);
+
+        Log::error('broadcast.item_failed', [
+            'item_id' => $itemId,
+            'broadcast_id' => $item->broadcast_id,
+            'reason' => $reason,
+        ]);
+
+        return true;
+    }
+
+    /**
      * Заполнить ленту канала по дням недели — для кнопки «Пересобрать неделю».
      *
      * Отличается от enqueueDueForAllChannels принципиально. Тот подчиняется

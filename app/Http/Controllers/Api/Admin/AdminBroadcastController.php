@@ -72,6 +72,9 @@ class AdminBroadcastController extends Controller
             ->where('broadcast_id', $broadcast->id)
             ->where(function ($q) {
                 $q->whereIn('status', $this->openStatuses())
+                    // Ошибочные показываем обязательно: раньше такой пост
+                    // просто исчезал с глаз и повторялся в фоне.
+                    ->orWhere('status', TelegramChatBroadcastItem::STATUS_ERROR)
                     ->orWhere(function ($w) {
                         $w->where('status', TelegramChatBroadcastItem::STATUS_POSTED)
                             ->where('posted_at', '>=', now()->subDays(7));
@@ -589,6 +592,24 @@ class AdminBroadcastController extends Controller
         return response()->json(['ok' => true]);
     }
 
+    /** Вернуть пост в очередь после ошибки — попробовать ещё раз. */
+    public function retry(int $itemId): JsonResponse
+    {
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+
+        if ($item->posted_at !== null) {
+            return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
+        }
+
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->error_message = null;
+        $item->claimed_at = null;
+        $item->claim_token = null;
+        $item->save();
+
+        return response()->json(['ok' => true]);
+    }
+
     /** Настройки канала. */
     public function updateChannel(Request $request, int $broadcastId): JsonResponse
     {
@@ -705,6 +726,9 @@ class AdminBroadcastController extends Controller
             'is_pinned' => (bool) $i->is_pinned,
             'publish_at' => optional($i->publish_at)?->toIso8601String(),
             'posted_at' => optional($i->posted_at)?->toIso8601String(),
+            'error_message' => $i->status === TelegramChatBroadcastItem::STATUS_ERROR
+                ? $i->error_message
+                : null,
             // Ровно те картинки и в том порядке, что уйдут в канал: у события
             // — через тот же eventPhotos, которым собирается задача боту;
             // у портрета площадки картинка лежит на самой записи.
