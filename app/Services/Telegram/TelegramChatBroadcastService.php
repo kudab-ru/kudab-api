@@ -42,6 +42,7 @@ class TelegramChatBroadcastService
         private readonly EventBroadcastScorer $scorer,
         private readonly TelegramVenuePortraitService $venuePortraitService,
         private readonly EventCaptionBuilder $captionBuilder,
+        private readonly \App\Repositories\EventRepository $eventRepository,
     ) {}
 
     // ---------------------------------------------------------------------
@@ -140,11 +141,15 @@ class TelegramChatBroadcastService
             throw new RuntimeException('Это событие относится к другому городу.');
         }
 
-        return $this->broadcastItemRepository->enqueue(
+        $item = $this->broadcastItemRepository->enqueue(
             $broadcast->id,
             $eventId,
             $plannedAt,
         );
+
+        $this->ensureEventCaption($item, $broadcast);
+
+        return $item;
     }
 
     /**
@@ -511,6 +516,7 @@ class TelegramChatBroadcastService
                 }
 
                 $this->ensureEventCaption($item, $broadcast);
+                $eventPhotos = $this->eventPhotos((int) $item->event_id);
 
                 $base += [
                     'kind' => 'event',
@@ -520,6 +526,10 @@ class TelegramChatBroadcastService
                     // оставлен на переходный период: пока не выкачены обе
                     // стороны, старый бот должен продолжать работать.
                     'caption' => (string) ($item->caption ?? ''),
+                    // Картинки той же формой, что у портретов площадок. Без
+                    // них бот ходил бы за событием только ради обложки.
+                    'photo_url' => $eventPhotos[0] ?? null,
+                    'photo_urls' => $eventPhotos,
                 ];
             }
 
@@ -683,11 +693,17 @@ class TelegramChatBroadcastService
             } elseif (! $dryRun) {
                 // придержка на время генерации ТГ-текста; снимает её парсер, а если
                 // не успел — она истекает сама и пост уходит со старым description
-                $this->broadcastItemRepository->enqueue(
+                $item = $this->broadcastItemRepository->enqueue(
                     $broadcast->id,
                     $eventId,
                     $now->copy()->addMinutes($this->textGraceMinutes()),
                 );
+
+                // Текст собираем СРАЗУ, а не перед отправкой: пост появляется
+                // в плане канала уже с текстом, иначе в админке нечего
+                // показывать и нечего править. Выдача боту оставлена
+                // страховкой на случай записи, созданной в обход.
+                $this->ensureEventCaption($item, $broadcast);
             }
 
             $summary['enqueued']++;
@@ -953,6 +969,44 @@ class TelegramChatBroadcastService
      *  - period (daily_10 / weekly_fri_12 / …)
      *  - last_run_at
      */
+    /**
+     * Картинки события — те же и в том же порядке, что видел бот.
+     *
+     * Грузим через тот же findWithDetails, которым отвечает бот-эндпоинт: он
+     * зовёт hydrateImages, а тот подбирает обложку эвристикой CoverPicker и
+     * кладёт её первой. Бот делал unique([poster] + images), а poster там
+     * всегда images[0] — значит после дедупликации получался ровно images.
+     * Берём первые три: столько же брал бот.
+     *
+     * @return list<string>
+     */
+    private function eventPhotos(int $eventId): array
+    {
+        try {
+            $event = $this->eventRepository->findWithDetails($eventId);
+        } catch (\Throwable) {
+            return [];
+        }
+
+        $images = $event->getAttribute('images');
+        if (! is_array($images)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($images as $url) {
+            $url = is_string($url) ? trim($url) : '';
+            if ($url !== '' && ! in_array($url, $out, true)) {
+                $out[] = $url;
+            }
+            if (count($out) === 3) {
+                break;
+            }
+        }
+
+        return $out;
+    }
+
     /**
      * Досоздать текст поста, если его ещё нет.
      *
