@@ -72,6 +72,11 @@ class TelegramChatBroadcastItem extends Model
     // Тип поста в очереди:
     public const KIND_EVENT = 'event';  // событие (рендерится ботом из шаблона)
 
+    /** Откуда взялся текст поста: собран из шаблона или правили руками. */
+    public const CAPTION_TEMPLATE = 'template';
+
+    public const CAPTION_MANUAL = 'manual';
+
     public const KIND_VENUE = 'venue';  // портрет площадки (готовый caption)
 
     /**

@@ -41,6 +41,7 @@ class TelegramChatBroadcastService
         private readonly BotRoleServiceInterface $botRoleService,
         private readonly EventBroadcastScorer $scorer,
         private readonly TelegramVenuePortraitService $venuePortraitService,
+        private readonly EventCaptionBuilder $captionBuilder,
     ) {}
 
     // ---------------------------------------------------------------------
@@ -509,10 +510,16 @@ class TelegramChatBroadcastService
                     continue;
                 }
 
+                $this->ensureEventCaption($item, $broadcast);
+
                 $base += [
                     'kind' => 'event',
                     'event_id' => (int) $item->event_id,
                     'template_code' => (string) $broadcast->template_code,
+                    // Готовый текст. Бот предпочитает его, а template_code
+                    // оставлен на переходный период: пока не выкачены обе
+                    // стороны, старый бот должен продолжать работать.
+                    'caption' => (string) ($item->caption ?? ''),
                 ];
             }
 
@@ -946,6 +953,51 @@ class TelegramChatBroadcastService
      *  - period (daily_10 / weekly_fri_12 / …)
      *  - last_run_at
      */
+    /**
+     * Досоздать текст поста, если его ещё нет.
+     *
+     * Раньше текста не существовало вовсе: боту уходил event_id и код шаблона,
+     * а подпись собиралась уже в боте. Теперь она строится здесь и хранится,
+     * иначе её нельзя ни отредактировать, ни показать в админке.
+     *
+     * Ручную правку не трогаем: caption_source = manual означает, что текст
+     * писал человек, и пересобирать его из шаблона нельзя.
+     */
+    private function ensureEventCaption(
+        TelegramChatBroadcastItem $item,
+        TelegramChatBroadcast $broadcast,
+    ): void {
+        if ($item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            return;
+        }
+        if (trim((string) $item->caption) !== '') {
+            return;
+        }
+
+        $event = Event::query()->find($item->event_id);
+        if (! $event) {
+            return;
+        }
+
+        try {
+            $item->caption = $this->captionBuilder->build(
+                $event,
+                (string) $broadcast->template_code,
+            );
+            $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
+            $item->save();
+        } catch (\Throwable $e) {
+            // Не роняем выдачу задач: без текста бот соберёт его сам по
+            // template_code, как делал раньше. Но знать об этом надо.
+            Log::warning('caption.build_failed', [
+                'item_id' => $item->id,
+                'event_id' => $item->event_id,
+                'template_code' => $broadcast->template_code,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
     /**
      * Сколько длится одно окно расписания канала, в часах.
      * null — период выключен или незнаком, простой считать не от чего.
