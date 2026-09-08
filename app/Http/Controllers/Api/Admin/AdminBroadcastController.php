@@ -465,6 +465,12 @@ class AdminBroadcastController extends Controller
             'is_pinned' => (bool) $i->is_pinned,
             'publish_at' => optional($i->publish_at)?->toIso8601String(),
             'posted_at' => optional($i->posted_at)?->toIso8601String(),
+            // Ровно те картинки и в том порядке, что уйдут в канал: у события
+            // — через тот же eventPhotos, которым собирается задача боту;
+            // у портрета площадки картинка лежит на самой записи.
+            'photos' => $i->kind === TelegramChatBroadcastItem::KIND_VENUE
+                ? array_values(array_filter([$i->photo_url]))
+                : ($i->event_id ? $this->broadcasts->eventPhotos((int) $i->event_id) : []),
         ];
     }
 

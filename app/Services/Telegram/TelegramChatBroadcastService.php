@@ -1131,9 +1131,12 @@ class TelegramChatBroadcastService
      * всегда images[0] — значит после дедупликации получался ровно images.
      * Берём первые три: столько же брал бот.
      *
+     * Публичный, потому что тем же списком пользуется админка —
+     * превью поста обязано показывать ровно то, что уйдёт в канал.
+     *
      * @return list<string>
      */
-    private function eventPhotos(int $eventId): array
+    public function eventPhotos(int $eventId): array
     {
         try {
             $event = $this->eventRepository->findWithDetails($eventId);
