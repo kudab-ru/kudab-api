@@ -42,12 +42,23 @@ class AdminBroadcastController extends Controller
     /** Каналы со сводкой: что в ленте, когда последний пост, молчит ли. */
     public function channels(): JsonResponse
     {
+        // Шаблоны отдаём вместе с каналами, чтобы админка не зашивала их
+        // список у себя: он живёт в telegram.message_templates.
+
         // Порядок стабильный: без него список приходил как ляжет, и в
         // интерфейсе первым оказывался выключенный канал.
         $rows = TelegramChatBroadcast::query()->with('chat')->orderBy('id')->get();
 
+        $templates = \App\Models\TelegramMessageTemplate::query()
+            ->where('locale', 'ru')
+            ->where('is_active', true)
+            ->orderBy('code')
+            ->pluck('code')
+            ->all();
+
         return response()->json([
             'data' => $rows->map(fn (TelegramChatBroadcast $b) => $this->channelPayload($b))->values(),
+            'meta' => ['templates' => $templates],
         ]);
     }
 
@@ -407,6 +418,17 @@ class AdminBroadcastController extends Controller
             ->whereNotNull('posted_at')
             ->max('posted_at');
 
+        $postedTotal = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $b->id)
+            ->whereNotNull('posted_at')
+            ->count();
+
+        $openVenue = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $b->id)
+            ->whereIn('status', $this->openStatuses())
+            ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
+            ->count();
+
         return [
             'id' => (int) $b->id,
             'title' => $b->chat?->title,
@@ -418,6 +440,12 @@ class AdminBroadcastController extends Controller
             'in_feed' => $openEvents,
             'last_posted_at' => $lastPosted ? Carbon::parse($lastPosted)->toIso8601String() : null,
             'silent_days' => $lastPosted ? (int) Carbon::parse($lastPosted)->diffInDays(now()) : null,
+            'posted_total' => $postedTotal,
+            'venue_in_feed' => $openVenue,
+            // Ревью-гейт — ГЛОБАЛЬНЫЙ env-флаг, а не настройка канала. Отдаём
+            // только для показа: рисовать тумблер, за которым ничего нет,
+            // было бы враньём.
+            'review_gate' => (bool) config('services.bot.broadcast_review_gate'),
         ];
     }
 
