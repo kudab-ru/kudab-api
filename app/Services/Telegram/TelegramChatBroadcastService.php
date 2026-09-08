@@ -13,6 +13,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\Venue;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
+use App\Support\BroadcastSafety;
 use Carbon\Carbon;
 use DateTimeInterface;
 use Illuminate\Support\Facades\Log;
@@ -420,6 +421,20 @@ class TelegramChatBroadcastService
                 continue;
             }
 
+            // Стенду боевые каналы не отдаём: в локальной базе (дампе прода) лежат
+            // настоящие telegram_chat_id. Подробности и как разрешить свой канал —
+            // в App\Support\BroadcastSafety.
+            if (! BroadcastSafety::postingAllowed((int) $chat->telegram_chat_id)) {
+                Log::warning('broadcast.poll.blocked_non_production', [
+                    'broadcast_id' => $broadcast->id,
+                    'telegram_chat_id' => $chat->telegram_chat_id,
+                    'app_env' => config('app.env'),
+                    'hint' => BroadcastSafety::HINT_LINES[1].' '.BroadcastSafety::ALLOW_KEY,
+                ]);
+
+                continue;
+            }
+
             // Активный (в полёте) элемент канала — pending/planned/pending_review/approved/auto_approved.
             $item = $this->broadcastItemRepository->findActiveForBroadcast($broadcast->id, $now);
             if (! $item) {
@@ -560,6 +575,7 @@ class TelegramChatBroadcastService
             'skipped_queue_busy' => 0,
             'no_candidate' => 0,
             'skipped_no_reviewer' => 0,
+            'skipped_not_allowed' => 0,
         ];
 
         $broadcasts = $this->broadcastRepository->listEnabledWithSchedule();
@@ -580,6 +596,15 @@ class TelegramChatBroadcastService
                     'telegram_chat_id' => $chat?->telegram_chat_id,
                     'hint' => 'у канала не задан город — задай telegram:chat:set-city',
                 ]);
+
+                continue;
+            }
+
+            // На стенде очередь боевого канала даже не наполняем: иначе она копит
+            // посты, которые никогда не уйдут, и «одно событие в полёте» блокирует
+            // канал так же, как это сделала удалённая запись. См. BroadcastSafety.
+            if (! BroadcastSafety::postingAllowed((int) $chat->telegram_chat_id)) {
+                $summary['skipped_not_allowed']++;
 
                 continue;
             }

@@ -26,7 +26,7 @@ class BroadcastEnqueueDueCommand extends Command
         $s = $service->enqueueDueForAllChannels(now(), $dryRun);
 
         $this->info(sprintf(
-            'broadcast:enqueue-due%s — checked=%d due=%d enqueued=%d (no_city=%d queue_busy=%d no_candidate=%d no_reviewer=%d)',
+            'broadcast:enqueue-due%s — checked=%d due=%d enqueued=%d (no_city=%d queue_busy=%d no_candidate=%d no_reviewer=%d not_allowed=%d)',
             $dryRun ? ' [dry-run]' : '',
             $s['checked'],
             $s['due'],
@@ -35,7 +35,15 @@ class BroadcastEnqueueDueCommand extends Command
             $s['skipped_queue_busy'],
             $s['no_candidate'],
             $s['skipped_no_reviewer'],
+            $s['skipped_not_allowed'],
         ));
+
+        // not_allowed — это НЕ голодание: так и задумано, что стенд не постит
+        // в боевые каналы (App\Support\BroadcastSafety). Говорим прямо, иначе
+        // «due=1 enqueued=0» на стенде выглядит поломкой.
+        if ($s['skipped_not_allowed'] > 0) {
+            $this->line("  {$s['skipped_not_allowed']} канал(ов) пропущено: стенду боевые каналы запрещены (".\App\Support\BroadcastSafety::ALLOW_KEY.' в .env разрешает свой)');
+        }
 
         // Голодание: due-каналы, которые должны были опубликовать, но не смогли.
         $starved = $s['skipped_no_city'] + $s['no_candidate'] + $s['skipped_no_reviewer'];
