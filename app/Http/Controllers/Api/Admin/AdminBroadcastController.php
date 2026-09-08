@@ -113,6 +113,22 @@ class AdminBroadcastController extends Controller
             ->with('venue:id,name')
             ->whereHas('community', fn ($q) => $q->where('city_id', $chat->city_id))
             ->whereNotIn('id', $inFeed)
+            // Опубликованное не предлагаем: повторить пост нельзя, на
+            // (broadcast_id, event_id) стоит UNIQUE.
+            ->whereDoesntHave('broadcastItems', function ($q) use ($broadcast) {
+                $q->where('broadcast_id', $broadcast->id)->whereNotNull('posted_at');
+            })
+            // Отклонённое и снятое остывает 30 дней — тот же срок, что у
+            // автоподбора (REJECTED_COOLDOWN_DAYS), иначе пул и предложения
+            // расходились бы во мнениях.
+            ->whereDoesntHave('broadcastItems', function ($q) use ($broadcast) {
+                $q->where('broadcast_id', $broadcast->id)
+                    ->whereIn('status', [
+                        TelegramChatBroadcastItem::STATUS_REJECTED,
+                        TelegramChatBroadcastItem::STATUS_SKIPPED,
+                    ])
+                    ->where('updated_at', '>=', now()->subDays(30));
+            })
             ->where('start_time', '<=', now()->addDays(14))
             ->orderBy('start_time')
             ->limit(self::SUGGESTIONS_LIMIT)
@@ -173,23 +189,45 @@ class AdminBroadcastController extends Controller
             return response()->json(['ok' => false, 'error' => 'Событие не найдено.'], 404);
         }
 
+        // На (broadcast_id, event_id) стоит UNIQUE, поэтому вторую запись под
+        // то же событие создать нельзя. А записи копятся: у канала Воронежа
+        // 69 опубликованных, 22 отклонённых и 5 снятых. Раньше любая из них
+        // давала 409 — при том что пул предложений снятые и отклонённые
+        // показывает. Человек жал «Поставить» и получал отказ на ровном месте.
         $existing = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
             ->where('event_id', $event->id)
             ->first();
 
-        if ($existing) {
+        if ($existing && $existing->posted_at !== null) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Это событие уже публиковалось в канале.',
+            ], 409);
+        }
+
+        if ($existing && in_array($existing->status, $this->openStatuses(), true)) {
             return response()->json([
                 'ok' => false,
                 'error' => 'Это событие уже стоит в ленте канала.',
             ], 409);
         }
 
-        $item = new TelegramChatBroadcastItem;
+        // Снятое или отклонённое оживляем: человек прямо сейчас сказал, что
+        // хочет этот пост, и его прошлое решение больше не в силе.
+        $item = $existing ?: new TelegramChatBroadcastItem;
         $item->broadcast_id = $broadcast->id;
         $item->event_id = $event->id;
         $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->error_message = null;
+        $item->claimed_at = null;
+        $item->claim_token = null;
         $item->publish_at = $this->toUtc($data['publish_at'] ?? null);
+        // Текст пересобираем, если его не писали руками.
+        if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            $item->caption = null;
+            $item->caption_source = null;
+        }
         $item->save();
 
         $this->fillCaption($item, $broadcast, $event);
