@@ -10,6 +10,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\TelegramChatBroadcastService;
+use App\Support\BroadcastSafety;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -279,6 +280,44 @@ class AdminBroadcastController extends Controller
             }
         }
 
+        // Занятый день уступает место. Раньше сюда нельзя было поставить
+        // ничего: неделя собирается на все 7 дней, свободных слотов не
+        // остаётся, и любое перетаскивание карточки упиралось в отказ — со
+        // стороны это выглядело так, будто перетаскивание сломалось.
+        // Прежний пост не удаляем, а возвращаем в общую очередь: он остаётся
+        // в ленте без дня и его можно поставить обратно одним движением.
+        $displaced = null;
+        if ($publishAt !== null) {
+            $targetDay = $publishAt->copy()->setTimezone('Europe/Moscow')->toDateString();
+
+            $occupant = TelegramChatBroadcastItem::query()
+                ->where('broadcast_id', $broadcast->id)
+                ->where('event_id', '<>', $event->id)
+                ->whereIn('status', $this->openStatuses())
+                ->whereNull('posted_at')
+                ->whereNotNull('publish_at')
+                ->get()
+                ->first(fn (TelegramChatBroadcastItem $x) => Carbon::parse($x->publish_at)
+                    ->setTimezone('Europe/Moscow')->toDateString() === $targetDay);
+
+            if ($occupant && $occupant->is_pinned) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => 'В этот день закреплён пост — сначала снимите закрепление.',
+                ], 409);
+            }
+
+            if ($occupant) {
+                $occupant->publish_at = null;
+                $occupant->save();
+                $displacedEvent = $occupant->event_id ? Event::query()->find($occupant->event_id) : null;
+                $displaced = [
+                    'id' => $occupant->id,
+                    'title' => $displacedEvent?->title,
+                ];
+            }
+        }
+
         $item = $existing ?: new TelegramChatBroadcastItem;
         $item->broadcast_id = $broadcast->id;
         $item->event_id = $event->id;
@@ -286,7 +325,7 @@ class AdminBroadcastController extends Controller
         $item->error_message = null;
         $item->claimed_at = null;
         $item->claim_token = null;
-        $item->publish_at = $this->toUtc($data['publish_at'] ?? null);
+        $item->publish_at = $publishAt;
         // Текст пересобираем, если его не писали руками.
         if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
             $item->caption = null;
@@ -296,7 +335,10 @@ class AdminBroadcastController extends Controller
 
         $this->fillCaption($item, $broadcast, $event);
 
-        return response()->json(['data' => $this->itemPayload($item->fresh(), $event)]);
+        return response()->json([
+            'data' => $this->itemPayload($item->fresh(), $event),
+            'meta' => ['displaced' => $displaced],
+        ]);
     }
 
     /** Правка: текст, дата публикации, закрепление. */
@@ -584,12 +626,20 @@ class AdminBroadcastController extends Controller
         $item->claim_token = null;
         $item->save();
 
-        $broadcast = TelegramChatBroadcast::query()->find($item->broadcast_id);
+        $broadcast = TelegramChatBroadcast::query()->with('chat')->find($item->broadcast_id);
         if ($broadcast) {
             $this->regenerateCaption($item, $broadcast);
         }
 
-        return response()->json(['ok' => true]);
+        // Говорим прямо, уйдёт ли пост на самом деле. Раньше админка обещала
+        // «в ближайшую минуту» и на стенде, где отправка запрещена: время
+        // публикации проставлялось, задача боту не выдавалась, и человек ждал
+        // поста, которого не будет, без единого сообщения.
+        $willSend = $broadcast?->chat?->telegram_chat_id
+            ? BroadcastSafety::postingAllowed((int) $broadcast->chat->telegram_chat_id)
+            : false;
+
+        return response()->json(['ok' => true, 'data' => ['will_send' => $willSend]]);
     }
 
     /** Вернуть пост в очередь после ошибки — попробовать ещё раз. */
@@ -804,6 +854,12 @@ class AdminBroadcastController extends Controller
             'posted_total' => $postedTotal,
             'venue_in_feed' => $openVenue,
             'errors_count' => $errors,
+            // Может ли ЭТОТ стенд вообще отправлять в этот канал. На проде
+            // всегда да; на стенде — нет, если канал не назван в
+            // KUDAB_ADMIN_BROADCAST разрешении (см. BroadcastSafety).
+            'posting_allowed' => $b->chat?->telegram_chat_id
+                ? BroadcastSafety::postingAllowed((int) $b->chat->telegram_chat_id)
+                : false,
             'idle_notified_at' => optional($b->idle_notified_at)?->toIso8601String(),
             // Признаки неблагополучия считаем ЗДЕСЬ, а не в админке: правила
             // (сколько окон пропущено, что считается простоем) заданы сервером,
@@ -832,6 +888,15 @@ class AdminBroadcastController extends Controller
         int $openEvents,
     ): array {
         $out = [];
+
+        // Первым делом: если стенду вообще запрещено постить, всё остальное
+        // не имеет значения — пост не уйдёт, сколько ни нажимай.
+        if ($b->chat?->telegram_chat_id && ! BroadcastSafety::postingAllowed((int) $b->chat->telegram_chat_id)) {
+            $out[] = [
+                'level' => 'warning',
+                'text' => 'Это не прод: отправка в боевой канал со стенда запрещена. Посты будут копиться в ленте, но никуда не уйдут.',
+            ];
+        }
 
         if (! $b->enabled || $b->period === 'off') {
             $out[] = ['level' => 'info', 'text' => 'Автопостинг выключен — посты не уходят.'];
