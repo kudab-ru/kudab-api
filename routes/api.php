@@ -87,6 +87,7 @@ Route::prefix('admin')
         Route::post('/broadcast/channels/{id}/rebuild', [AdminBroadcastController::class, 'rebuild']);
         Route::post('/broadcast/channels/{id}/move', [AdminBroadcastController::class, 'move']);
         Route::patch('/broadcast/items/{id}', [AdminBroadcastController::class, 'update']);
+        Route::post('/broadcast/items/{id}/publish-now', [AdminBroadcastController::class, 'publishNow']);
         Route::delete('/broadcast/items/{id}', [AdminBroadcastController::class, 'remove']);
 
         // community-social-links (статус active|gray|black, аналог make link-ban/unban/gray)

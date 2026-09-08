@@ -2,21 +2,22 @@
 
 namespace App\Repositories;
 
-use Illuminate\Support\Str;
 use App\Models\Community;
 use App\Models\Event;
 use App\Models\Venue;
+use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
-use Carbon\CarbonImmutable;
 
 class EventRepository
 {
     private const FUZZY_MIN_LEN = 3;
+
     private const PAST_GRACE_HOURS = 1;
+
     /**
      * Окно «event ещё актуален» для лент и счётчиков: события могут отображаться
      * до N дней после старта (юзер видит то, что началось час назад). Public —
@@ -71,6 +72,7 @@ class EventRepository
     private const REGION_FAR_METERS = 30000;
 
     private ?bool $hasTrgm = null;
+
     private ?bool $hasWordSim = null;
 
     public function listWebIdsForSitemap(int $afterId = 0, int $limit = 5000, string $mode = 'upcoming'): array
@@ -114,7 +116,9 @@ class EventRepository
         $rows = $q->get();
 
         $hasMore = $rows->count() > $limit;
-        if ($hasMore) $rows = $rows->slice(0, $limit);
+        if ($hasMore) {
+            $rows = $rows->slice(0, $limit);
+        }
 
         $items = $rows->map(function ($e) {
             $lm = $e->updated_at ?? $e->created_at;
@@ -126,7 +130,7 @@ class EventRepository
         })->values()->all();
 
         $nextAfterId = null;
-        if ($hasMore && !empty($items)) {
+        if ($hasMore && ! empty($items)) {
             $nextAfterId = $items[count($items) - 1]['id'];
         }
 
@@ -237,7 +241,8 @@ class EventRepository
         $items = $items->sortBy(function (Event $e) {
             $d = $e->start_date ? substr((string) $e->start_date, 0, 10) : '9999-12-31';
             $t = $e->start_time ? (string) $e->start_time : '';
-            return $d . '|' . $t . '|' . str_pad((string) $e->id, 12, '0', STR_PAD_LEFT);
+
+            return $d.'|'.$t.'|'.str_pad((string) $e->id, 12, '0', STR_PAD_LEFT);
         })->values();
 
         $this->hydrateImages($items);
@@ -299,13 +304,13 @@ class EventRepository
             ->orderByRaw('events.start_time asc nulls last')
             ->orderBy('events.id', 'asc');
 
-        if (!empty($filters['city_id'])) {
+        if (! empty($filters['city_id'])) {
             $q->where('events.city_id', (int) $filters['city_id']);
-        } elseif (!empty($filters['city'])) {
+        } elseif (! empty($filters['city'])) {
             $q->where('events.city', 'ILIKE', trim((string) $filters['city']));
         }
 
-        if (!empty($filters['date_from'])) {
+        if (! empty($filters['date_from'])) {
             $fromDate = substr((string) $filters['date_from'], 0, 10);
 
             $q->where(function ($w) use ($filters, $fromDate) {
@@ -318,7 +323,7 @@ class EventRepository
             });
         }
 
-        if (!empty($filters['date_to'])) {
+        if (! empty($filters['date_to'])) {
             $toDate = substr((string) $filters['date_to'], 0, 10);
 
             $q->where(function ($w) use ($filters, $toDate) {
@@ -331,11 +336,11 @@ class EventRepository
             });
         }
 
-        if (!empty($filters['community_id'])) {
+        if (! empty($filters['community_id'])) {
             $q->where('events.community_id', (int) $filters['community_id']);
         }
 
-        if (!empty($filters['venue_id'])) {
+        if (! empty($filters['venue_id'])) {
             $q->where('events.venue_id', (int) $filters['venue_id']);
         }
 
@@ -356,32 +361,32 @@ class EventRepository
                 && mb_strlen($token) >= 4;
 
             $q->where(function ($w) use ($like, $token, $thr, $fuzzyOn) {
-                $w->whereRaw("public.ru_normalize(events.title) LIKE ?", [$like])
-                    ->orWhereRaw("public.ru_normalize(events.description) LIKE ?", [$like])
-                    ->orWhereRaw("public.ru_normalize(cm.name) LIKE ?", [$like])
-                    ->orWhereRaw("public.ru_normalize(cm.description) LIKE ?", [$like]);
+                $w->whereRaw('public.ru_normalize(events.title) LIKE ?', [$like])
+                    ->orWhereRaw('public.ru_normalize(events.description) LIKE ?', [$like])
+                    ->orWhereRaw('public.ru_normalize(cm.name) LIKE ?', [$like])
+                    ->orWhereRaw('public.ru_normalize(cm.description) LIKE ?', [$like]);
 
                 if ($fuzzyOn) {
                     $w->orWhereRaw(
-                        "word_similarity(?, public.ru_normalize(events.title)) >= ?",
+                        'word_similarity(?, public.ru_normalize(events.title)) >= ?',
                         [$token, $thr]
                     )->orWhereRaw(
-                        "word_similarity(?, public.ru_normalize(cm.name)) >= ?",
+                        'word_similarity(?, public.ru_normalize(cm.name)) >= ?',
                         [$token, $thr]
                     );
                 }
             });
 
             if (empty($filters['sort']) && $fuzzyOn) {
-                $isLikeExpr = "CASE WHEN (
+                $isLikeExpr = 'CASE WHEN (
                 public.ru_normalize(events.title) LIKE ?
                 OR public.ru_normalize(cm.name) LIKE ?
-            ) THEN 0 ELSE 1 END";
+            ) THEN 0 ELSE 1 END';
 
-                $scoreExpr = "GREATEST(
+                $scoreExpr = 'GREATEST(
                 word_similarity(?, public.ru_normalize(events.title)),
                 word_similarity(?, public.ru_normalize(cm.name))
-            )";
+            )';
 
                 $q->selectRaw("$isLikeExpr as __like_rank", [$like, $like]);
                 $q->selectRaw("$scoreExpr as __score", [$token, $token]);
@@ -398,7 +403,7 @@ class EventRepository
             }
         }
 
-        if (!empty($filters['interests']) && is_array($filters['interests'])) {
+        if (! empty($filters['interests']) && is_array($filters['interests'])) {
             $ids = array_filter(array_map('intval', $filters['interests']));
             if ($ids) {
                 $q->whereHas('interests', function ($w) use ($ids) {
@@ -420,9 +425,9 @@ class EventRepository
 
     /**
      * @return array{page: LengthAwarePaginator, totalEvents: int|null}
-     *   - page: пагинатор reps (используется для hasMore-логики на фронте)
-     *   - totalEvents: количество events до схлопывания (для display-счётчика),
-     *     либо null если ни grouped, ни grouped_by_post не были запрошены
+     *                                                                  - page: пагинатор reps (используется для hasMore-логики на фронте)
+     *                                                                  - totalEvents: количество events до схлопывания (для display-счётчика),
+     *                                                                  либо null если ни grouped, ни grouped_by_post не были запрошены
      */
     /**
      * Double-write на время прод-rollout Этапа 2: фронт постепенно мигрирует
@@ -435,12 +440,14 @@ class EventRepository
      *
      * Cleanup-PR через 1-2 недели после миграции фронта снесёт legacy-ветку.
      *
-     * @param array<int|string> $input
+     * @param  array<int|string>  $input
      * @return int[]
      */
     private function resolveInterestFilterIds(array $input): array
     {
-        if (!$input) return [];
+        if (! $input) {
+            return [];
+        }
 
         $first = reset($input);
         $isLegacyInt = is_int($first) || (is_string($first) && ctype_digit($first));
@@ -450,6 +457,7 @@ class EventRepository
         }
 
         $strings = array_values(array_filter($input, 'is_string'));
+
         return $this->expandInterestSlugsToIds($strings);
     }
 
@@ -460,19 +468,25 @@ class EventRepository
      *
      * Опечатка в slug → empty result у вызывающего (по плану — это фича, не баг).
      *
-     * @param string[] $slugs
+     * @param  string[]  $slugs
      * @return int[]
      */
     private function expandInterestSlugsToIds(array $slugs): array
     {
         $norm = [];
         foreach ($slugs as $s) {
-            if (!is_string($s)) continue;
+            if (! is_string($s)) {
+                continue;
+            }
             $s = mb_strtolower(trim($s));
-            if ($s === '') continue;
+            if ($s === '') {
+                continue;
+            }
             $norm[] = $s;
         }
-        if (!$norm) return [];
+        if (! $norm) {
+            return [];
+        }
 
         // slugs валидированы regex [a-z0-9-]+ в EventsController → запятой
         // быть не может, безопасно склеить в CSV для string_to_array.
@@ -570,18 +584,18 @@ class EventRepository
                 ->orderBy('events.id', 'asc');
         }
 
-        if (!empty($filters['city_id'])) {
+        if (! empty($filters['city_id'])) {
             $q->where('events.city_id', (int) $filters['city_id']);
         }
 
         // Когда событие ПОПАЛО К НАМ, а не когда оно идёт. Нужен для счётчика
         // «за сутки добавили N анонсов»: date_from/date_to фильтруют по времени
         // самого события и на этот вопрос ответить не могут.
-        if (!empty($filters['created_from'])) {
+        if (! empty($filters['created_from'])) {
             $q->where('events.created_at', '>=', $filters['created_from']);
         }
 
-        if (!empty($filters['date_from'])) {
+        if (! empty($filters['date_from'])) {
             $fromDate = substr((string) $filters['date_from'], 0, 10);
 
             $q->where(function ($w) use ($filters, $fromDate) {
@@ -594,7 +608,7 @@ class EventRepository
             });
         }
 
-        if (!empty($filters['date_to'])) {
+        if (! empty($filters['date_to'])) {
             $toDate = substr((string) $filters['date_to'], 0, 10);
 
             $q->where(function ($w) use ($filters, $toDate) {
@@ -607,11 +621,11 @@ class EventRepository
             });
         }
 
-        if (!empty($filters['community_id'])) {
+        if (! empty($filters['community_id'])) {
             $q->where('events.community_id', (int) $filters['community_id']);
         }
 
-        if (!empty($filters['venue_id'])) {
+        if (! empty($filters['venue_id'])) {
             $q->where('events.venue_id', (int) $filters['venue_id']);
         }
 
@@ -638,24 +652,24 @@ class EventRepository
                 && mb_strlen($token) >= 4;
 
             $q->where(function ($w) use ($like, $token, $thr, $fuzzyOn) {
-                $w->whereRaw("public.ru_normalize(events.title) LIKE ?", [$like])
-                    ->orWhereRaw("public.ru_normalize(events.description) LIKE ?", [$like])
-                    ->orWhereRaw("public.ru_normalize(cm.name) LIKE ?", [$like])
-                    ->orWhereRaw("public.ru_normalize(cm.description) LIKE ?", [$like]);
+                $w->whereRaw('public.ru_normalize(events.title) LIKE ?', [$like])
+                    ->orWhereRaw('public.ru_normalize(events.description) LIKE ?', [$like])
+                    ->orWhereRaw('public.ru_normalize(cm.name) LIKE ?', [$like])
+                    ->orWhereRaw('public.ru_normalize(cm.description) LIKE ?', [$like]);
 
                 if ($fuzzyOn) {
                     $w->orWhereRaw(
-                        "word_similarity(?, public.ru_normalize(events.title)) >= ?",
+                        'word_similarity(?, public.ru_normalize(events.title)) >= ?',
                         [$token, $thr]
                     )->orWhereRaw(
-                        "word_similarity(?, public.ru_normalize(cm.name)) >= ?",
+                        'word_similarity(?, public.ru_normalize(cm.name)) >= ?',
                         [$token, $thr]
                     );
                 }
             });
         }
 
-        if (!empty($filters['interests']) && is_array($filters['interests'])) {
+        if (! empty($filters['interests']) && is_array($filters['interests'])) {
             // Double-write: input — либо int[] (legacy), либо slug[] (Этап 2,
             // CTE разворачивает parent → self+descendants). Validator выше не
             // пускает mixed-array. Пустой ids → 1=0 (защита от typo в slug).
@@ -669,7 +683,7 @@ class EventRepository
             }
         }
 
-        if (!empty($filters['free'])) {
+        if (! empty($filters['free'])) {
             $q->where(function ($w) {
                 $w->where('events.price_status', 'free')
                     ->orWhere(function ($x) {
@@ -704,11 +718,15 @@ class EventRepository
                 $w->where(function ($x) use ($knownPrice, $minExpr, $maxExpr, $priceMin, $priceMax) {
                     $x->where($knownPrice);
 
-                    if ($priceMin !== null) $x->whereRaw("$maxExpr >= ?", [$priceMin]);
-                    if ($priceMax !== null) $x->whereRaw("$minExpr <= ?", [$priceMax]);
+                    if ($priceMin !== null) {
+                        $x->whereRaw("$maxExpr >= ?", [$priceMin]);
+                    }
+                    if ($priceMax !== null) {
+                        $x->whereRaw("$minExpr <= ?", [$priceMax]);
+                    }
                 });
 
-                if (!$priced) {
+                if (! $priced) {
                     $w->orWhere(function ($x) {
                         $x->whereNull('events.price_min')
                             ->whereNull('events.price_max')
@@ -720,7 +738,7 @@ class EventRepository
             $q->where($knownPrice);
         }
 
-        $unknownLast = $hasRange && !$priced;
+        $unknownLast = $hasRange && ! $priced;
         if ($unknownLast && $hasDistinct) {
             $q->selectRaw("$unknownCaseSql as __unknown_last");
         }
@@ -729,8 +747,11 @@ class EventRepository
             $q->reorder()
                 ->orderBy('__past_rank', 'asc');
 
-            if ($hasDistinct) $q->orderBy('__unknown_last', 'asc');
-            else $q->orderByRaw("$unknownCaseSql asc");
+            if ($hasDistinct) {
+                $q->orderBy('__unknown_last', 'asc');
+            } else {
+                $q->orderByRaw("$unknownCaseSql asc");
+            }
 
             $q->orderBy('__img_rank', 'asc')
                 ->orderBy('__gray_rank', 'asc')
@@ -739,7 +760,7 @@ class EventRepository
                 ->orderBy('events.id', 'asc');
         }
 
-        if (!empty($filters['tod'])) {
+        if (! empty($filters['tod'])) {
             $tod = (string) $filters['tod'];
             $q->whereNotNull('events.start_time');
 
@@ -776,8 +797,11 @@ class EventRepository
                 ->orderBy('__past_rank', 'asc');
 
             if ($unknownLast) {
-                if ($hasDistinct) $q->orderBy('__unknown_last', 'asc');
-                else $q->orderByRaw("$unknownCaseSql asc");
+                if ($hasDistinct) {
+                    $q->orderBy('__unknown_last', 'asc');
+                } else {
+                    $q->orderByRaw("$unknownCaseSql asc");
+                }
             }
 
             $q->orderBy('__img_rank', 'asc')
@@ -796,7 +820,7 @@ class EventRepository
                     break;
 
                 case 'created_at':
-                    $q->orderBy("events.created_at", $dir);
+                    $q->orderBy('events.created_at', $dir);
                     break;
 
                 case 'price_min':
@@ -808,15 +832,15 @@ class EventRepository
         }
 
         if (empty($filters['sort']) && $fuzzyOn && $like !== null && $token !== null) {
-            $isLikeExpr = "CASE WHEN (
+            $isLikeExpr = 'CASE WHEN (
             public.ru_normalize(events.title) LIKE ?
             OR public.ru_normalize(cm.name) LIKE ?
-        ) THEN 0 ELSE 1 END";
+        ) THEN 0 ELSE 1 END';
 
-            $scoreExpr = "GREATEST(
+            $scoreExpr = 'GREATEST(
             word_similarity(?, public.ru_normalize(events.title)),
             word_similarity(?, public.ru_normalize(cm.name))
-        )";
+        )';
 
             $q->selectRaw("$isLikeExpr as __like_rank", [$like, $like]);
             $q->selectRaw("$scoreExpr as __score", [$token, $token]);
@@ -825,8 +849,11 @@ class EventRepository
                 ->orderBy('__past_rank', 'asc');
 
             if ($unknownLast) {
-                if ($hasDistinct) $q->orderBy('__unknown_last', 'asc');
-                else $q->orderByRaw("$unknownCaseSql asc");
+                if ($hasDistinct) {
+                    $q->orderBy('__unknown_last', 'asc');
+                } else {
+                    $q->orderByRaw("$unknownCaseSql asc");
+                }
             }
 
             $q->orderBy('__img_rank', 'asc')
@@ -853,8 +880,8 @@ class EventRepository
                     $j->on('eg.id', '=', 'b.event_group_id')
                         ->whereNull('eg.deleted_at');
                 })
-                ->selectRaw("eg.current_event_id as __grp_current_event_id")
-                ->selectRaw("eg.federation_id as __grp_federation_id")
+                ->selectRaw('eg.current_event_id as __grp_current_event_id')
+                ->selectRaw('eg.federation_id as __grp_federation_id')
                 ->selectRaw("
                     COALESCE(
                       b.start_time,
@@ -873,7 +900,7 @@ class EventRepository
             $ranked = DB::query()
                 ->fromSub($annot, 'b2')
                 ->select('b2.*')
-                ->selectRaw("
+                ->selectRaw('
                     row_number() over (
                       partition by COALESCE(b2.__grp_federation_id, b2.event_group_id, -b2.id)
                       order by
@@ -887,7 +914,7 @@ class EventRepository
                         case when b2.__grp_future_rank = 1 then b2.__grp_start_ts end desc nulls last,
                         b2.id asc
                     ) as __grp_rn
-                ");
+                ');
 
             $repIds = DB::query()
                 ->fromSub($ranked, 'r')
@@ -921,7 +948,10 @@ class EventRepository
 
         if ($groupedByPost) {
             $base = clone $q;
-            try { $base->reorder(); } catch (\Throwable $e) {}
+            try {
+                $base->reorder();
+            } catch (\Throwable $e) {
+            }
 
             // Step 1: filtered events × LEFT JOIN event_sources
             // (LEFT JOIN — чтобы соло-events без event_sources тоже попали)
@@ -954,16 +984,16 @@ class EventRepository
                     $j->on('cs2.source', '=', 'ep2.source')
                         ->on('cs2.post_external_id', '=', 'ep2.post_external_id');
                 })
-                ->selectRaw("
+                ->selectRaw('
                     ep2.event_id, ep2.start_time, ep2.start_date,
                     ep2.source, ep2.post_external_id,
                     COALESCE(cs2.cnt, 0) AS cluster_cnt
-                ");
+                ');
 
             // Step 4: canonical cluster per event (max cnt wins для cross-post)
             $canonTmp = DB::query()
                 ->fromSub($epSize, 'es3')
-                ->selectRaw("
+                ->selectRaw('
                     es3.event_id, es3.start_time, es3.start_date,
                     es3.source, es3.post_external_id, es3.cluster_cnt,
                     ROW_NUMBER() OVER (
@@ -973,7 +1003,7 @@ class EventRepository
                             es3.source ASC NULLS LAST,
                             es3.post_external_id ASC NULLS LAST
                     ) AS canon_rn
-                ");
+                ');
 
             $canon = DB::query()
                 ->fromSub($canonTmp, 'ct')
@@ -1103,7 +1133,7 @@ class EventRepository
     public function pickRandomWeb(array $filters): array
     {
         $excludeIds = [];
-        if (!empty($filters['exclude_ids']) && is_array($filters['exclude_ids'])) {
+        if (! empty($filters['exclude_ids']) && is_array($filters['exclude_ids'])) {
             $excludeIds = array_values(array_filter(array_map('intval', $filters['exclude_ids'])));
         }
 
@@ -1141,11 +1171,11 @@ class EventRepository
         $this->excludeBlacklistedSources($q);
         $this->applyMainFeedTaxonomyFilter($q, $filters);
 
-        if (!empty($filters['city_id'])) {
+        if (! empty($filters['city_id'])) {
             $q->where('events.city_id', (int) $filters['city_id']);
         }
 
-        if (!empty($filters['date_from'])) {
+        if (! empty($filters['date_from'])) {
             $fromDate = substr((string) $filters['date_from'], 0, 10);
             $q->where(function ($w) use ($filters, $fromDate) {
                 $w->where('events.start_time', '>=', $filters['date_from'])
@@ -1157,7 +1187,7 @@ class EventRepository
             });
         }
 
-        if (!empty($filters['date_to'])) {
+        if (! empty($filters['date_to'])) {
             $toDate = substr((string) $filters['date_to'], 0, 10);
             $q->where(function ($w) use ($filters, $toDate) {
                 $w->where('events.start_time', '<=', $filters['date_to'])
@@ -1169,17 +1199,17 @@ class EventRepository
             });
         }
 
-        if (!empty($filters['community_id'])) {
+        if (! empty($filters['community_id'])) {
             $q->where('events.community_id', (int) $filters['community_id']);
         }
 
-        if (!empty($filters['venue_id'])) {
+        if (! empty($filters['venue_id'])) {
             $q->where('events.venue_id', (int) $filters['venue_id']);
         }
 
         $qNorm = $this->normalizeQ($filters['q'] ?? null);
         if ($qNorm !== null) {
-            $like = '%' . $qNorm . '%';
+            $like = '%'.$qNorm.'%';
             $token = $this->pickFuzzyToken($qNorm);
             $thr = $this->fuzzyThreshold($token);
             $fuzzyOn = $this->trgmEnabled()
@@ -1190,23 +1220,23 @@ class EventRepository
             $q->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id')->distinct();
 
             $q->where(function ($w) use ($like, $token, $thr, $fuzzyOn) {
-                $w->whereRaw("public.ru_normalize(events.title) LIKE ?", [$like])
-                    ->orWhereRaw("public.ru_normalize(events.description) LIKE ?", [$like])
-                    ->orWhereRaw("public.ru_normalize(cm.name) LIKE ?", [$like])
-                    ->orWhereRaw("public.ru_normalize(cm.description) LIKE ?", [$like]);
+                $w->whereRaw('public.ru_normalize(events.title) LIKE ?', [$like])
+                    ->orWhereRaw('public.ru_normalize(events.description) LIKE ?', [$like])
+                    ->orWhereRaw('public.ru_normalize(cm.name) LIKE ?', [$like])
+                    ->orWhereRaw('public.ru_normalize(cm.description) LIKE ?', [$like]);
                 if ($fuzzyOn) {
                     $w->orWhereRaw(
-                        "word_similarity(?, public.ru_normalize(events.title)) >= ?",
+                        'word_similarity(?, public.ru_normalize(events.title)) >= ?',
                         [$token, $thr]
                     )->orWhereRaw(
-                        "word_similarity(?, public.ru_normalize(cm.name)) >= ?",
+                        'word_similarity(?, public.ru_normalize(cm.name)) >= ?',
                         [$token, $thr]
                     );
                 }
             });
         }
 
-        if (!empty($filters['interests']) && is_array($filters['interests'])) {
+        if (! empty($filters['interests']) && is_array($filters['interests'])) {
             // Double-write — см. resolveInterestFilterIds().
             $ids = $this->resolveInterestFilterIds($filters['interests']);
             if ($ids) {
@@ -1218,7 +1248,7 @@ class EventRepository
             }
         }
 
-        if (!empty($filters['free'])) {
+        if (! empty($filters['free'])) {
             $q->where(function ($w) {
                 $w->where('events.price_status', 'free')
                     ->orWhere(function ($x) {
@@ -1246,10 +1276,14 @@ class EventRepository
             $q->where(function ($w) use ($knownPrice, $priced, $minExpr, $maxExpr, $priceMin, $priceMax) {
                 $w->where(function ($x) use ($knownPrice, $minExpr, $maxExpr, $priceMin, $priceMax) {
                     $x->where($knownPrice);
-                    if ($priceMin !== null) $x->whereRaw("$maxExpr >= ?", [$priceMin]);
-                    if ($priceMax !== null) $x->whereRaw("$minExpr <= ?", [$priceMax]);
+                    if ($priceMin !== null) {
+                        $x->whereRaw("$maxExpr >= ?", [$priceMin]);
+                    }
+                    if ($priceMax !== null) {
+                        $x->whereRaw("$minExpr <= ?", [$priceMax]);
+                    }
                 });
-                if (!$priced) {
+                if (! $priced) {
                     $w->orWhere(function ($x) {
                         $x->whereNull('events.price_min')
                             ->whereNull('events.price_max')
@@ -1261,14 +1295,17 @@ class EventRepository
             $q->where($knownPrice);
         }
 
-        if (!empty($filters['tod'])) {
+        if (! empty($filters['tod'])) {
             $tod = (string) $filters['tod'];
             $q->whereNotNull('events.start_time');
             $hourExpr = "EXTRACT(HOUR FROM (events.start_time AT TIME ZONE 'Europe/Moscow'))";
             switch ($tod) {
-                case 'morning': $q->whereRaw("{$hourExpr} >= 5 AND {$hourExpr} <= 11"); break;
-                case 'day':     $q->whereRaw("{$hourExpr} >= 12 AND {$hourExpr} <= 16"); break;
-                case 'evening': $q->whereRaw("{$hourExpr} >= 17 AND {$hourExpr} <= 22"); break;
+                case 'morning': $q->whereRaw("{$hourExpr} >= 5 AND {$hourExpr} <= 11");
+                    break;
+                case 'day':     $q->whereRaw("{$hourExpr} >= 12 AND {$hourExpr} <= 16");
+                    break;
+                case 'evening': $q->whereRaw("{$hourExpr} >= 17 AND {$hourExpr} <= 22");
+                    break;
                 case 'night':
                     $q->where(function ($w) use ($hourExpr) {
                         $w->whereRaw("{$hourExpr} >= 23")->orWhereRaw("{$hourExpr} <= 4");
@@ -1393,7 +1430,7 @@ class EventRepository
             ->find($eventId);
 
         if ($base === null) {
-            return new EloquentCollection();
+            return new EloquentCollection;
         }
 
         $interestIds = DB::table('event_interest')
@@ -1406,7 +1443,7 @@ class EventRepository
             ->all();
 
         if (empty($interestIds)) {
-            return new EloquentCollection();
+            return new EloquentCollection;
         }
 
         $nowMsk = now('Europe/Moscow');
@@ -1567,7 +1604,7 @@ class EventRepository
         bool $byPost,
         int $limit
     ): EloquentCollection {
-        if (!$bySeries && !$byPost) {
+        if (! $bySeries && ! $byPost) {
             return $events->slice(0, $limit)->values();
         }
 
@@ -1604,7 +1641,7 @@ class EventRepository
                 ->get(['event_id', 'source', 'post_external_id']);
 
             foreach ($rows as $r) {
-                $pairsByEvent[(int) $r->event_id][] = $r->source . '|' . $r->post_external_id;
+                $pairsByEvent[(int) $r->event_id][] = $r->source.'|'.$r->post_external_id;
             }
         }
 
@@ -1615,13 +1652,17 @@ class EventRepository
 
         foreach ($events as $e) {
             $title = $this->railTitleKey((string) ($e->title ?? ''));
-            if ($title !== '' && isset($seenTitles[$title])) continue;
+            if ($title !== '' && isset($seenTitles[$title])) {
+                continue;
+            }
 
             if ($bySeries) {
                 $gid = (int) ($e->event_group_id ?? 0);
                 $key = $gid > 0 ? ($fedByGroup[$gid] ?? $gid) : null;
                 if ($key !== null) {
-                    if (isset($seenSeries[$key])) continue;
+                    if (isset($seenSeries[$key])) {
+                        continue;
+                    }
                     $seenSeries[$key] = true;
                 }
             }
@@ -1630,16 +1671,27 @@ class EventRepository
                 $keys = $pairsByEvent[(int) $e->id] ?? [];
                 $clash = false;
                 foreach ($keys as $k) {
-                    if (isset($seenPosts[$k])) { $clash = true; break; }
+                    if (isset($seenPosts[$k])) {
+                        $clash = true;
+                        break;
+                    }
                 }
-                if ($clash) continue;
-                foreach ($keys as $k) $seenPosts[$k] = true;
+                if ($clash) {
+                    continue;
+                }
+                foreach ($keys as $k) {
+                    $seenPosts[$k] = true;
+                }
             }
 
-            if ($title !== '') $seenTitles[$title] = true;
+            if ($title !== '') {
+                $seenTitles[$title] = true;
+            }
 
             $out[] = $e;
-            if (count($out) >= $limit) break;
+            if (count($out) >= $limit) {
+                break;
+            }
         }
 
         return new EloquentCollection($out);
@@ -1822,12 +1874,26 @@ class EventRepository
         return is_object($row) && ($row->kind ?? null) === 'aggregator';
     }
 
+    /**
+     * Проставить коллекции poster/images ОДНИМ проходом.
+     *
+     * Публичная обёртка над hydrateImages: админке нужны обложки сразу для
+     * сорока предложений, и дёргать findWithDetails на каждое — сорок
+     * запросов на экран.
+     */
+    public function hydrateImagesFor(EloquentCollection $events): void
+    {
+        $this->hydrateImages($events);
+    }
+
     private function hydrateImages(EloquentCollection $events): void
     {
-        if ($events->isEmpty()) return;
+        if ($events->isEmpty()) {
+            return;
+        }
 
         $eventIds = $events->pluck('id')->all();
-        $postIds  = $events->pluck('original_post_id')->filter()->unique()->values()->all();
+        $postIds = $events->pluck('original_post_id')->filter()->unique()->values()->all();
 
         $esRows = DB::table('event_sources')
             ->select('event_id', 'images')
@@ -1840,18 +1906,21 @@ class EventRepository
                     $arr = is_string($r->images) ? json_decode($r->images, true) : $r->images;
                     if (is_array($arr)) {
                         foreach ($arr as $u) {
-                            if (is_string($u) && $u !== '') $all[] = $u;
+                            if (is_string($u) && $u !== '') {
+                                $all[] = $u;
+                            }
                         }
                     }
                 }
                 $seen = [];
                 $uniq = [];
                 foreach ($all as $u) {
-                    if (!isset($seen[$u])) {
+                    if (! isset($seen[$u])) {
                         $seen[$u] = true;
                         $uniq[] = $u;
                     }
                 }
+
                 return $uniq;
             });
 
@@ -1870,17 +1939,20 @@ class EventRepository
                     foreach ($rows as $r) {
                         if (in_array($r->type, ['image', 'photo'], true)) {
                             $u = $r->url ?: $r->preview_url;
-                            if (is_string($u) && $u !== '') $urls[] = $u;
+                            if (is_string($u) && $u !== '') {
+                                $urls[] = $u;
+                            }
                         }
                     }
                     $seen = [];
                     $uniq = [];
                     foreach ($urls as $u) {
-                        if (!isset($seen[$u])) {
+                        if (! isset($seen[$u])) {
                             $seen[$u] = true;
                             $uniq[] = $u;
                         }
                     }
+
                     return $uniq;
                 });
         }
@@ -1898,17 +1970,20 @@ class EventRepository
                 foreach ($rows as $r) {
                     if (in_array($r->type, ['image', 'photo'], true)) {
                         $u = $r->url ?: $r->preview_url;
-                        if (is_string($u) && $u !== '') $urls[] = $u;
+                        if (is_string($u) && $u !== '') {
+                            $urls[] = $u;
+                        }
                     }
                 }
                 $seen = [];
                 $uniq = [];
                 foreach ($urls as $u) {
-                    if (!isset($seen[$u])) {
+                    if (! isset($seen[$u])) {
                         $seen[$u] = true;
                         $uniq[] = $u;
                     }
                 }
+
                 return $uniq;
             });
 
@@ -1992,7 +2067,7 @@ class EventRepository
             ->orderBy('events.id', 'desc');
 
         $paginator = $q->paginate($perPage, ['*'], 'page', max(1, $page));
-        $events    = $paginator->getCollection();
+        $events = $paginator->getCollection();
 
         $this->hydrateImages($events);              // images + poster (иначе карточки без обложек)
         $events->each(fn (Event $e) => $e->makeHidden(['__past_rank', '__is_past']));
@@ -2010,7 +2085,7 @@ class EventRepository
      * рисовалось бы как предстоящее. Где предиката в WHERE нет, аргумент можно
      * опустить — сравнивать не с чем.
      *
-     * @param array{0: string, 1: array{0: string, 1: string}}|null $past
+     * @param  array{0: string, 1: array{0: string, 1: string}}|null  $past
      */
     private function addPastFlags($q, ?array $past = null): void
     {
@@ -2146,7 +2221,9 @@ class EventRepository
     private function normalizeQ(?string $q): ?string
     {
         $q = trim((string) $q);
-        if ($q === '') return null;
+        if ($q === '') {
+            return null;
+        }
 
         $q = mb_strtolower($q);
         $q = str_replace('ё', 'е', $q);
@@ -2161,11 +2238,15 @@ class EventRepository
     private function pickFuzzyToken(string $qNorm): string
     {
         $parts = preg_split('~\s+~u', $qNorm, -1, PREG_SPLIT_NO_EMPTY);
-        if (!$parts) return $qNorm;
+        if (! $parts) {
+            return $qNorm;
+        }
 
         $token = '';
         foreach ($parts as $p) {
-            if (mb_strlen($p) > mb_strlen($token)) $token = $p;
+            if (mb_strlen($p) > mb_strlen($token)) {
+                $token = $p;
+            }
         }
 
         return $token !== '' ? $token : $qNorm;
@@ -2174,14 +2255,21 @@ class EventRepository
     private function fuzzyThreshold(string $token): float
     {
         $n = mb_strlen($token);
-        if ($n <= 4) return 0.20;
-        if ($n <= 6) return 0.18;
+        if ($n <= 4) {
+            return 0.20;
+        }
+        if ($n <= 6) {
+            return 0.18;
+        }
+
         return 0.14;
     }
 
     private function trgmEnabled(): bool
     {
-        if ($this->hasTrgm !== null) return $this->hasTrgm;
+        if ($this->hasTrgm !== null) {
+            return $this->hasTrgm;
+        }
 
         try {
             DB::selectOne("select similarity('a','a') as s");
@@ -2195,7 +2283,9 @@ class EventRepository
 
     private function wordSimEnabled(): bool
     {
-        if ($this->hasWordSim !== null) return $this->hasWordSim;
+        if ($this->hasWordSim !== null) {
+            return $this->hasWordSim;
+        }
 
         try {
             DB::selectOne("select word_similarity('a','a') as s");
@@ -2293,7 +2383,9 @@ class EventRepository
      */
     private function hydrateGroupDates(EloquentCollection $events, int $maxDays = 12): void
     {
-        if ($events->isEmpty()) return;
+        if ($events->isEmpty()) {
+            return;
+        }
 
         $MAX_DAYS = max(1, $maxDays);
         // Времён в дне отдаём столько, сколько есть: у квестов и кино их 5-6, и обрезка
@@ -2301,13 +2393,15 @@ class EventRepository
         $MAX_TIMES_PER_DAY = 12;
 
         $repGroupIds = $events->pluck('event_group_id')
-            ->filter(fn($v) => is_numeric($v) && (int)$v > 0)
-            ->map(fn($v) => (int)$v)
+            ->filter(fn ($v) => is_numeric($v) && (int) $v > 0)
+            ->map(fn ($v) => (int) $v)
             ->unique()
             ->values()
             ->all();
 
-        if (!$repGroupIds) return;
+        if (! $repGroupIds) {
+            return;
+        }
 
         // federation-aware ключ группы: COALESCE(federation_id, id). Расширяем
         // rep-группы до всех групп их федераций, чтобы chip'ы сеансов собрались
@@ -2317,17 +2411,19 @@ class EventRepository
             ->whereNull('deleted_at')
             ->selectRaw('DISTINCT COALESCE(federation_id, id) as fk')
             ->pluck('fk')
-            ->map(fn($v) => (int)$v)
+            ->map(fn ($v) => (int) $v)
             ->all();
 
-        if (!$fedKeys) return;
+        if (! $fedKeys) {
+            return;
+        }
 
         // rep.event_group_id → fed_key (для раскладки результата на rep-события)
         $repFed = DB::table('event_groups')
             ->whereIn('id', $repGroupIds)
             ->selectRaw('id, COALESCE(federation_id, id) as fk')
             ->pluck('fk', 'id')
-            ->map(fn($v) => (int)$v)
+            ->map(fn ($v) => (int) $v)
             ->all();
 
         // серийные метаданные rep-групп (регулярные события PR3): вид повторения
@@ -2407,40 +2503,50 @@ class EventRepository
 
         foreach ($rows as $r) {
             $gid = (int) $r->__fed_key; // ключ карты = федерация (или сама группа, если не федерирована)
-            if (!$gid) continue;
+            if (! $gid) {
+                continue;
+            }
 
             $grpCount = (int) ($r->__grp_count ?? 0);
 
-            if ($grpCount < 2) continue;
+            if ($grpCount < 2) {
+                continue;
+            }
 
             $cntMap[$gid] = $grpCount;
 
             $day = $r->__day !== null ? substr((string) $r->__day, 0, 10) : null;
-            if ($day === null || $day === '') continue;
+            if ($day === null || $day === '') {
+                continue;
+            }
 
             $dayPast = ((int) ($r->__day_past ?? 0)) === 1;
 
             // сегодняшние сеансы, которые уже начались, для страницы не существуют:
             // ни в счётчике дня, ни в списке времён, ни как ссылка дня
-            if (!$dayPast && ((int) ($r->__sess_past ?? 0)) === 1) continue;
+            if (! $dayPast && ((int) ($r->__sess_past ?? 0)) === 1) {
+                continue;
+            }
 
             $daySessions[$gid][$day] = ($daySessions[$gid][$day] ?? 0) + 1;
 
-            if (!$dayPast) {
+            if (! $dayPast) {
                 $aheadDays[$gid][$day] = true; // считаем ДО потолка в 12 дней
             }
 
-            if (!isset($buckets[$gid])) $buckets[$gid] = ['past' => [], 'ahead' => []];
+            if (! isset($buckets[$gid])) {
+                $buckets[$gid] = ['past' => [], 'ahead' => []];
+            }
 
             $side = $dayPast ? 'past' : 'ahead';
 
-            if (!isset($buckets[$gid][$side][$day])) {
-                if (!$dayPast && count($buckets[$gid]['ahead']) >= $MAX_DAYS) {
+            if (! isset($buckets[$gid][$side][$day])) {
+                if (! $dayPast && count($buckets[$gid]['ahead']) >= $MAX_DAYS) {
                     continue; // предстоящих дней уже набрали лимит
                 }
 
                 $startAt = null;
-                if (!empty($r->start_time)) {
+                if (! empty($r->start_time)) {
                     try {
                         $startAt = CarbonImmutable::parse($r->start_time)->toISOString();
                     } catch (\Throwable $e) {
@@ -2450,11 +2556,11 @@ class EventRepository
 
                 $buckets[$gid][$side][$day] = [
                     'item' => [
-                        'id'             => (int) $r->id,
-                        'start_at'       => $startAt,
-                        'start_date'     => $r->start_date ? substr((string) $r->start_date, 0, 10) : null,
+                        'id' => (int) $r->id,
+                        'start_at' => $startAt,
+                        'start_date' => $r->start_date ? substr((string) $r->start_date, 0, 10) : null,
                         'time_precision' => (string) ($r->time_precision ?? 'datetime'),
-                        'time_text'      => $r->time_text !== null ? (string) $r->time_text : null,
+                        'time_text' => $r->time_text !== null ? (string) $r->time_text : null,
                     ],
                     'times' => [],
                     'sessions' => [],
@@ -2468,7 +2574,7 @@ class EventRepository
             if (isset($buckets[$gid][$side][$day])
                 && count($buckets[$gid][$side][$day]['times']) < $MAX_TIMES_PER_DAY) {
                 $t = $this->sessionTimeLabel($r);
-                if ($t !== null && !in_array($t, $buckets[$gid][$side][$day]['times'], true)) {
+                if ($t !== null && ! in_array($t, $buckets[$gid][$side][$day]['times'], true)) {
                     $buckets[$gid][$side][$day]['times'][] = $t;
                     // сеанс — отдельное событие со своей страницей; без id время остаётся
                     // мёртвой подписью и выбрать «в 20:00 вместо 18:00» нельзя
@@ -2547,7 +2653,9 @@ class EventRepository
 
     private function stableTimeMsk(?string $utc): ?string
     {
-        if ($utc === null || trim($utc) === '') return null;
+        if ($utc === null || trim($utc) === '') {
+            return null;
+        }
 
         try {
             return CarbonImmutable::createFromFormat('H:i', trim($utc), 'UTC')
@@ -2565,7 +2673,7 @@ class EventRepository
             return $text;
         }
 
-        if (!empty($r->start_time) && (string) ($r->time_precision ?? 'datetime') === 'datetime') {
+        if (! empty($r->start_time) && (string) ($r->time_precision ?? 'datetime') === 'datetime') {
             try {
                 $t = CarbonImmutable::parse($r->start_time)->setTimezone('Europe/Moscow')->format('H:i');
             } catch (\Throwable $e) {
@@ -2604,12 +2712,18 @@ class EventRepository
         while (count($picked) < $limit) {
             $added = false;
             foreach ($byDay as $list) {
-                if (!isset($list[$round])) continue;
+                if (! isset($list[$round])) {
+                    continue;
+                }
                 $picked[] = $list[$round];
                 $added = true;
-                if (count($picked) >= $limit) break;
+                if (count($picked) >= $limit) {
+                    break;
+                }
             }
-            if (!$added) break;
+            if (! $added) {
+                break;
+            }
             $round++;
         }
 
@@ -2626,15 +2740,17 @@ class EventRepository
      * братьев.
      */
     /**
-     * @param int[]|null $eligibleEventIds Если задано — siblings выбираются
-     *   ТОЛЬКО среди этих event_ids. Используется для синхронизации с
-     *   `total_events` count'ом (TASKS.md §14): главная не должна показывать
-     *   в карусели events, которые не учтены в counter'е (другой город,
-     *   blacklisted source, past beyond grace и т.п.).
+     * @param  int[]|null  $eligibleEventIds  Если задано — siblings выбираются
+     *                                        ТОЛЬКО среди этих event_ids. Используется для синхронизации с
+     *                                        `total_events` count'ом (TASKS.md §14): главная не должна показывать
+     *                                        в карусели events, которые не учтены в counter'е (другой город,
+     *                                        blacklisted source, past beyond grace и т.п.).
      */
     private function hydrateSiblings(EloquentCollection $events, ?array $eligibleEventIds = null): void
     {
-        if ($events->isEmpty()) return;
+        if ($events->isEmpty()) {
+            return;
+        }
 
         $MAX_SIBLINGS = 13; // p90 кластер на dev = 14 events, 13 siblings + rep
 
@@ -2644,7 +2760,9 @@ class EventRepository
             ->unique()
             ->values()
             ->all();
-        if (!$repIds) return;
+        if (! $repIds) {
+            return;
+        }
 
         // Все (source, post_external_id) пары, в которых участвуют rep'ы.
         // Один rep может быть в нескольких — cross-post.
@@ -2653,20 +2771,24 @@ class EventRepository
             ->select(['event_id', 'source', 'post_external_id'])
             ->get();
 
-        if ($repPairs->isEmpty()) return;
+        if ($repPairs->isEmpty()) {
+            return;
+        }
 
         // Уникальные пары для batch-fetch всех cluster-events.
         $pairKeys = [];
         $pairs = [];
         foreach ($repPairs as $rp) {
-            $key = $rp->source . '|' . $rp->post_external_id;
-            if (!isset($pairKeys[$key])) {
+            $key = $rp->source.'|'.$rp->post_external_id;
+            if (! isset($pairKeys[$key])) {
                 $pairKeys[$key] = true;
                 $pairs[] = [(string) $rp->source, (string) $rp->post_external_id];
             }
         }
 
-        if (!$pairs) return;
+        if (! $pairs) {
+            return;
+        }
 
         // SELECT всех events во всех этих парах. WHERE (source, post_external_id) IN ((..),(..))
         // через or'd группу условий — Laravel не имеет красивого тапла-IN.
@@ -2745,8 +2867,10 @@ class EventRepository
         // Сгруппировать по cluster key.
         $clusterMap = [];
         foreach ($rows as $r) {
-            $key = $r->source . '|' . $r->post_external_id;
-            if (!isset($clusterMap[$key])) $clusterMap[$key] = [];
+            $key = $r->source.'|'.$r->post_external_id;
+            if (! isset($clusterMap[$key])) {
+                $clusterMap[$key] = [];
+            }
             $clusterMap[$key][] = $r;
         }
 
@@ -2754,8 +2878,10 @@ class EventRepository
         $repToClusterKeys = [];
         foreach ($repPairs as $rp) {
             $rid = (int) $rp->event_id;
-            $key = $rp->source . '|' . $rp->post_external_id;
-            if (!isset($repToClusterKeys[$rid])) $repToClusterKeys[$rid] = [];
+            $key = $rp->source.'|'.$rp->post_external_id;
+            if (! isset($repToClusterKeys[$rid])) {
+                $repToClusterKeys[$rid] = [];
+            }
             $repToClusterKeys[$rid][] = $key;
         }
 
@@ -2768,7 +2894,9 @@ class EventRepository
         $events->each(function (Event $e) use ($repToClusterKeys, $clusterMap, $MAX_SIBLINGS, $cutoffTs, $todayMsk) {
             $rid = (int) $e->id;
             $keys = $repToClusterKeys[$rid] ?? [];
-            if (!$keys) return;
+            if (! $keys) {
+                return;
+            }
 
             // Cross-post: выбираем cluster с максимальным размером.
             $bestKey = null;
@@ -2780,7 +2908,9 @@ class EventRepository
                     $bestKey = $key;
                 }
             }
-            if ($bestKey === null || $bestSize < 2) return;
+            if ($bestKey === null || $bestSize < 2) {
+                return;
+            }
 
             // Своя же серия — это НЕ «другое событие из анонса»: у квеста все сеансы
             // дня лежат в одном посте, и блок показывал сам себя шесть раз. Серия
@@ -2789,18 +2919,24 @@ class EventRepository
 
             $siblings = [];
             foreach ($clusterMap[$bestKey] as $r) {
-                if ((int) $r->id === $rid) continue; // self — представитель
-                if ($ownGroup > 0 && (int) ($r->event_group_id ?? 0) === $ownGroup) continue;
+                if ((int) $r->id === $rid) {
+                    continue;
+                } // self — представитель
+                if ($ownGroup > 0 && (int) ($r->event_group_id ?? 0) === $ownGroup) {
+                    continue;
+                }
 
                 // §13p: отбрасываем уже прошедшие siblings — в карусели
                 // «другие даты этого события» прошлые даты бесполезны.
                 // Семантика: если у rep'а есть future-siblings, кластер
                 // в актуальной ленте; past-даты этого же поста просто не
                 // показываем.
-                if (!$this->siblingIsFuture($r, $cutoffTs, $todayMsk)) continue;
+                if (! $this->siblingIsFuture($r, $cutoffTs, $todayMsk)) {
+                    continue;
+                }
 
                 $startAt = null;
-                if (!empty($r->start_time)) {
+                if (! empty($r->start_time)) {
                     try {
                         $startAt = CarbonImmutable::parse($r->start_time)->toISOString();
                     } catch (\Throwable $ex) {
@@ -2809,12 +2945,12 @@ class EventRepository
                 }
 
                 $siblings[] = [
-                    'id'             => (int) $r->id,
-                    'title'          => (string) ($r->title ?? ''),
-                    'start_at'       => $startAt,
-                    'start_date'     => $r->start_date ? substr((string) $r->start_date, 0, 10) : null,
+                    'id' => (int) $r->id,
+                    'title' => (string) ($r->title ?? ''),
+                    'start_at' => $startAt,
+                    'start_date' => $r->start_date ? substr((string) $r->start_date, 0, 10) : null,
                     'time_precision' => (string) ($r->time_precision ?? 'datetime'),
-                    'time_text'      => $r->time_text !== null ? (string) $r->time_text : null,
+                    'time_text' => $r->time_text !== null ? (string) $r->time_text : null,
                 ];
             }
 
@@ -2822,6 +2958,7 @@ class EventRepository
             usort($siblings, function ($a, $b) {
                 $aKey = (string) ($a['start_at'] ?? $a['start_date'] ?? '');
                 $bKey = (string) ($b['start_at'] ?? $b['start_date'] ?? '');
+
                 return strcmp($aKey, $bKey);
             });
 
@@ -2829,7 +2966,7 @@ class EventRepository
                 $siblings = array_slice($siblings, 0, $MAX_SIBLINGS);
             }
 
-            if (!empty($siblings)) {
+            if (! empty($siblings)) {
                 $e->setAttribute('siblings', $siblings);
             }
         });
@@ -2858,17 +2995,19 @@ class EventRepository
      */
     private function siblingIsFuture(object $r, \Carbon\CarbonInterface $cutoffTs, string $todayMsk): bool
     {
-        if (!empty($r->start_time)) {
+        if (! empty($r->start_time)) {
             try {
                 return CarbonImmutable::parse($r->start_time)->greaterThanOrEqualTo($cutoffTs);
             } catch (\Throwable $ex) {
                 return true; // невалидный TS — оставим, не выкидываем
             }
         }
-        if (!empty($r->start_date)) {
+        if (! empty($r->start_date)) {
             $d = substr((string) $r->start_date, 0, 10);
+
             return $d >= $todayMsk;
         }
+
         return true; // нет даты — не выкидываем (странный кейс, оставим решать выше)
     }
 }

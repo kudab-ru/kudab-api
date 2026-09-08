@@ -173,6 +173,9 @@ class AdminBroadcastController extends Controller
             ->limit(self::SUGGESTIONS_LIMIT)
             ->get();
 
+        // Обложки одним проходом: карточкам предложений они нужны все сразу.
+        app(\App\Repositories\EventRepository::class)->hydrateImagesFor($candidates);
+
         // Раскладываем по сетям и берём по кругу: иначе сверху окажутся
         // четыре Quest Brothers подряд — сеть держит 17 квестов на неделю и
         // при сортировке по времени занимает весь первый экран.
@@ -209,6 +212,10 @@ class AdminBroadcastController extends Controller
                     'price_status' => $e->price_status,
                     'reasons' => $this->reasons($e, $feedVenueIds),
                     'event_url' => $this->siteUrl().'/events/'.$e->id,
+                    'cover' => (is_array($e->getAttribute('images')) ? ($e->getAttribute('images')[0] ?? null) : null),
+                    'end_time' => optional($e->end_time)?->toIso8601String(),
+                    'price_min' => $e->price_min,
+                    'price_max' => $e->price_max,
                 ];
             })->values(),
         ]);
@@ -255,6 +262,20 @@ class AdminBroadcastController extends Controller
 
         // Снятое или отклонённое оживляем: человек прямо сейчас сказал, что
         // хочет этот пост, и его прошлое решение больше не в силе.
+        // Та же проверка, что при переносе: пост не может уйти после события.
+        // Общий список карточек не привязан ко дню, и перетаскиванием на
+        // дальний день можно было поставить анонс уже прошедшего.
+        $publishAt = $this->toUtc($data['publish_at'] ?? null);
+        if ($publishAt && $event->start_time) {
+            $endsAt = $event->end_time ?: $event->start_time;
+            if (Carbon::parse($endsAt)->lt($publishAt)) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => 'К этому дню событие уже пройдёт — пост будет про прошлое.',
+                ], 422);
+            }
+        }
+
         $item = $existing ?: new TelegramChatBroadcastItem;
         $item->broadcast_id = $broadcast->id;
         $item->event_id = $event->id;
@@ -532,6 +553,40 @@ class AdminBroadcastController extends Controller
         $item->caption_source = null;
         $item->save();
         $this->fillCaption($item, $broadcast, $event);
+    }
+
+    /**
+     * Отправить пост сейчас.
+     *
+     * НЕ публикует напрямую: ставит publish_at на текущий момент, и пост
+     * забирает обычный поллер на ближайшем тике. Именно поэтому такую кнопку
+     * убрали из бота — там она слала пост МИМО очереди и без claim-токена,
+     * то есть очередь о посте не знала и анти-дубли его не видели. Здесь всё
+     * идёт штатным путём, просто без ожидания расписания.
+     */
+    public function publishNow(int $itemId): JsonResponse
+    {
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+
+        if ($item->posted_at !== null) {
+            return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
+        }
+
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = Carbon::now();
+        // Придержку снимаем: она ждала генерации текста, а текст уже есть.
+        $item->planned_at = null;
+        $item->error_message = null;
+        $item->claimed_at = null;
+        $item->claim_token = null;
+        $item->save();
+
+        $broadcast = TelegramChatBroadcast::query()->find($item->broadcast_id);
+        if ($broadcast) {
+            $this->regenerateCaption($item, $broadcast);
+        }
+
+        return response()->json(['ok' => true]);
     }
 
     /** Настройки канала. */
