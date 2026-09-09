@@ -306,8 +306,15 @@ class AdminBroadcastController extends Controller
 
             $occupant = TelegramChatBroadcastItem::query()
                 ->where('broadcast_id', $broadcast->id)
-                ->where('event_id', '<>', $event->id)
-                ->whereIn('status', $this->openStatuses())
+                // event_id <> ? в SQL молча выбрасывает строки с NULL, а это
+                // портреты площадок: занятый ими день выглядел свободным.
+                ->where(function ($q) use ($event) {
+                    $q->whereNull('event_id')->orWhere('event_id', '<>', $event->id);
+                })
+                // Пост со статусом «ошибка» день занимает: в сетке он виден,
+                // и класть поверх него второй — значит показать два поста на
+                // одном дне.
+                ->whereIn('status', [...$this->openStatuses(), TelegramChatBroadcastItem::STATUS_ERROR])
                 ->whereNull('posted_at')
                 ->whereNotNull('publish_at')
                 ->get()
@@ -324,6 +331,9 @@ class AdminBroadcastController extends Controller
             if ($occupant) {
                 $occupant->publish_at = null;
                 $occupant->save();
+                // Текст пересобираем: в шаблонном есть «сегодня»/«завтра»,
+                // и без пересборки пост унёс бы их от прежнего дня.
+                $this->regenerateCaption($occupant, $broadcast);
                 $displacedEvent = $occupant->event_id ? Event::query()->find($occupant->event_id) : null;
                 $displaced = [
                     'id' => $occupant->id,
@@ -592,13 +602,21 @@ class AdminBroadcastController extends Controller
         // Кто уже занимает этот день.
         $occupant = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
-            ->whereIn('status', $this->openStatuses())
+            // Ошибочный пост день занимает — в сетке он виден.
+            ->whereIn('status', [...$this->openStatuses(), TelegramChatBroadcastItem::STATUS_ERROR])
             ->whereNull('posted_at')
             ->whereNotNull('publish_at')
             ->where('id', '<>', $item->id)
             ->get()
             ->first(fn (TelegramChatBroadcastItem $x) => Carbon::parse($x->publish_at)
                 ->setTimezone('Europe/Moscow')->toDateString() === $targetDay);
+
+        if ($occupant && $occupant->is_pinned) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'В этот день закреплён пост — сначала снимите закрепление.',
+            ], 409);
+        }
 
         $from = $item->publish_at;
 

@@ -150,11 +150,6 @@ interface TelegramChatBroadcastItemRepositoryInterface
         array $statuses,
     ): int;
 
-    public function findNextDueForBroadcast(
-        int $broadcastId,
-        DateTimeInterface $now,
-    ): ?TelegramChatBroadcastItem;
-
     /**
      * Активный (в полёте) элемент канала: pending/planned/pending_review/approved/
      * auto_approved. pending/planned уважают planned_at; ревью-статусы готовы сразу.

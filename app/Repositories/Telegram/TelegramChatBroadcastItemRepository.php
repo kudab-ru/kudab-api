@@ -310,28 +310,6 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         return (int) $query->count();
     }
 
-    public function findNextDueForBroadcast(int $broadcastId, Carbon|DateTimeInterface $now): ?TelegramChatBroadcastItem
-    {
-        return TelegramChatBroadcastItem::query()
-            ->where('broadcast_id', $broadcastId)
-            ->whereIn('status', [
-                TelegramChatBroadcastItem::STATUS_PENDING,
-                TelegramChatBroadcastItem::STATUS_PLANNED,
-            ])
-            ->where(function ($q) use ($now) {
-                $q->whereNull('planned_at')
-                    ->orWhere('planned_at', '<=', $now);
-            })
-            // Настоящая дата публикации. NULL = «по расписанию канала», как
-            // было раньше. Не путать с planned_at: та — техническая придержка
-            // на время генерации текста, живёт минуты и снимается сама.
-            ->where(function ($q) use ($now) {
-                $q->whereNull('publish_at')->orWhere('publish_at', '<=', $now);
-            })
-            ->orderByRaw('COALESCE(publish_at, planned_at, created_at) ASC')
-            ->first();
-    }
-
     /**
      * {@inheritdoc}
      */
@@ -355,7 +333,26 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
                     ->orWhereNull('planned_at')
                     ->orWhere('planned_at', '<=', $now);
             })
-            ->orderByRaw('COALESCE(planned_at, created_at) ASC')
+            // Назначенный день. До этого publish_at не читал НИКТО: поллер
+            // брал самый старый открытый пост по created_at, поэтому вся
+            // недельная сетка, перетаскивание и «отправить сейчас» на эфир
+            // не влияли, а вытесненный пост уходил в канал первым — он ведь
+            // старше того, кто его вытеснил.
+            //
+            // Ревью-задачу выпускаем заранее, не дожидаясь дня: иначе превью
+            // пришло бы рецензенту ровно в момент публикации и решать было бы
+            // уже нечего.
+            ->where(function ($q) use ($now) {
+                $q->whereNull('publish_at')
+                    ->orWhere('publish_at', '<=', $now)
+                    ->orWhere('status', TelegramChatBroadcastItem::STATUS_PENDING_REVIEW);
+            })
+            // Сначала назначенные на день, и только потом — те, кому дня не
+            // досталось. Одного COALESCE мало: у поста без дня подставляется
+            // его created_at, а он старше, поэтому вытесненный пост обгонял
+            // бы того, кто занял его день, — ровно наоборот обещанию «ждёт
+            // свободного дня».
+            ->orderByRaw('(publish_at IS NULL) ASC, COALESCE(publish_at, planned_at, created_at) ASC')
             ->first();
     }
 
