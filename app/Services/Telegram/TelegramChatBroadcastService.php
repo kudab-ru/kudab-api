@@ -543,7 +543,11 @@ class TelegramChatBroadcastService
                 }
 
                 $this->ensureEventCaption($item, $broadcast);
-                $eventPhotos = $this->eventPhotos((int) $item->event_id);
+                // Ручной выбор сильнее автоподбора. NULL — «как раньше»,
+                // пустой массив — осознанное «без картинок».
+                $eventPhotos = is_array($item->photo_urls)
+                    ? array_values(array_filter($item->photo_urls, 'is_string'))
+                    : $this->eventPhotos((int) $item->event_id);
 
                 $base += [
                     'kind' => 'event',
@@ -1151,7 +1155,14 @@ class TelegramChatBroadcastService
      *
      * @return list<string>
      */
-    public function eventPhotos(int $eventId): array
+    /**
+     * Картинки события для поста.
+     *
+     * $limit = 3 — столько уходит в канал по умолчанию. Админке нужен полный
+     * список кандидатов, чтобы человек мог не только выбросить дубль, но и
+     * поставить вместо него четвёртую картинку.
+     */
+    public function eventPhotos(int $eventId, int $limit = 3): array
     {
         try {
             $event = $this->eventRepository->findWithDetails($eventId);
@@ -1170,7 +1181,7 @@ class TelegramChatBroadcastService
             if ($url !== '' && ! in_array($url, $out, true)) {
                 $out[] = $url;
             }
-            if (count($out) === 3) {
+            if (count($out) === $limit) {
                 break;
             }
         }

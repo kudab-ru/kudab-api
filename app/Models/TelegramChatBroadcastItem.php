@@ -29,6 +29,7 @@ class TelegramChatBroadcastItem extends Model
         'venue_id',
         'caption',
         'photo_url',
+        'photo_urls',
         'status',
         'planned_at',
         'publish_at',
@@ -53,6 +54,8 @@ class TelegramChatBroadcastItem extends Model
         'reviewed_at' => 'datetime',
         'claimed_at' => 'datetime',
         'is_pinned' => 'bool',
+        // NULL = собрать автоматически; массив = ровно эти картинки.
+        'photo_urls' => 'array',
     ];
 
     public const STATUS_PENDING = 'pending'; // создано, но ещё не запланировано

@@ -40,6 +40,12 @@ class AdminBroadcastController extends Controller
     /** Сколько предложений отдавать в пул за раз. */
     private const SUGGESTIONS_LIMIT = 40;
 
+    /** Сколько картинок уходит в пост. Столько же берёт автоподбор. */
+    private const PHOTO_LIMIT = 3;
+
+    /** Сколько картинок показываем на выбор — из них человек собирает пост. */
+    private const PHOTO_CANDIDATES = 10;
+
     public function __construct(
         private readonly TelegramChatBroadcastService $broadcasts,
         private readonly EventCaptionBuilder $captions,
@@ -356,6 +362,10 @@ class AdminBroadcastController extends Controller
             'caption' => ['sometimes', 'nullable', 'string', 'max:4096'],
             'publish_at' => ['sometimes', 'nullable', 'date'],
             'is_pinned' => ['sometimes', 'boolean'],
+            // null = вернуть автоподбор; массив = ровно эти картинки
+            // (пустой массив — осознанное «без картинок»).
+            'photo_urls' => ['sometimes', 'nullable', 'array', 'max:10'],
+            'photo_urls.*' => ['string', 'max:1000'],
         ]);
 
         $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
@@ -382,6 +392,40 @@ class AdminBroadcastController extends Controller
                 $item->caption = $caption;
                 // С этой минуты пересборка ленты текст не трогает.
                 $item->caption_source = TelegramChatBroadcastItem::CAPTION_MANUAL;
+            }
+        }
+
+        if ($request->has('photo_urls')) {
+            $chosen = $data['photo_urls'] ?? null;
+
+            if ($chosen === null) {
+                $item->photo_urls = null;
+            } else {
+                // Берём ТОЛЬКО картинки самого события. Иначе через ручку
+                // можно было бы отправить в канал любую чужую ссылку, а
+                // ошибка в адресе всплыла бы уже при публикации.
+                $available = $item->event_id
+                    ? $this->broadcasts->eventPhotos((int) $item->event_id, self::PHOTO_CANDIDATES)
+                    : [];
+
+                $clean = [];
+                foreach ($chosen as $url) {
+                    $url = trim((string) $url);
+                    if ($url !== '' && in_array($url, $available, true) && ! in_array($url, $clean, true)) {
+                        $clean[] = $url;
+                    }
+                }
+
+                if (count($clean) !== count($chosen)) {
+                    return response()->json([
+                        'ok' => false,
+                        'error' => 'Среди выбранных картинок есть чужие или повторные — обновите страницу.',
+                    ], 422);
+                }
+
+                // Телеграм принимает в альбом не больше десяти, но постом
+                // уходит три: больше — стена картинок вместо анонса.
+                $item->photo_urls = array_slice($clean, 0, self::PHOTO_LIMIT);
             }
         }
 
@@ -935,6 +979,21 @@ class AdminBroadcastController extends Controller
     // ------------------------------------------------------------------
 
     /** @return list<string> */
+    /**
+     * Ровно те картинки и в том порядке, что уйдут в канал.
+     *
+     * Повторяет выбор из TelegramChatBroadcastService: ручной состав сильнее
+     * автоподбора, NULL — «собрать автоматически».
+     */
+    private function effectivePhotos(TelegramChatBroadcastItem $i): array
+    {
+        if (is_array($i->photo_urls)) {
+            return array_values(array_filter($i->photo_urls, 'is_string'));
+        }
+
+        return $i->event_id ? $this->broadcasts->eventPhotos((int) $i->event_id) : [];
+    }
+
     private function openStatuses(): array
     {
         return [
@@ -1118,7 +1177,14 @@ class AdminBroadcastController extends Controller
             // у портрета площадки картинка лежит на самой записи.
             'photos' => $i->kind === TelegramChatBroadcastItem::KIND_VENUE
                 ? array_values(array_filter([$i->photo_url]))
-                : ($i->event_id ? $this->broadcasts->eventPhotos((int) $i->event_id) : []),
+                : $this->effectivePhotos($i),
+            // Всё, из чего можно собрать альбом. Портрет площадки не
+            // собирают руками: там одна картинка, и она на самой записи.
+            'photo_candidates' => $i->kind === TelegramChatBroadcastItem::KIND_VENUE || ! $i->event_id
+                ? []
+                : $this->broadcasts->eventPhotos((int) $i->event_id, self::PHOTO_CANDIDATES),
+            // Состав выбран руками — пересборка ленты его не тронет.
+            'photos_manual' => is_array($i->photo_urls),
         ];
     }
 
