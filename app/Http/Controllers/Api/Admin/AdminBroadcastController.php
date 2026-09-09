@@ -1038,7 +1038,9 @@ class AdminBroadcastController extends Controller
         if ($b->chat?->telegram_chat_id && ! BroadcastSafety::postingAllowed((int) $b->chat->telegram_chat_id)) {
             $out[] = [
                 'level' => 'warning',
-                'text' => 'Это не прод: отправка в боевой канал со стенда запрещена. Посты будут копиться в ленте, но никуда не уйдут.',
+                'text' => 'Это не прод: стенд не публикует в этот чат — посты будут копиться в ленте. '
+                    .'Чтобы разрешить для проверки, добавьте '.$b->chat->telegram_chat_id.' в '
+                    .BroadcastSafety::ALLOW_KEY.' и перезапустите kudab-api.',
             ];
         }
 
