@@ -11,6 +11,7 @@ use App\Models\Event;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
+use App\Repositories\EventRepository;
 use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Support\BroadcastSafety;
@@ -53,6 +54,8 @@ class AdminBroadcastController extends Controller
         // и заводит строку рассылки, а сервис таких методов не имеет.
         private readonly TelegramChatRepositoryInterface $chats,
         private readonly TelegramChatBroadcastRepositoryInterface $chatBroadcasts,
+        // Только ради загрузки картинок всей ленты одним запросом.
+        private readonly EventRepository $events,
     ) {}
 
     /** Каналы со сводкой: что в ленте, когда последний пост, молчит ли. */
@@ -101,8 +104,14 @@ class AdminBroadcastController extends Controller
         $events = Event::query()
             ->with('venue:id,name')
             ->whereIn('id', $items->pluck('event_id')->filter()->all())
-            ->get()
-            ->keyBy('id');
+            ->get();
+
+        // Картинки — одним запросом на всю ленту. Без этого itemPayload звал
+        // findWithDetails на каждый пост, и дважды: под фактический набор и
+        // под список кандидатов. На неделе это два десятка запросов вместо
+        // одного.
+        $this->events->hydrateImagesFor($events);
+        $events = $events->keyBy('id');
 
         return response()->json([
             'data' => [
@@ -254,115 +263,126 @@ class AdminBroadcastController extends Controller
             return response()->json(['ok' => false, 'error' => 'Событие не найдено.'], 404);
         }
 
-        // На (broadcast_id, event_id) стоит UNIQUE, поэтому вторую запись под
-        // то же событие создать нельзя. А записи копятся: у канала Воронежа
-        // 69 опубликованных, 22 отклонённых и 5 снятых. Раньше любая из них
-        // давала 409 — при том что пул предложений снятые и отклонённые
-        // показывает. Человек жал «Поставить» и получал отказ на ровном месте.
-        $existing = TelegramChatBroadcastItem::query()
-            ->where('broadcast_id', $broadcast->id)
-            ->where('event_id', $event->id)
-            ->first();
+        // Всё, что читает и меняет ленту, — под одной блокировкой. Между
+        // поиском занявшего день и записью нового поста вторая вкладка
+        // успевала вклиниться: обе не находили занявшего, обе писали свой
+        // день, и на дне оказывалось два поста.
+        return DB::transaction(function () use ($broadcast, $event, $data) {
+            TelegramChatBroadcast::query()
+                ->whereKey($broadcast->id)
+                ->lockForUpdate()
+                ->first();
 
-        if ($existing && $existing->posted_at !== null) {
-            return response()->json([
-                'ok' => false,
-                'error' => 'Это событие уже публиковалось в канале.',
-            ], 409);
-        }
-
-        if ($existing && in_array($existing->status, $this->openStatuses(), true)) {
-            return response()->json([
-                'ok' => false,
-                'error' => 'Это событие уже стоит в ленте канала.',
-            ], 409);
-        }
-
-        // Снятое или отклонённое оживляем: человек прямо сейчас сказал, что
-        // хочет этот пост, и его прошлое решение больше не в силе.
-        // Та же проверка, что при переносе: пост не может уйти после события.
-        // Общий список карточек не привязан ко дню, и перетаскиванием на
-        // дальний день можно было поставить анонс уже прошедшего.
-        $publishAt = $this->toUtc($data['publish_at'] ?? null);
-        if ($publishAt && $event->start_time) {
-            $endsAt = $event->end_time ?: $event->start_time;
-            if (Carbon::parse($endsAt)->lt($publishAt)) {
-                return response()->json([
-                    'ok' => false,
-                    'error' => 'К этому дню событие уже пройдёт — пост будет про прошлое.',
-                ], 422);
-            }
-        }
-
-        // Занятый день уступает место. Раньше сюда нельзя было поставить
-        // ничего: неделя собирается на все 7 дней, свободных слотов не
-        // остаётся, и любое перетаскивание карточки упиралось в отказ — со
-        // стороны это выглядело так, будто перетаскивание сломалось.
-        // Прежний пост не удаляем, а возвращаем в общую очередь: он остаётся
-        // в ленте без дня и его можно поставить обратно одним движением.
-        $displaced = null;
-        if ($publishAt !== null) {
-            $targetDay = $publishAt->copy()->setTimezone('Europe/Moscow')->toDateString();
-
-            $occupant = TelegramChatBroadcastItem::query()
+            // На (broadcast_id, event_id) стоит UNIQUE, поэтому вторую запись под
+            // то же событие создать нельзя. А записи копятся: у канала Воронежа
+            // 69 опубликованных, 22 отклонённых и 5 снятых. Раньше любая из них
+            // давала 409 — при том что пул предложений снятые и отклонённые
+            // показывает. Человек жал «Поставить» и получал отказ на ровном месте.
+            $existing = TelegramChatBroadcastItem::query()
                 ->where('broadcast_id', $broadcast->id)
-                // event_id <> ? в SQL молча выбрасывает строки с NULL, а это
-                // портреты площадок: занятый ими день выглядел свободным.
-                ->where(function ($q) use ($event) {
-                    $q->whereNull('event_id')->orWhere('event_id', '<>', $event->id);
-                })
-                // Пост со статусом «ошибка» день занимает: в сетке он виден,
-                // и класть поверх него второй — значит показать два поста на
-                // одном дне.
-                ->whereIn('status', [...$this->openStatuses(), TelegramChatBroadcastItem::STATUS_ERROR])
-                ->whereNull('posted_at')
-                ->whereNotNull('publish_at')
-                ->get()
-                ->first(fn (TelegramChatBroadcastItem $x) => Carbon::parse($x->publish_at)
-                    ->setTimezone('Europe/Moscow')->toDateString() === $targetDay);
+                ->where('event_id', $event->id)
+                ->first();
 
-            if ($occupant && $occupant->is_pinned) {
+            if ($existing && $existing->posted_at !== null) {
                 return response()->json([
                     'ok' => false,
-                    'error' => 'В этот день закреплён пост — сначала снимите закрепление.',
+                    'error' => 'Это событие уже публиковалось в канале.',
                 ], 409);
             }
 
-            if ($occupant) {
-                $occupant->publish_at = null;
-                $occupant->save();
-                // Текст пересобираем: в шаблонном есть «сегодня»/«завтра»,
-                // и без пересборки пост унёс бы их от прежнего дня.
-                $this->regenerateCaption($occupant, $broadcast);
-                $displacedEvent = $occupant->event_id ? Event::query()->find($occupant->event_id) : null;
-                $displaced = [
-                    'id' => $occupant->id,
-                    'title' => $displacedEvent?->title,
-                ];
+            if ($existing && in_array($existing->status, $this->openStatuses(), true)) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => 'Это событие уже стоит в ленте канала.',
+                ], 409);
             }
-        }
 
-        $item = $existing ?: new TelegramChatBroadcastItem;
-        $item->broadcast_id = $broadcast->id;
-        $item->event_id = $event->id;
-        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
-        $item->error_message = null;
-        $item->claimed_at = null;
-        $item->claim_token = null;
-        $item->publish_at = $publishAt;
-        // Текст пересобираем, если его не писали руками.
-        if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
-            $item->caption = null;
-            $item->caption_source = null;
-        }
-        $item->save();
+            // Снятое или отклонённое оживляем: человек прямо сейчас сказал, что
+            // хочет этот пост, и его прошлое решение больше не в силе.
+            // Та же проверка, что при переносе: пост не может уйти после события.
+            // Общий список карточек не привязан ко дню, и перетаскиванием на
+            // дальний день можно было поставить анонс уже прошедшего.
+            $publishAt = $this->toUtc($data['publish_at'] ?? null);
+            if ($publishAt && $event->start_time) {
+                $endsAt = $event->end_time ?: $event->start_time;
+                if (Carbon::parse($endsAt)->lt($publishAt)) {
+                    return response()->json([
+                        'ok' => false,
+                        'error' => 'К этому дню событие уже пройдёт — пост будет про прошлое.',
+                    ], 422);
+                }
+            }
 
-        $this->fillCaption($item, $broadcast, $event);
+            // Занятый день уступает место. Раньше сюда нельзя было поставить
+            // ничего: неделя собирается на все 7 дней, свободных слотов не
+            // остаётся, и любое перетаскивание карточки упиралось в отказ — со
+            // стороны это выглядело так, будто перетаскивание сломалось.
+            // Прежний пост не удаляем, а возвращаем в общую очередь: он остаётся
+            // в ленте без дня и его можно поставить обратно одним движением.
+            $displaced = null;
+            if ($publishAt !== null) {
+                $targetDay = $publishAt->copy()->setTimezone('Europe/Moscow')->toDateString();
 
-        return response()->json([
-            'data' => $this->itemPayload($item->fresh(), $event),
-            'meta' => ['displaced' => $displaced],
-        ]);
+                $occupant = TelegramChatBroadcastItem::query()
+                    ->where('broadcast_id', $broadcast->id)
+                    // event_id <> ? в SQL молча выбрасывает строки с NULL, а это
+                    // портреты площадок: занятый ими день выглядел свободным.
+                    ->where(function ($q) use ($event) {
+                        $q->whereNull('event_id')->orWhere('event_id', '<>', $event->id);
+                    })
+                    // Пост со статусом «ошибка» день занимает: в сетке он виден,
+                    // и класть поверх него второй — значит показать два поста на
+                    // одном дне.
+                    ->whereIn('status', [...$this->openStatuses(), TelegramChatBroadcastItem::STATUS_ERROR])
+                    ->whereNull('posted_at')
+                    ->whereNotNull('publish_at')
+                    ->get()
+                    ->first(fn (TelegramChatBroadcastItem $x) => Carbon::parse($x->publish_at)
+                        ->setTimezone('Europe/Moscow')->toDateString() === $targetDay);
+
+                if ($occupant && $occupant->is_pinned) {
+                    return response()->json([
+                        'ok' => false,
+                        'error' => 'В этот день закреплён пост — сначала снимите закрепление.',
+                    ], 409);
+                }
+
+                if ($occupant) {
+                    $occupant->publish_at = null;
+                    $occupant->save();
+                    // Текст пересобираем: в шаблонном есть «сегодня»/«завтра»,
+                    // и без пересборки пост унёс бы их от прежнего дня.
+                    $this->regenerateCaption($occupant, $broadcast);
+                    $displacedEvent = $occupant->event_id ? Event::query()->find($occupant->event_id) : null;
+                    $displaced = [
+                        'id' => $occupant->id,
+                        'title' => $displacedEvent?->title,
+                    ];
+                }
+            }
+
+            $item = $existing ?: new TelegramChatBroadcastItem;
+            $item->broadcast_id = $broadcast->id;
+            $item->event_id = $event->id;
+            $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+            $item->error_message = null;
+            $item->claimed_at = null;
+            $item->claim_token = null;
+            $item->publish_at = $publishAt;
+            // Текст пересобираем, если его не писали руками.
+            if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
+                $item->caption = null;
+                $item->caption_source = null;
+            }
+            $item->save();
+
+            $this->fillCaption($item, $broadcast, $event);
+
+            return response()->json([
+                'data' => $this->itemPayload($item->fresh(), $event),
+                'meta' => ['displaced' => $displaced],
+            ]);
+        });
     }
 
     /** Правка: текст, дата публикации, закрепление. */
@@ -1017,13 +1037,35 @@ class AdminBroadcastController extends Controller
      * Повторяет выбор из TelegramChatBroadcastService: ручной состав сильнее
      * автоподбора, NULL — «собрать автоматически».
      */
-    private function effectivePhotos(TelegramChatBroadcastItem $i): array
+    private function effectivePhotos(TelegramChatBroadcastItem $i, ?Event $event = null): array
     {
         if (is_array($i->photo_urls)) {
             return array_values(array_filter($i->photo_urls, 'is_string'));
         }
 
-        return $i->event_id ? $this->broadcasts->eventPhotos((int) $i->event_id) : [];
+        return $this->candidatePhotos($i, $event, self::PHOTO_LIMIT);
+    }
+
+    /**
+     * Кандидаты в альбом. Если событие уже загружено вместе с картинками
+     * (лента делает это одним запросом) — берём из него, иначе идём за ним
+     * сами. Отбор в обоих случаях один и тот же, общий с задачей боту.
+     */
+    private function candidatePhotos(
+        TelegramChatBroadcastItem $i,
+        ?Event $event = null,
+        int $limit = self::PHOTO_CANDIDATES,
+    ): array {
+        if (! $i->event_id) {
+            return [];
+        }
+
+        $images = $event ? ($event->getAttributes()['images'] ?? null) : null;
+        if (is_array($images)) {
+            return TelegramChatBroadcastService::pickPhotos($images, $limit);
+        }
+
+        return $this->broadcasts->eventPhotos((int) $i->event_id, $limit);
     }
 
     private function openStatuses(): array
@@ -1209,12 +1251,12 @@ class AdminBroadcastController extends Controller
             // у портрета площадки картинка лежит на самой записи.
             'photos' => $i->kind === TelegramChatBroadcastItem::KIND_VENUE
                 ? array_values(array_filter([$i->photo_url]))
-                : $this->effectivePhotos($i),
+                : $this->effectivePhotos($i, $event),
             // Всё, из чего можно собрать альбом. Портрет площадки не
             // собирают руками: там одна картинка, и она на самой записи.
             'photo_candidates' => $i->kind === TelegramChatBroadcastItem::KIND_VENUE || ! $i->event_id
                 ? []
-                : $this->broadcasts->eventPhotos((int) $i->event_id, self::PHOTO_CANDIDATES),
+                : $this->candidatePhotos($i, $event),
             // Состав выбран руками — пересборка ленты его не тронет.
             'photos_manual' => is_array($i->photo_urls),
         ];

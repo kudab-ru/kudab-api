@@ -1170,7 +1170,19 @@ class TelegramChatBroadcastService
             return [];
         }
 
-        $images = $event->getAttribute('images');
+        return self::pickPhotos($event->getAttribute('images'), $limit);
+    }
+
+    /**
+     * Отбор картинок из уже загруженного списка события.
+     *
+     * Вынесено отдельно, чтобы админка могла загрузить картинки всей ленты
+     * ОДНИМ запросом (hydrateImagesFor) и всё равно получить ровно тот набор,
+     * который уйдёт в канал. Своя копия этой логики рано или поздно
+     * разъехалась бы с оригиналом, и превью перестало бы совпадать с постом.
+     */
+    public static function pickPhotos(mixed $images, int $limit = 3): array
+    {
         if (! is_array($images)) {
             return [];
         }
