@@ -518,6 +518,20 @@ class AdminBroadcastController extends Controller
     {
         $broadcast = TelegramChatBroadcast::query()->findOrFail($broadcastId);
 
+        // Сколько из снимаемого — те, что ждали свободного дня. Их человек
+        // положил туда руками (вытеснив предложением), и молча выметать их
+        // нельзя: в интерфейсе написано «дождитесь, пока день освободится».
+        $waitingDropped = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereIn('status', $this->openStatuses())
+            ->where('is_pinned', false)
+            ->whereNull('posted_at')
+            ->whereNull('publish_at')
+            ->where(function ($q) {
+                $q->whereNull('kind')->orWhere('kind', '<>', TelegramChatBroadcastItem::KIND_VENUE);
+            })
+            ->count();
+
         $dropped = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
             ->whereIn('status', $this->openStatuses())
@@ -546,7 +560,7 @@ class AdminBroadcastController extends Controller
             Carbon::now(),
         );
 
-        return response()->json(['data' => ['dropped' => $dropped] + $filled]);
+        return response()->json(['data' => ['dropped' => $dropped, 'waiting_dropped' => $waitingDropped] + $filled]);
     }
 
     /**
