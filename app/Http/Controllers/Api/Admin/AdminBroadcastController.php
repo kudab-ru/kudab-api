@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api\Admin;
 
+use App\Contracts\Telegram\TelegramChatBroadcastRepositoryInterface;
+use App\Contracts\Telegram\TelegramChatRepositoryInterface;
 use App\Http\Controllers\Controller;
 use App\Models\Event;
+use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Services\Telegram\EventCaptionBuilder;
@@ -15,6 +18,7 @@ use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -39,6 +43,10 @@ class AdminBroadcastController extends Controller
     public function __construct(
         private readonly TelegramChatBroadcastService $broadcasts,
         private readonly EventCaptionBuilder $captions,
+        // Репозитории — только для привязки канала: она пишет в telegram.chats
+        // и заводит строку рассылки, а сервис таких методов не имеет.
+        private readonly TelegramChatRepositoryInterface $chats,
+        private readonly TelegramChatBroadcastRepositoryInterface $chatBroadcasts,
     ) {}
 
     /** Каналы со сводкой: что в ленте, когда последний пост, молчит ли. */
@@ -765,6 +773,136 @@ class AdminBroadcastController extends Controller
     }
 
     /** Настройки канала. */
+
+    /**
+     * Проверить чат в Telegram и привязать его как канал рассылки.
+     *
+     * Зачем. Канал попадал в базу единственным путём — событием
+     * my_chat_member, то есть в момент, когда бота добавляют в чат или
+     * повышают до администратора. Событие приходит ровно один раз: для
+     * канала, где бот админ давно, привязку взять было неоткуда, и старый
+     * канал нельзя было подключить вообще никак, кроме правки базы руками.
+     *
+     * Почему нельзя «показать все каналы, где бот админ». В Bot API нет
+     * такого метода: каждый метод про чаты требует идентификатор, который
+     * уже знаешь. Поэтому проверка адресная — по @username или id.
+     *
+     * Почему ходим в бот, а не в Telegram напрямую: токен есть только у бота.
+     */
+    public function linkChannel(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'chat' => ['required', 'string', 'max:128'],
+        ]);
+
+        $base = rtrim((string) config('services.bot.url'), '/');
+        $token = (string) config('services.bot.shared_token');
+        if ($base === '' || $token === '') {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Не настроен адрес бота или общий токен (KUDAB_BOT_URL / BOT_SHARED_TOKEN).',
+            ], 503);
+        }
+
+        try {
+            $res = Http::withToken($token)
+                ->timeout((int) config('services.bot.timeout', 10))
+                ->acceptJson()
+                ->post($base.'/internal/check-chat', ['chat' => $data['chat']]);
+        } catch (\Throwable $e) {
+            Log::warning('admin.broadcast.link.bot_unreachable', ['error' => $e->getMessage()]);
+
+            return response()->json([
+                'ok' => false,
+                'error' => 'Бот не отвечает — проверить чат не получилось.',
+            ], 502);
+        }
+
+        if ($res->status() === 422) {
+            return response()->json([
+                'ok' => false,
+                'error' => (string) ($res->json('detail') ?: 'Не разобрал идентификатор чата.'),
+            ], 422);
+        }
+
+        if (! $res->successful()) {
+            Log::warning('admin.broadcast.link.bot_error', ['status' => $res->status(), 'body' => $res->body()]);
+
+            return response()->json([
+                'ok' => false,
+                'error' => 'Бот ответил ошибкой '.$res->status().'.',
+            ], 502);
+        }
+
+        $body = (array) $res->json();
+
+        if (! ($body['found'] ?? false)) {
+            return response()->json([
+                'ok' => false,
+                'error' => (string) ($body['message'] ?? 'Telegram не знает такого чата.'),
+            ], 422);
+        }
+
+        $chatInfo = (array) ($body['chat'] ?? []);
+        $botInfo = (array) ($body['bot'] ?? []);
+
+        if (! ($body['postable_type'] ?? false)) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Это не канал и не группа — рассылать туда нечего.',
+            ], 422);
+        }
+
+        // Единственный настоящий признак связи. get_chat на стороне бота
+        // отвечает успехом для ЛЮБОГО публичного канала — по нему можно было
+        // бы «привязать» чужой чат, куда бота никто не звал.
+        if (! ($botInfo['is_admin'] ?? false)) {
+            $botName = $botInfo['username'] ?? null;
+
+            return response()->json([
+                'ok' => false,
+                'error' => $botName
+                    ? 'Бот @'.$botName.' не администратор в этом чате. Добавьте его администратором и повторите.'
+                    : 'Бот не администратор в этом чате.',
+            ], 422);
+        }
+
+        if (($chatInfo['type'] ?? null) === 'channel' && ($botInfo['can_post'] ?? null) === false) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Бот администратор, но без права публиковать. Включите ему «Публикация сообщений».',
+            ], 422);
+        }
+
+        $telegramChatId = (int) ($chatInfo['id'] ?? 0);
+        if ($telegramChatId === 0) {
+            return response()->json(['ok' => false, 'error' => 'Telegram не вернул id чата.'], 502);
+        }
+
+        // Владельца не указываем: привязку делает веб-админ, за которым нет
+        // телеграм-пользователя. У существующей записи владельца сохраняем.
+        $chat = TelegramChat::query()->where('telegram_chat_id', $telegramChatId)->first();
+        $existed = $chat !== null;
+
+        $chat = $this->chats->linkChat(
+            $chat?->telegram_user_id !== null ? (int) $chat->telegram_user_id : null,
+            $telegramChatId,
+            (string) ($chatInfo['type'] ?? 'channel'),
+            $chatInfo['title'] ?? null,
+            $chatInfo['username'] ?? null,
+        );
+
+        $broadcast = $this->chatBroadcasts->getOrCreateByChatId($chat->id);
+
+        return response()->json([
+            'data' => $this->channelPayload($broadcast->fresh()->load('chat')),
+            'meta' => [
+                'existed' => $existed,
+                'bot_username' => $botInfo['username'] ?? null,
+            ],
+        ]);
+    }
+
     public function updateChannel(Request $request, int $broadcastId): JsonResponse
     {
         $data = $request->validate([
@@ -811,13 +949,18 @@ class AdminBroadcastController extends Controller
     /** @return array<string, mixed> */
     private function channelPayload(TelegramChatBroadcast $b): array
     {
-        $openEvents = TelegramChatBroadcastItem::query()
+        // Считаем ОТДЕЛЬНО занятые дни и записи без дня. Раньше был один
+        // счётчик на всё, и «в ленте» показывало 8 из 7: посты без даты
+        // (вытесненные или не получившие день) попадали в тот же итог.
+        $openEventsQuery = fn () => TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $b->id)
             ->whereIn('status', $this->openStatuses())
             ->where(function ($q) {
                 $q->whereNull('kind')->orWhere('kind', '<>', TelegramChatBroadcastItem::KIND_VENUE);
-            })
-            ->count();
+            });
+
+        $openEvents = $openEventsQuery()->whereNotNull('publish_at')->count();
+        $waitingEvents = $openEventsQuery()->whereNull('publish_at')->count();
 
         $lastPosted = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $b->id)
@@ -849,6 +992,7 @@ class AdminBroadcastController extends Controller
             'template_code' => $b->template_code,
             'feed_limit' => $b->feed_limit,
             'in_feed' => $openEvents,
+            'waiting' => $waitingEvents,
             'last_posted_at' => $lastPosted ? Carbon::parse($lastPosted)->toIso8601String() : null,
             'silent_days' => $lastPosted ? (int) Carbon::parse($lastPosted)->diffInDays(now()) : null,
             'posted_total' => $postedTotal,

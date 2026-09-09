@@ -38,6 +38,13 @@ return [
     'bot' => [
         'shared_token' => env('BOT_SHARED_TOKEN'),
 
+        // Адрес бота внутри сети compose. До сих пор связь была
+        // односторонней — бот ходил в API, обратно никто не звал, поэтому
+        // переменной не существовало. Привязка канала требует спросить
+        // Telegram, а токен есть только у бота.
+        'url' => env('KUDAB_BOT_URL', 'http://kudab-bot:8000'),
+        'timeout' => (int) env('KUDAB_BOT_TIMEOUT', 10),
+
         // Telegram-id супер-админа (= ADMIN_CHAT_ID бота). При первой проверке прав
         // BotRoleService само-провижит его в БД, если записи нет (bootstrap из env).
         'superadmin_telegram_id' => (int) env('BOT_SUPERADMIN_TELEGRAM_ID', 0),
