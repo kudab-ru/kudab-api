@@ -55,6 +55,26 @@ class TelegramChatBroadcastService
     private const CROSS_TIME_WINDOW_DAYS = 14;
 
     /**
+     * Минимальный зазор между двумя постами канала, в минутах.
+     *
+     * Считается по факту последней отправки ЛЮБОГО вида — событие, портрет
+     * площадки, «отправить сейчас». Обоснование и замеры — docs/broadcast-admin/CADENCE.md:
+     * портрет уходил через минуту после дневного события, а минимальный
+     * интервал в истории канала — 78 секунд между двумя событийными постами.
+     */
+    private const MIN_GAP_MINUTES = 90;
+
+    /**
+     * Насколько просроченный пост ещё отправляем, в часах.
+     *
+     * Без отсечки зазор превращает пачку в капель: пять просроченных записей
+     * растянулись бы на шесть часов, и от вечернего слота последний пост уехал
+     * бы в час ночи. Пост, чей день прошёл давно, снимается: устаревший анонс
+     * хуже, чем его отсутствие.
+     */
+    private const OVERDUE_CUTOFF_HOURS = 2;
+
+    /**
      * Пояс, в котором задано расписание канала.
      *
      * Час в period («daily_10») — это 10:00 по Москве: так он подписан в
@@ -489,9 +509,52 @@ class TelegramChatBroadcastService
                 $tasks[] = $idleNotice;
             }
 
+            // Зазор между постами. Стоит ЗДЕСЬ, в отборе записи на канал, а не
+            // в гейтах по типу: иначе каждая новая рубрика приносила бы ту же
+            // проблему заново. Портрет площадки гейт расписания не проходит
+            // вовсе, поэтому уходил вплотную за дневным событием.
+            $lastPostedAt = $this->lastPostedAt((int) $broadcast->id);
+            $channelFreeAt = $lastPostedAt?->copy()->addMinutes(self::MIN_GAP_MINUTES);
+
             // Активный (в полёте) элемент канала — pending/planned/pending_review/approved/auto_approved.
             $item = $this->broadcastItemRepository->findActiveForBroadcast($broadcast->id, $now);
             if (! $item) {
+                continue;
+            }
+
+            // Зазор — про посты в канал. Превью на одобрение уходит в ЛС
+            // рецензенту, к ленте отношения не имеет, и придерживать его
+            // нельзя: у одобрения свой дедлайн, после которого пост уходит
+            // как auto_approved.
+            $awaitsReviewPreview = $item->status === TelegramChatBroadcastItem::STATUS_PENDING_REVIEW;
+            if (! $awaitsReviewPreview && $channelFreeAt && $channelFreeAt->gt($now)) {
+                continue;
+            }
+
+            // Просрочка. День поста прошёл давно — отправлять его уже стыдно:
+            // подписчик увидит анонс вчерашнего дня. Снимаем с причиной; за
+            // следующую запись канал возьмётся следующим тиком (поллер читает
+            // одну запись на канал за тик).
+            // Опоздание считаем не от назначенного момента, а от того, когда
+            // канал реально освободился: между зазором (90 мин) и отсечкой
+            // (2 ч) всего полчаса, и без этого зазор сам загонял бы пост под
+            // снятие — задержали мы, а наказана запись.
+            $dueAt = $item->publish_at
+                ? ($channelFreeAt && $channelFreeAt->gt($item->publish_at) ? $channelFreeAt : $item->publish_at)
+                : null;
+
+            if ($dueAt && $dueAt->lt($now->copy()->subHours(self::OVERDUE_CUTOFF_HOURS))) {
+                $this->broadcastItemRepository->markSkipped(
+                    $item,
+                    'день публикации прошёл больше '.self::OVERDUE_CUTOFF_HOURS.' ч назад — пост снят, чтобы не уходить задним числом',
+                );
+                Log::warning('broadcast.poll.skipped_overdue', [
+                    'broadcast_id' => $broadcast->id,
+                    'item_id' => $item->id,
+                    'publish_at' => $item->publish_at->toIso8601String(),
+                    'due_at' => $dueAt->toIso8601String(),
+                ]);
+
                 continue;
             }
 
@@ -1588,6 +1651,32 @@ class TelegramChatBroadcastService
                 (string) $broadcast->period,
             ),
         ];
+    }
+
+    /**
+     * Когда каналу снова можно постить, если зазор ещё не вышел.
+     *
+     * null — можно прямо сейчас. Считаем по max(posted_at) записей канала, а
+     * НЕ по last_run_at: его двигает только событийная отправка, портрет
+     * площадки намеренно не двигает, и расхождение на живых данных доходило
+     * до четырёх часов.
+     */
+    public function nextPostAllowedAt(int $broadcastId, Carbon $now): ?Carbon
+    {
+        $allowedAt = $this->lastPostedAt($broadcastId)?->addMinutes(self::MIN_GAP_MINUTES);
+
+        return $allowedAt && $allowedAt->gt($now) ? $allowedAt : null;
+    }
+
+    /** Когда канал постил в последний раз — любым видом записи. */
+    private function lastPostedAt(int $broadcastId): ?Carbon
+    {
+        $lastPosted = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            ->whereNotNull('posted_at')
+            ->max('posted_at');
+
+        return $lastPosted ? Carbon::parse($lastPosted) : null;
     }
 
     private function isSingleRunDue(

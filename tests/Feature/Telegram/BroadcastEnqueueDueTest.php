@@ -505,7 +505,10 @@ class BroadcastEnqueueDueTest extends TestCase
         $chat = $this->createChannelChat($city->id, -1020, 555777);
         $broadcast = $this->createBroadcast($chat->id, 'daily_10');
         $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
-        $item->publish_at = now()->subDay(); // день прошёл, пост остался
+        // Запись «ждёт дня»: publish_at нет, а текст собран два дня назад, от
+        // planned_at. Именно так и лежат записи, переживающие паузу канала —
+        // просрочкой они не считаются, потому что дня им никто не назначал.
+        $item->planned_at = now()->subDays(2);
         $item->caption = 'СТАРЫЙ ТЕКСТ';
         $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
         $item->save();
@@ -528,7 +531,7 @@ class BroadcastEnqueueDueTest extends TestCase
         $chat = $this->createChannelChat($city->id, -1021, 555888);
         $broadcast = $this->createBroadcast($chat->id, 'daily_10');
         $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
-        $item->publish_at = now()->subDay();
+        $item->planned_at = now()->subDays(2);
         $item->caption = 'МОЙ ТЕКСТ';
         $item->caption_source = TelegramChatBroadcastItem::CAPTION_MANUAL;
         $item->save();
@@ -537,6 +540,117 @@ class BroadcastEnqueueDueTest extends TestCase
 
         $this->assertCount(1, $tasks);
         $this->assertSame('МОЙ ТЕКСТ', $tasks[0]['caption']);
+    }
+
+    /** Зазор между постами: канал молчит, пока не пройдёт положенное время. */
+    public function test_gap_between_posts_holds_the_channel(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $posted = $this->createEvent($city->id, $community->id, 'Утреннее', now()->addDay());
+        $next = $this->createEvent($city->id, $community->id, 'Следующее', now()->addDays(2));
+
+        $chat = $this->createChannelChat($city->id, -1022, 555999);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $this->makePostedItem($broadcast->id, $posted->id, now()->subMinutes(10));
+        $this->makeItem($broadcast->id, $next->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $this->assertCount(0, $this->service()->collectDueSingleRuns(now()), 'зазор ещё не вышел');
+
+        Carbon::setTestNow(now()->addHours(2));
+
+        $this->assertCount(1, $this->service()->collectDueSingleRuns(now()), 'зазор вышел — пост пошёл');
+
+        Carbon::setTestNow();
+    }
+
+    /**
+     * Зазор считается по факту отправки любого вида, а не по last_run_at.
+     *
+     * Портрет площадки last_run_at намеренно не двигает, поэтому по нему
+     * канал выглядел бы молчавшим — и событие ушло бы следом за портретом.
+     */
+    public function test_gap_counts_venue_post_too(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Событие', now()->addDay());
+
+        $chat = $this->createChannelChat($city->id, -1023, 556000);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10'); // last_run_at пуст
+        $this->makePostedVenueItem($broadcast->id, now()->subMinutes(5));
+        $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $this->assertCount(0, $this->service()->collectDueSingleRuns(now()));
+    }
+
+    /** Пост, чей день прошёл давно, снимается, а не уходит задним числом. */
+    public function test_overdue_item_is_skipped(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Событие', now()->addDays(3));
+
+        $chat = $this->createChannelChat($city->id, -1024, 556111);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = now()->subHours(3);
+        $item->save();
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(0, $tasks);
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $item->fresh()->status);
+    }
+
+    /**
+     * Опоздание, устроенное зазором, не считается просрочкой.
+     *
+     * Между зазором (90 мин) и отсечкой (2 ч) всего полчаса: если предыдущий
+     * пост канала ушёл с задержкой, следующий освобождался уже за отсечкой и
+     * снимался — задержали мы, а наказана запись.
+     */
+    public function test_gap_delay_does_not_make_item_overdue(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $posted = $this->createEvent($city->id, $community->id, 'Предыдущее', now()->addDay());
+        $event = $this->createEvent($city->id, $community->id, 'Событие', now()->addDays(3));
+
+        $chat = $this->createChannelChat($city->id, -1026, 556333);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        // Канал был занят: предыдущий пост ушёл 95 минут назад, зазор вышел
+        // пять минут назад.
+        $this->makePostedItem($broadcast->id, $posted->id, now()->subMinutes(95));
+
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = now()->subMinutes(150); // по календарю опоздал на 2,5 часа
+        $item->save();
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks, 'пост уходит: канал освободился пять минут назад');
+        $this->assertSame($item->id, $tasks[0]['item_id']);
+        $this->assertNotSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $item->fresh()->status);
+    }
+
+    /** Небольшая задержка просрочкой не считается: пост уходит. */
+    public function test_slightly_late_item_still_goes(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Событие', now()->addDays(3));
+
+        $chat = $this->createChannelChat($city->id, -1025, 556222);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = now()->subMinutes(30);
+        $item->save();
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks);
+        $this->assertSame($item->id, $tasks[0]['item_id']);
     }
 
     public function test_decide_review_approve_sets_approved(): void
@@ -819,6 +933,28 @@ class BroadcastEnqueueDueTest extends TestCase
         $broadcast = $this->createBroadcast($chat->id, 'daily_10');
 
         return $this->makeReviewItem($broadcast->id, $event->id, $reviewerTelegramId, now()->addHours(2));
+    }
+
+    private function makePostedItem(int $broadcastId, int $eventId, Carbon $postedAt): TelegramChatBroadcastItem
+    {
+        $item = $this->makeItem($broadcastId, $eventId, TelegramChatBroadcastItem::STATUS_POSTED);
+        $item->posted_at = $postedAt;
+        $item->save();
+
+        return $item;
+    }
+
+    private function makePostedVenueItem(int $broadcastId, Carbon $postedAt): TelegramChatBroadcastItem
+    {
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $broadcastId;
+        $item->kind = TelegramChatBroadcastItem::KIND_VENUE;
+        $item->status = TelegramChatBroadcastItem::STATUS_POSTED;
+        $item->caption = 'портрет';
+        $item->posted_at = $postedAt;
+        $item->save();
+
+        return $item;
     }
 
     /**

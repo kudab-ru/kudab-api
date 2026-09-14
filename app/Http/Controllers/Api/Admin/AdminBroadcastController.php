@@ -93,6 +93,14 @@ class AdminBroadcastController extends Controller
                     // Ошибочные показываем обязательно: раньше такой пост
                     // просто исчезал с глаз и повторялся в фоне.
                     ->orWhere('status', TelegramChatBroadcastItem::STATUS_ERROR)
+                    // Снятые автоматически — тоже: пост, убранный из ленты за
+                    // просрочку или из-за прошедшего события, обязан оставить
+                    // след. Иначе он исчезает из недельной сетки без причины и
+                    // без способа вернуть.
+                    ->orWhere(function ($w) {
+                        $w->where('status', TelegramChatBroadcastItem::STATUS_SKIPPED)
+                            ->where('updated_at', '>=', now()->subDays(7));
+                    })
                     ->orWhere(function ($w) {
                         $w->where('status', TelegramChatBroadcastItem::STATUS_POSTED)
                             ->where('posted_at', '>=', now()->subDays(7));
@@ -743,7 +751,17 @@ class AdminBroadcastController extends Controller
             ? BroadcastSafety::postingAllowed((int) $broadcast->chat->telegram_chat_id)
             : false;
 
-        return response()->json(['ok' => true, 'data' => ['will_send' => $willSend]]);
+        // И вторая причина подождать: зазор между постами канала. Пост уйдёт,
+        // но не сию минуту — и лучше сказать это здесь, чем оставить человека
+        // смотреть на ленту, где ничего не происходит.
+        $waitUntil = $broadcast
+            ? $this->broadcasts->nextPostAllowedAt((int) $broadcast->id, Carbon::now())
+            : null;
+
+        return response()->json(['ok' => true, 'data' => [
+            'will_send' => $willSend,
+            'wait_minutes' => $waitUntil ? (int) ceil(Carbon::now()->diffInSeconds($waitUntil) / 60) : 0,
+        ]]);
     }
 
     /** Вернуть пост в очередь после ошибки — попробовать ещё раз. */
@@ -759,6 +777,11 @@ class AdminBroadcastController extends Controller
         $item->error_message = null;
         $item->claimed_at = null;
         $item->claim_token = null;
+        // День у ошибочной записи — вчерашний по определению: она ошиблась
+        // тогда, когда должна была уйти. Без этой строки «Повторить» отдавало
+        // бы пост прямиком под отсечку просрочки, то есть кнопка повтора
+        // молча удаляла бы пост.
+        $item->publish_at = Carbon::now();
         $item->save();
 
         return response()->json(['ok' => true]);
@@ -1270,9 +1293,13 @@ class AdminBroadcastController extends Controller
             'is_pinned' => (bool) $i->is_pinned,
             'publish_at' => optional($i->publish_at)?->toIso8601String(),
             'posted_at' => optional($i->posted_at)?->toIso8601String(),
-            'error_message' => $i->status === TelegramChatBroadcastItem::STATUS_ERROR
-                ? $i->error_message
-                : null,
+            // Причина — и для ошибки, и для автоматического снятия: markSkipped
+            // пишет её в то же поле, а человеку нужно понимать, почему поста
+            // больше нет в ленте.
+            'error_message' => in_array($i->status, [
+                TelegramChatBroadcastItem::STATUS_ERROR,
+                TelegramChatBroadcastItem::STATUS_SKIPPED,
+            ], true) ? $i->error_message : null,
             // Ровно те картинки и в том порядке, что уйдут в канал: у события
             // — через тот же eventPhotos, которым собирается задача боту;
             // у портрета площадки картинка лежит на самой записи.
