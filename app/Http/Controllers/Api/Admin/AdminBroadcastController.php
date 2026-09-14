@@ -130,6 +130,14 @@ class AdminBroadcastController extends Controller
             ->whereIn('id', $items->pluck('event_id')->filter()->all())
             ->get();
 
+        // Площадки портретов — одним запросом. Без них интерфейс рисовал
+        // литерал «(портрет площадки)» без названия: title и venue брались
+        // только из события, а у портрета события нет.
+        $venues = \App\Models\Venue::query()
+            ->whereIn('id', $items->pluck('venue_id')->filter()->all())
+            ->get(['id', 'name'])
+            ->keyBy('id');
+
         // Картинки — одним запросом на всю ленту. Без этого itemPayload звал
         // findWithDetails на каждый пост, и дважды: под фактический набор и
         // под список кандидатов. На неделе это два десятка запросов вместо
@@ -140,7 +148,11 @@ class AdminBroadcastController extends Controller
         return response()->json([
             'data' => [
                 'channel' => $this->channelPayload($broadcast),
-                'items' => $items->map(fn (TelegramChatBroadcastItem $i) => $this->itemPayload($i, $events->get($i->event_id)))->values(),
+                'items' => $items->map(fn (TelegramChatBroadcastItem $i) => $this->itemPayload(
+                    $i,
+                    $events->get($i->event_id),
+                    $i->venue_id ? $venues->get($i->venue_id) : null,
+                ))->values(),
             ],
         ]);
     }
@@ -391,7 +403,11 @@ class AdminBroadcastController extends Controller
             $this->fillCaption($item, $broadcast, $event);
 
             return response()->json([
-                'data' => $this->itemPayload($item->fresh(), $event),
+                'data' => $this->itemPayload(
+                    $item->fresh(),
+                    $event,
+                    $item->venue_id ? \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']) : null,
+                ),
                 'meta' => ['displaced' => $displaced],
             ]);
         });
@@ -548,7 +564,11 @@ class AdminBroadcastController extends Controller
         $item->save();
 
         return response()->json([
-            'data' => $this->itemPayload($item->fresh(), Event::query()->with('venue:id,name')->find($item->event_id)),
+            'data' => $this->itemPayload(
+                $item->fresh(),
+                Event::query()->with('venue:id,name')->find($item->event_id),
+                $item->venue_id ? \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']) : null,
+            ),
         ]);
     }
 
@@ -1396,15 +1416,15 @@ class AdminBroadcastController extends Controller
     }
 
     /** @return array<string, mixed> */
-    private function itemPayload(TelegramChatBroadcastItem $i, ?Event $event): array
+    private function itemPayload(TelegramChatBroadcastItem $i, ?Event $event, ?\App\Models\Venue $venue = null): array
     {
         return [
             'id' => (int) $i->id,
             'kind' => $i->kind ?? 'event',
             'status' => $i->status,
             'event_id' => $i->event_id ? (int) $i->event_id : null,
-            'title' => $event?->title,
-            'venue' => $event?->venue?->name,
+            'title' => $event?->title ?? ($venue ? 'Портрет: '.$venue->name : null),
+            'venue' => $event?->venue?->name ?? $venue?->name,
             'event_start_time' => optional($event?->start_time)?->toIso8601String(),
             'event_end_time' => optional($event?->end_time)?->toIso8601String(),
             'event_address' => $event?->address,

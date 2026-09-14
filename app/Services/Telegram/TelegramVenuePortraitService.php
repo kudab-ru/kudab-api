@@ -7,6 +7,7 @@ use App\Models\Event;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\Venue;
+use App\Support\BroadcastSafety;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -44,6 +45,14 @@ class TelegramVenuePortraitService
     /** Каденс канала: не чаще одного портрета в N дней (≈ раз в неделю). */
     private const WEEKLY_COOLDOWN_DAYS = 7;
 
+    /**
+     * Сколько дней не предлагать площадку, чей портрет отклонили или сняли.
+     *
+     * Столько же, сколько у событий: отказ не должен выглядеть
+     * проигнорированным, но и хоронить площадку навсегда незачем.
+     */
+    private const REFUSED_COOLDOWN_DAYS = 30;
+
     /** Название+адрес ≤ этой длины (символов) — склеиваем в одну строку шапки. */
     private const HEADER_ONE_LINE_MAX = 42;
 
@@ -54,6 +63,9 @@ class TelegramVenuePortraitService
 
     public function __construct(
         private readonly TelegramChatBroadcastRepositoryInterface $broadcastRepository,
+        // Тот же расчёт свободного места, что у событий: портрет перестал быть
+        // особым видом поста и встаёт в слот наравне с ними.
+        private readonly BroadcastSlotPlanner $slotPlanner,
     ) {}
 
     /**
@@ -71,6 +83,7 @@ class TelegramVenuePortraitService
             'checked' => 0, 'due' => 0, 'enqueued' => 0,
             'skipped_no_city' => 0, 'skipped_queue_busy' => 0,
             'no_candidate' => 0, 'skipped_no_reviewer' => 0,
+            'skipped_not_allowed' => 0, 'skipped_no_slot' => 0,
         ];
 
         foreach ($this->broadcastRepository->listEnabledWithSchedule() as $broadcast) {
@@ -84,6 +97,15 @@ class TelegramVenuePortraitService
             $chat = $broadcast->chat;
             if (! $chat instanceof TelegramChat || ! $chat->city_id || ! $chat->telegram_chat_id) {
                 $summary['skipped_no_city']++;
+
+                continue;
+            }
+
+            // Стенду боевые каналы не отдаём — ровно та же проверка, что у
+            // событийной постановки. Здесь её не было, и стенд молча копил
+            // портреты в очереди БОЕВОГО канала: запись 157 создана так.
+            if (! BroadcastSafety::postingAllowed((int) $chat->telegram_chat_id)) {
+                $summary['skipped_not_allowed']++;
 
                 continue;
             }
@@ -110,7 +132,23 @@ class TelegramVenuePortraitService
                 continue;
             }
 
-            $caption = $this->buildVenueCaption($venue, $now);
+            // День и час — как у события. Раньше портрету не ставил publish_at
+            // никто, поэтому для него сделали исключение в доставке, и он
+            // уезжал первым же тиком в произвольный час, вплотную за дневным
+            // постом. Нет свободного слота — ждём следующего раза: лучше
+            // пропустить неделю, чем публиковать мимо расписания.
+            $publishAt = $this->slotPlanner->nextFreeSlot($broadcast, $now);
+            if (! $publishAt) {
+                $summary['skipped_no_slot']++;
+                Log::info('venue_portrait.enqueue.no_free_slot', [
+                    'broadcast_id' => $broadcast->id,
+                    'venue_id' => $venue->id,
+                ]);
+
+                continue;
+            }
+
+            $caption = $this->buildVenueCaption($venue, $publishAt);
             $photoUrl = $this->venueCoverUrl((int) $venue->id);
 
             $reviewGate = (bool) config('services.bot.broadcast_review_gate');
@@ -129,11 +167,13 @@ class TelegramVenuePortraitService
                         'status' => TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
                         'review_reviewer_telegram_id' => (int) $reviewerTelegramId,
                         'review_deadline_at' => $deadline,
+                        'publish_at' => $publishAt->copy()->utc(),
                     ]);
                 }
             } elseif (! $dryRun) {
                 $this->persist($broadcast->id, $venue->id, $caption, $photoUrl, [
                     'status' => TelegramChatBroadcastItem::STATUS_PENDING,
+                    'publish_at' => $publishAt->copy()->utc(),
                 ]);
             }
 
@@ -201,19 +241,47 @@ class TelegramVenuePortraitService
             ->whereNotNull('venue_id')
             ->pluck('venue_id')->all();
 
-        // 2) кросс-формат: чьё событие ушло спотлайтом за неделю
+        // 1б) отклонённые и снятые: ротация помнила ТОЛЬКО отправленное, и
+        // отклонённая площадка предлагалась снова через день. На живых данных
+        // ВИНЗАВОД был поставлен дважды за двое суток, оба раза отклонён.
+        $recentlyRefused = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_REJECTED,
+                TelegramChatBroadcastItem::STATUS_SKIPPED,
+                TelegramChatBroadcastItem::STATUS_ERROR,
+            ])
+            ->where('updated_at', '>=', $now->copy()->subDays(self::REFUSED_COOLDOWN_DAYS))
+            ->whereNotNull('venue_id')
+            ->pluck('venue_id')->all();
+
+        // 2) кросс-формат: чьё событие ушло спотлайтом за неделю ИЛИ стоит в
+        // открытой ленте. Раньше смотрели только отправленное, поэтому портрет
+        // площадки мог выйти в тот же день, что и анонс её события.
         $recentEventVenues = TelegramChatBroadcastItem::query()
             ->from('telegram.chat_broadcast_items as i')
             ->join('events as e', 'e.id', '=', 'i.event_id')
             ->where('i.broadcast_id', $broadcastId)
             ->where('i.kind', TelegramChatBroadcastItem::KIND_EVENT)
-            ->where('i.status', TelegramChatBroadcastItem::STATUS_POSTED)
-            ->where('i.posted_at', '>=', $now->copy()->subDays(self::CROSS_FORMAT_DAYS))
+            ->where(function ($q) use ($now) {
+                $q->where(function ($w) use ($now) {
+                    $w->where('i.status', TelegramChatBroadcastItem::STATUS_POSTED)
+                        ->where('i.posted_at', '>=', $now->copy()->subDays(self::CROSS_FORMAT_DAYS));
+                })->orWhereIn('i.status', [
+                    TelegramChatBroadcastItem::STATUS_PENDING,
+                    TelegramChatBroadcastItem::STATUS_PLANNED,
+                    TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                    TelegramChatBroadcastItem::STATUS_APPROVED,
+                    TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+                ]);
+            })
             ->whereNotNull('e.venue_id')
             ->pluck('e.venue_id')->all();
 
         $exclude = array_values(array_unique(array_merge(
             array_map('intval', $onCooldown),
+            array_map('intval', $recentlyRefused),
             array_map('intval', $recentEventVenues),
         )));
 

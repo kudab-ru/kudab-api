@@ -65,6 +65,117 @@ class VenuePortraitEnqueueTest extends TestCase
         $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $item->status);
     }
 
+    /**
+     * Портрет получает день и час — ближайший свободный слот канала.
+     *
+     * Раньше publish_at ему не ставил никто, поэтому для портрета сделали
+     * исключение в доставке, и он уезжал первым же тиком в произвольный час,
+     * вплотную за дневным постом.
+     */
+    public function test_portrait_gets_a_free_slot(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC')); // 06:00 МСК
+
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $this->createVenue($city->id, 'Зелёный театр', 'zeleny-teatr', 'Открытая летняя сцена.');
+
+        $chat = $this->createChannelChat($city->id, -3010);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+
+        $this->service()->enqueueDueVenuePortraits(now());
+
+        $item = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->firstOrFail();
+
+        $this->assertNotNull($item->publish_at, 'портрету назначен день');
+        $this->assertSame(
+            '2026-09-15 10',
+            Carbon::parse($item->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H'),
+            'ближайший свободный слот — сегодняшние 10:00 МСК',
+        );
+
+        Carbon::setTestNow();
+    }
+
+    /** Занятый слот портрет не занимает: берёт следующий свободный. */
+    public function test_portrait_skips_taken_slot(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $this->createVenue($city->id, 'Зелёный театр', 'zeleny-teatr', 'Открытая летняя сцена.');
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Событие', now()->addDays(5));
+
+        $chat = $this->createChannelChat($city->id, -3011);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+
+        $busy = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $busy->publish_at = Carbon::parse('2026-09-15 07:00:00', 'UTC'); // 10:00 МСК
+        $busy->save();
+
+        $this->service()->enqueueDueVenuePortraits(now());
+
+        $portrait = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
+            ->firstOrFail();
+
+        $this->assertSame(
+            '2026-09-16 10',
+            Carbon::parse($portrait->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H'),
+            'сегодняшний слот занят событием — портрет встал на завтра',
+        );
+
+        Carbon::setTestNow();
+    }
+
+    /**
+     * Отклонённый портрет не предлагается снова.
+     *
+     * Ротация помнила только отправленное, поэтому отклонённая площадка
+     * возвращалась через день: на живых данных ВИНЗАВОД был поставлен дважды
+     * за двое суток, оба раза отклонён.
+     */
+    public function test_refused_portrait_is_not_offered_again(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $refused = $this->createVenue($city->id, 'Винзавод', 'vinzavod', 'Площадка в бывшем цеху.');
+
+        $chat = $this->createChannelChat($city->id, -3012);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+
+        $item = $this->makeVenueItem($broadcast->id, $refused->id, TelegramChatBroadcastItem::STATUS_REJECTED);
+        $item->updated_at = now()->subDay();
+        $item->save();
+
+        $summary = $this->service()->enqueueDueVenuePortraits(now());
+
+        $this->assertSame(0, $summary['enqueued'], 'других площадок нет, а эту только что отклонили');
+        $this->assertSame(1, $summary['no_candidate']);
+    }
+
+    /** Площадка, чьё событие стоит в открытой ленте, портретом не выходит. */
+    public function test_cross_format_counts_open_feed_not_only_posted(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($city->id, 'Зелёный театр', 'zeleny-teatr', 'Открытая летняя сцена.');
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Концерт', now()->addDays(2));
+        $event->venue_id = $venue->id;
+        $event->save();
+
+        $chat = $this->createChannelChat($city->id, -3013);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+
+        // Событие этой площадки ещё не отправлено — оно стоит в ленте.
+        $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $summary = $this->service()->enqueueDueVenuePortraits(now());
+
+        $this->assertSame(0, $summary['enqueued'], 'портрет и анонс той же площадки не в один день');
+        $this->assertSame(1, $summary['no_candidate']);
+    }
+
     public function test_rotation_prefers_never_posted_over_earlier_posted(): void
     {
         $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);

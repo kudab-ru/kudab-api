@@ -102,6 +102,7 @@ class TelegramChatBroadcastService
         private readonly TelegramVenuePortraitService $venuePortraitService,
         private readonly EventCaptionBuilder $captionBuilder,
         private readonly \App\Repositories\EventRepository $eventRepository,
+        private readonly BroadcastSlotPlanner $slotPlanner,
     ) {}
 
     // ---------------------------------------------------------------------
@@ -1577,7 +1578,7 @@ class TelegramChatBroadcastService
      */
     private function slotKey(Carbon|\Carbon\CarbonInterface $at): string
     {
-        return Carbon::parse($at)->setTimezone(self::SCHEDULE_TZ)->format('Y-m-d H');
+        return $this->slotPlanner->key($at);
     }
 
     /** Час публикации из расписания канала. */
@@ -1755,9 +1756,7 @@ class TelegramChatBroadcastService
      */
     public function effectiveSlots(TelegramChatBroadcast $broadcast): array
     {
-        $slots = $broadcast->slots;
-
-        return $slots !== [] ? $slots : [$this->periodHour($broadcast)];
+        return $this->slotPlanner->slots($broadcast);
     }
 
     /** Когда канал постил в последний раз — любым видом записи. */
