@@ -818,7 +818,11 @@ class TelegramChatBroadcastService
                 continue;
             }
 
-            $eventId = $this->pickBestEventIdForChat($chat, $broadcast->id);
+            $eventId = $this->pickBestEventIdForChat(
+                $chat,
+                $broadcast->id,
+                repeatCap: $this->venueRepeatCap($broadcast),
+            );
             if (! $eventId) {
                 $summary['no_candidate']++;
                 // Канал «созрел», но нет подходящего события — голодание (мониторим).
@@ -1007,6 +1011,7 @@ class TelegramChatBroadcastService
         int $broadcastId,
         array $excludeEventIds = [],
         ?Carbon $notBefore = null,
+        ?int $repeatCap = null,
     ): ?int {
         // Навсегда исключаем только то, что уже прозвучало или стоит в ленте.
         // (error — НЕ включаем: отправку можно ретраить.)
@@ -1125,15 +1130,16 @@ class TelegramChatBroadcastService
         //
         // Soft, как и слой выше: если после фильтра не осталось ничего, лучше
         // повторить площадку, чем не запостить вовсе.
-        [$usedVenueIds, $usedChains] = $this->venuesAlreadyInFeed($broadcastId);
-        if ($usedVenueIds !== [] || $usedChains !== []) {
-            $diverse = $pool->reject(function (Event $e) use ($usedVenueIds, $usedChains) {
-                if ($e->venue_id !== null && in_array((int) $e->venue_id, $usedVenueIds, true)) {
+        [$venueUse, $chainUse] = $this->venueUsageInFeed($broadcastId);
+        if ($venueUse !== [] || $chainUse !== []) {
+            $cap = $repeatCap ?? 1;
+            $diverse = $pool->reject(function (Event $e) use ($venueUse, $chainUse, $cap) {
+                if ($e->venue_id !== null && ($venueUse[(int) $e->venue_id] ?? 0) >= $cap) {
                     return true;
                 }
                 $chain = $this->venueChainKey((string) ($e->venue?->name ?? ''));
 
-                return $chain !== '' && in_array($chain, $usedChains, true);
+                return $chain !== '' && ($chainUse[$chain] ?? 0) >= $cap;
             });
             if ($diverse->isNotEmpty()) {
                 $pool = $diverse;
@@ -1144,14 +1150,20 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * Площадки и сети, уже занятые в ленте канала.
+     * Сколько раз площадка и сеть уже заняты в ленте канала.
      *
      * Считаем по незакрытым записям и по недавно опубликованным: в пределах
      * одной недели повтор площадки виден так же, как повтор заголовка.
      *
-     * @return array{0: list<int>, 1: list<string>}
+     * Раньше это было множество «была/не была», и при одном посте в день так
+     * и надо: доля площадки в неделе — одна седьмая. Но при двух слотах постов
+     * четырнадцать, площадок в пуле около тридцати, и запрет на повтор вырезал
+     * бы почти весь пул — а слой мягкий и молча берёт неотфильтрованное.
+     * Поэтому теперь счётчик, и порог растёт вместе с плотностью.
+     *
+     * @return array{0: array<int, int>, 1: array<string, int>}
      */
-    private function venuesAlreadyInFeed(int $broadcastId): array
+    private function venueUsageInFeed(int $broadcastId): array
     {
         $rows = TelegramChatBroadcastItem::query()
             ->from('telegram.chat_broadcast_items as i')
@@ -1176,15 +1188,30 @@ class TelegramChatBroadcastService
         $chains = [];
         foreach ($rows as $row) {
             if ($row->venue_id !== null) {
-                $ids[] = (int) $row->venue_id;
+                $id = (int) $row->venue_id;
+                $ids[$id] = ($ids[$id] ?? 0) + 1;
             }
             $chain = $this->venueChainKey((string) ($row->venue_name ?? ''));
             if ($chain !== '') {
-                $chains[] = $chain;
+                $chains[$chain] = ($chains[$chain] ?? 0) + 1;
             }
         }
 
-        return [array_values(array_unique($ids)), array_values(array_unique($chains))];
+        return [$ids, $chains];
+    }
+
+    /**
+     * Сколько раз одна площадка может попасть в неделю ленты.
+     *
+     * Держим прежнюю долю: не больше одного поста площадки на каждые семь
+     * постов недели. Без слотов это единица — ровно нынешнее правило.
+     */
+    public function venueRepeatCap(TelegramChatBroadcast $broadcast): int
+    {
+        $postsPerWeek = min($broadcast->horizon_days, 7)
+            * max(1, count($this->effectiveSlots($broadcast)));
+
+        return max(1, intdiv($postsPerWeek, 7));
     }
 
     /**
@@ -1506,6 +1533,7 @@ class TelegramChatBroadcastService
                     $broadcast->id,
                     $exclude,
                     $publishAt->copy()->utc(),
+                    $this->venueRepeatCap($broadcast),
                 );
                 if (! $eventId) {
                     $summary['no_candidate']++;
@@ -1593,16 +1621,21 @@ class TelegramChatBroadcastService
      * Сколько длится одно окно расписания канала, в часах.
      * null — период выключен или незнаком, простой считать не от чего.
      */
-    private function periodWindowHours(TelegramChatBroadcast $broadcast): ?int
+    public function periodWindowHours(TelegramChatBroadcast $broadcast): ?int
     {
         $period = trim((string) $broadcast->period);
 
+        // Слоты делят окно: при двух постах в день нормальное молчание вдвое
+        // короче, и порог «два пропущенных окна» на сутках начал бы молчать о
+        // настоящей поломке — канал стоял бы полтора дня без единого сигнала.
+        $slots = max(1, count($this->effectiveSlots($broadcast)));
+
         if (str_starts_with($period, 'daily_')) {
-            return 24;
+            return max(1, intdiv(24, $slots));
         }
 
         if (str_starts_with($period, 'weekly_')) {
-            return 24 * 7;
+            return max(1, intdiv(24 * 7, $slots));
         }
 
         return null;

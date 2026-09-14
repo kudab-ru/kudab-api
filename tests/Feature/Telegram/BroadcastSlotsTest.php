@@ -124,6 +124,131 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
+    /**
+     * Порог повтора площадки растёт вместе с плотностью.
+     *
+     * Слой был «была/не была»: при одном посте в день доля площадки — одна
+     * седьмая, и это верно. При двух слотах постов четырнадцать, и запрет на
+     * повтор вырезал бы почти весь пул; слой мягкий и молча взял бы
+     * неотфильтрованное — то есть выключился бы сам.
+     */
+    public function test_venue_repeat_cap_follows_density(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC')); // 06:00 МСК
+
+        [$broadcast, $city] = $this->channelWithVenueEvents();
+        $broadcast->slots = [10, 19];
+        $broadcast->horizon_days = 7;
+        $broadcast->save();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame(2, $this->countFromVenue($broadcast->id, $city['crowded']),
+            'при двух слотах площадка может выйти дважды за неделю, но не чаще');
+
+        Carbon::setTestNow();
+    }
+
+    /** Без слотов порог прежний: одна площадка — один раз в неделю. */
+    public function test_venue_repeat_cap_is_one_without_slots(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+
+        [$broadcast, $city] = $this->channelWithVenueEvents();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame(1, $this->countFromVenue($broadcast->id, $city['crowded']));
+
+        Carbon::setTestNow();
+    }
+
+    /** Окно простоя делится на число слотов: два поста в день — окно вдвое короче. */
+    public function test_idle_window_is_divided_by_slots(): void
+    {
+        [$broadcast] = $this->channelWithEvents(1);
+
+        $this->assertSame(24, $this->service()->periodWindowHours($broadcast));
+
+        $broadcast->slots = [10, 19];
+        $broadcast->save();
+
+        $this->assertSame(12, $this->service()->periodWindowHours($broadcast->fresh()));
+    }
+
+    private function countFromVenue(int $broadcastId, int $venueId): int
+    {
+        return TelegramChatBroadcastItem::query()
+            ->from('telegram.chat_broadcast_items as i')
+            ->join('events as e', 'e.id', '=', 'i.event_id')
+            ->where('i.broadcast_id', $broadcastId)
+            ->whereNotNull('i.publish_at')
+            ->where('e.venue_id', $venueId)
+            ->count();
+    }
+
+    /**
+     * Канал, где одна площадка даёт шесть событий, а ещё двенадцать площадок —
+     * по одному: пула хватает, чтобы фильтр не выродился.
+     *
+     * @return array{0: TelegramChatBroadcast, 1: array{crowded: int}}
+     */
+    private function channelWithVenueEvents(): array
+    {
+        [$broadcast, $events] = $this->channelWithEvents(0);
+        $cityId = (int) $broadcast->chat->city_id;
+
+        // События «Матрёшки» скоринг любит сильнее всех: описание, точное
+        // время, билеты в продаже. Иначе тест ничего не проверял бы — при
+        // равном скоринге площадку могли просто не выбрать, и ноль повторов
+        // прошёл бы любую проверку «не больше N».
+        $crowded = $this->insertVenue($cityId, 'Матрёшка', 'matreshka');
+        for ($i = 0; $i < 6; $i++) {
+            $this->insertEvent($cityId, $crowded, 'Вечер у Матрёшки '.$i, 3 + $i, attractive: true);
+        }
+        // Альтернатив заведомо больше, чем слотов: иначе сработал бы мягкий
+        // откат «лучше повторить площадку, чем не запостить вовсе», и тест
+        // мерил бы исчерпание пула, а не порог.
+        for ($i = 0; $i < 20; $i++) {
+            $venue = $this->insertVenue($cityId, 'Площадка '.$i, 'venue-'.$i);
+            $this->insertEvent($cityId, $venue, 'Событие площадки '.$i, 3 + ($i % 6));
+        }
+
+        return [$broadcast, ['crowded' => $crowded]];
+    }
+
+    private function insertVenue(int $cityId, string $name, string $slug): int
+    {
+        return (int) DB::table('venues')->insertGetId([
+            'city_id' => $cityId,
+            'name' => $name,
+            'slug' => $slug,
+            'status' => 'active',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
+    private function insertEvent(int $cityId, int $venueId, string $title, int $inDays, bool $attractive = false): void
+    {
+        $community = Community::create(['name' => $title.' орг', 'city_id' => $cityId]);
+
+        $event = new Event;
+        $event->community_id = $community->id;
+        $event->title = $title;
+        $event->status = 'active';
+        $event->city_id = $cityId;
+        $event->venue_id = $venueId;
+        $event->start_time = now()->addDays($inDays)->setTime(19, 0);
+        $event->start_date = $event->start_time->toDateString();
+        if ($attractive) {
+            $event->description = str_repeat('Подробное описание вечера. ', 12);
+            $event->tickets_status = 'available';
+            $event->time_precision = 'datetime';
+        }
+        $event->save();
+    }
+
     /** @return list<int> */
     private function publishHours(int $broadcastId): array
     {

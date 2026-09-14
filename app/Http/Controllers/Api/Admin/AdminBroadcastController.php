@@ -1362,8 +1362,10 @@ class AdminBroadcastController extends Controller
             $out[] = ['level' => 'danger', 'text' => 'У канала не задан город — подбирать события не из чего.'];
         }
 
-        // Порог тот же, что у ЛС-сигнала: два пропущенных окна.
-        $windowHours = str_starts_with((string) $b->period, 'weekly_') ? 24 * 7 : 24;
+        // Порог тот же, что у ЛС-сигнала, и правило берём ОТТУДА ЖЕ: здесь
+        // стояла вторая копия, и со слотами они разъехались бы — окно делится
+        // на число постов в день, а копия про слоты не знает.
+        $windowHours = $this->broadcasts->periodWindowHours($b) ?? 24;
         if ($lastPosted) {
             $silent = (int) Carbon::parse($lastPosted)->diffInHours(now());
             if ($silent >= $windowHours * 2) {
