@@ -545,7 +545,8 @@ class TelegramChatBroadcastService
                 // канал. Так рассылка Воронежа простояла 33 дня на одной записи.
                 // Постоянный отказ закрываем здесь, где о нём вообще можно узнать:
                 // у бота штатного способа закрыть провал нет, есть только mark-sent.
-                if (! $item->event_id || ! Event::query()->whereKey($item->event_id)->exists()) {
+                $event = $item->event_id ? Event::query()->find($item->event_id) : null;
+                if (! $event) {
                     $this->broadcastItemRepository->markSkipped(
                         $item,
                         'событие '.($item->event_id ?? '?').' недоступно (удалено) — снято из очереди',
@@ -554,7 +555,33 @@ class TelegramChatBroadcastService
                     continue;
                 }
 
-                $this->ensureEventCaption($item, $broadcast);
+                // Событие могло закончиться, пока пост лежал в очереди. Между
+                // постановкой и отправкой проверки времени не было вообще: при
+                // паузе канала или просроченном дне первым уходил анонс уже
+                // прошедшего. Правило то же, что в админке при постановке и
+                // переносе: конец события, а если его нет — начало. Именно
+                // конец, иначе снялись бы живые многодневки.
+                $endsAt = $event->end_time ?: $event->start_time;
+                if ($endsAt && Carbon::parse($endsAt)->lt($now)) {
+                    $this->broadcastItemRepository->markSkipped(
+                        $item,
+                        'событие '.$event->id.' уже прошло к моменту отправки — снято из очереди',
+                    );
+                    Log::warning('broadcast.poll.skipped_event_finished', [
+                        'broadcast_id' => $broadcast->id,
+                        'item_id' => $item->id,
+                        'event_id' => $event->id,
+                        'ends_at' => Carbon::parse($endsAt)->toIso8601String(),
+                    ]);
+
+                    continue;
+                }
+
+                // Текст собирается при постановке и больше не пересобирается.
+                // Пост, пролежавший лишний день, уходил дословно — со словом
+                // «сегодня» про позавчера. Здесь, на отправке, день известен
+                // точно, поэтому шаблонный текст пересобираем под него.
+                $this->ensureEventCaption($item, $broadcast, $event, \Carbon\CarbonImmutable::parse($now));
                 // Ручной выбор сильнее автоподбора. NULL — «как раньше»,
                 // пустой массив — осознанное «без картинок».
                 $eventPhotos = is_array($item->photo_urls)
@@ -1235,18 +1262,41 @@ class TelegramChatBroadcastService
      * Ручную правку не трогаем: caption_source = manual означает, что текст
      * писал человек, и пересобирать его из шаблона нельзя.
      */
+    /**
+     * @param  Event|null  $event  уже загруженное событие — чтобы не ходить в базу второй раз
+     * @param  \Carbon\CarbonImmutable|null  $sendingAt  момент отправки: задан только на пути доставки
+     */
     private function ensureEventCaption(
         TelegramChatBroadcastItem $item,
         TelegramChatBroadcast $broadcast,
+        ?Event $event = null,
+        ?\Carbon\CarbonImmutable $sendingAt = null,
     ): void {
+        // Свой текст писал человек — ни собирать, ни пересобирать.
         if ($item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
             return;
         }
-        if (trim((string) $item->caption) !== '') {
+
+        // День, от которого считаются «сегодня» и «завтра». На постановке это
+        // назначенный день поста, на отправке — день, когда пост реально
+        // уходит: они расходятся, если запись пролежала в очереди.
+        $showDay = $sendingAt
+            ? $sendingAt->setTimezone(self::SCHEDULE_TZ)
+            : $this->itemShowDay($item);
+
+        $hasCaption = trim((string) $item->caption) !== '';
+
+        // Текст собран под другой день — пересобираем. Вне пути доставки
+        // (постановка, пересборка) поведение прежнее: готовый текст не трогаем.
+        $stale = $sendingAt !== null
+            && $hasCaption
+            && $this->itemShowDay($item)->toDateString() !== $showDay->toDateString();
+
+        if ($hasCaption && ! $stale) {
             return;
         }
 
-        $event = Event::query()->find($item->event_id);
+        $event ??= Event::query()->find($item->event_id);
         if (! $event) {
             return;
         }
@@ -1255,8 +1305,7 @@ class TelegramChatBroadcastService
             $item->caption = $this->captionBuilder->build(
                 $event,
                 (string) $broadcast->template_code,
-                // «Сегодня» и «завтра» считаем от дня, когда пост увидят.
-                $this->itemShowDay($item),
+                $showDay,
             );
             $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
             $item->save();

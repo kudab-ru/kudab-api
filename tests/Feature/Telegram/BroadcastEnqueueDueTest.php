@@ -433,6 +433,112 @@ class BroadcastEnqueueDueTest extends TestCase
         Carbon::setTestNow();
     }
 
+    /**
+     * Событие, закончившееся к моменту отправки, снимается — и канал едет дальше.
+     *
+     * Между постановкой и отправкой проверки времени не было вообще: после
+     * паузы канала первым уходил анонс уже прошедшего. Снятая запись обязана
+     * перестать держать канал — иначе лечение хуже болезни.
+     */
+    public function test_finished_event_is_skipped_and_channel_moves_on(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $past = $this->createEvent($city->id, $community->id, 'Вчерашнее', now()->subDay());
+        $future = $this->createEvent($city->id, $community->id, 'Завтрашнее', now()->addDay());
+
+        $chat = $this->createChannelChat($city->id, -1018, 555555);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $stale = $this->makeItem($broadcast->id, $past->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $fresh = $this->makeItem($broadcast->id, $future->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $this->assertCount(0, $this->service()->collectDueSingleRuns(now()), 'прошедшее не уходит');
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $stale->fresh()->status);
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks, 'следующая запись канала пошла в работу');
+        $this->assertSame($fresh->id, $tasks[0]['item_id']);
+    }
+
+    /** Многодневка, которая ещё идёт, не считается прошедшей: смотрим на конец, а не на начало. */
+    public function test_running_multiday_event_is_not_skipped(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Выставка', now()->subDays(3));
+        $event->end_time = now()->addDays(10);
+        $event->save();
+
+        $chat = $this->createChannelChat($city->id, -1019, 555666);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks);
+        $this->assertSame($item->id, $tasks[0]['item_id']);
+    }
+
+    /**
+     * Текст, собранный под другой день, пересобирается перед отправкой.
+     *
+     * Раньше ensureEventCaption выходил при любом непустом тексте, и пост,
+     * пролежавший лишние сутки, уходил дословно — со словом «сегодня» про
+     * позавчера.
+     */
+    public function test_stale_template_caption_is_rebuilt_on_send(): void
+    {
+        $this->seedBasicTemplate();
+
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        // Событие завтра: текст, собранный вчера, назвал бы этот день датой,
+        // а собранный сегодня — «завтра». По этому слову и отличаем.
+        $event = $this->createEvent(
+            $city->id,
+            $community->id,
+            'Концерт',
+            Carbon::now('Europe/Moscow')->addDay()->setTime(19, 0, 0),
+        );
+
+        $chat = $this->createChannelChat($city->id, -1020, 555777);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = now()->subDay(); // день прошёл, пост остался
+        $item->caption = 'СТАРЫЙ ТЕКСТ';
+        $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
+        $item->save();
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks);
+        $this->assertNotSame('СТАРЫЙ ТЕКСТ', $tasks[0]['caption'], 'текст пересобран под день отправки');
+        $this->assertStringContainsString('завтра', $tasks[0]['caption'], 'пересобран именно под день отправки');
+        $this->assertNotSame('СТАРЫЙ ТЕКСТ', (string) $item->fresh()->caption);
+    }
+
+    /** Свой текст писал человек — его не пересобирают, даже если день разъехался. */
+    public function test_manual_caption_survives_stale_day(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Концерт', now()->addDays(2));
+
+        $chat = $this->createChannelChat($city->id, -1021, 555888);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = now()->subDay();
+        $item->caption = 'МОЙ ТЕКСТ';
+        $item->caption_source = TelegramChatBroadcastItem::CAPTION_MANUAL;
+        $item->save();
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks);
+        $this->assertSame('МОЙ ТЕКСТ', $tasks[0]['caption']);
+    }
+
     public function test_decide_review_approve_sets_approved(): void
     {
         $item = $this->makeStandaloneReviewItem(555333);
@@ -713,6 +819,26 @@ class BroadcastEnqueueDueTest extends TestCase
         $broadcast = $this->createBroadcast($chat->id, 'daily_10');
 
         return $this->makeReviewItem($broadcast->id, $event->id, $reviewerTelegramId, now()->addHours(2));
+    }
+
+    /**
+     * Шаблон поста в базе.
+     *
+     * Без него EventCaptionBuilder бросает «Шаблон не найден», сборка молча
+     * проглатывает исключение и старый текст остаётся на месте — тест прошёл
+     * бы и на сломанном коде.
+     */
+    private function seedBasicTemplate(): void
+    {
+        DB::table('telegram.message_templates')->insert([
+            'code' => 'basic',
+            'locale' => 'ru',
+            'name' => 'Базовый',
+            'body' => "🎟 <b>{title}</b>\n🗓 {start_time}",
+            'is_active' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     private function createEventGroup(int $communityId, ?int $cityId, string $groupKey, string $titleNorm): int
