@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Bot;
 
+use App\Contracts\Telegram\TelegramChatBroadcastRepositoryInterface;
 use App\Http\Controllers\Controller;
 use App\Models\TelegramChat;
 use App\Services\Telegram\TelegramChatService;
@@ -13,6 +14,9 @@ class TelegramChatController extends Controller
 {
     public function __construct(
         private readonly TelegramChatService $service,
+        // Строка рассылки: без неё канал, куда добавили бота, не появляется
+        // в админке — её список строится по chat_broadcasts.
+        private readonly TelegramChatBroadcastRepositoryInterface $chatBroadcasts,
     ) {}
 
     /**
@@ -74,6 +78,18 @@ class TelegramChatController extends Controller
                 'error'   => 'forbidden',
                 'message' => $e->getMessage(),
             ], 403);
+        }
+
+        // Канал, куда добавили бота администратором, обязан появиться в разделе
+        // рассылки — до этого он попадал только в telegram.chats, а админка
+        // строит список по chat_broadcasts, и канала там не было. Человек делал
+        // всё правильно, а в интерфейсе ничего не происходило.
+        //
+        // Строка создаётся выключенной (enabled=false, period=off), так что сам
+        // факт появления канала ничего не публикует. Только для каналов: группа
+        // и личка в разделе «Рассылка» — мусор.
+        if ($chat->chat_type === 'channel') {
+            $this->chatBroadcasts->getOrCreateByChatId((int) $chat->id);
         }
 
         return response()->json([
