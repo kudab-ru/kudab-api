@@ -168,6 +168,23 @@ class AdminBroadcastVenueEditTest extends TestCase
         $this->assertNotNull($res->json('data.publish_at'));
     }
 
+    /**
+     * Подпись длиннее лимита Telegram не принимается.
+     *
+     * Пост длиннее не падает: альбом молча отбивается, и в канал уходит голый
+     * текст. Отказать честнее, чем отправить пост без картинок.
+     */
+    public function test_caption_over_telegram_limit_is_refused(): void
+    {
+        [$item] = $this->portraitItem();
+
+        $this->patchJson("/api/admin/broadcast/items/{$item->id}", [
+            'caption' => str_repeat('а', 1025),
+        ])->assertStatus(422);
+
+        $this->assertSame('исходный текст портрета', (string) $item->fresh()->caption);
+    }
+
     /** @return array{0: TelegramChatBroadcastItem, 1: Venue} */
     private function portraitItem(): array
     {

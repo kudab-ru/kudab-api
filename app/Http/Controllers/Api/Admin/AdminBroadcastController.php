@@ -47,6 +47,15 @@ class AdminBroadcastController extends Controller
     /** Сколько картинок показываем на выбор — из них человек собирает пост. */
     private const PHOTO_CANDIDATES = 10;
 
+    /**
+     * Предел длины подписи поста с картинками — ограничение Telegram.
+     *
+     * Пост длиннее не падает: альбом отбивается, и в канал уходит голый текст.
+     * Сегодня риск дремлет (самая длинная подпись в базе — 720 символов), но
+     * ручная правка ничем не ограничена.
+     */
+    public const CAPTION_LIMIT = 1024;
+
     public function __construct(
         private readonly TelegramChatBroadcastService $broadcasts,
         private readonly EventCaptionBuilder $captions,
@@ -547,7 +556,10 @@ class AdminBroadcastController extends Controller
     public function update(Request $request, int $itemId): JsonResponse
     {
         $data = $request->validate([
-            'caption' => ['sometimes', 'nullable', 'string', 'max:4096'],
+            // 1024 — лимит подписи Telegram, когда к посту идут картинки.
+            // Длиннее пост не падает: альбом молча отбивается, и в канал
+            // уходит голый текст. Отказать здесь честнее.
+            'caption' => ['sometimes', 'nullable', 'string', 'max:'.self::CAPTION_LIMIT],
             'publish_at' => ['sometimes', 'nullable', 'date'],
             'is_pinned' => ['sometimes', 'boolean'],
             // null = вернуть автоподбор; массив = ровно эти картинки
@@ -747,9 +759,16 @@ class AdminBroadcastController extends Controller
      * Закреплённые и правленные руками не трогаем — в этом и смысл кнопки
      * «закрепить»: она защищает пост именно от пересборки.
      */
-    public function rebuild(int $broadcastId): JsonResponse
+    public function rebuild(Request $request, int $broadcastId): JsonResponse
     {
         $broadcast = TelegramChatBroadcast::query()->findOrFail($broadcastId);
+
+        // «Разбавить» — та же пересборка, но снимает только повторы одной
+        // сети, оставляя первый пост каждой. Полная пересборка меняет всю
+        // неделю, а человек жалуется на три квеста из семи, а не на неделю.
+        if ($request->boolean('diversify')) {
+            return $this->diversify($broadcast);
+        }
 
         // Сколько из снимаемого — те, что ждали свободного дня. Их человек
         // положил туда руками (вытеснив предложением), и молча выметать их
@@ -794,6 +813,67 @@ class AdminBroadcastController extends Controller
         );
 
         return response()->json(['data' => ['dropped' => $dropped, 'waiting_dropped' => $waitingDropped] + $filled]);
+    }
+
+    /**
+     * Снять повторы одной сети и заполнить освободившееся другими площадками.
+     *
+     * Оставляем первый пост каждой сети и все закреплённые: человеку мешает
+     * не сама сеть, а то, что она занимает половину недели.
+     */
+    private function diversify(TelegramChatBroadcast $broadcast): JsonResponse
+    {
+        $items = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereIn('status', $this->openStatuses())
+            ->whereNull('posted_at')
+            ->where(function ($q) {
+                $q->whereNull('kind')->orWhere('kind', '<>', TelegramChatBroadcastItem::KIND_VENUE);
+            })
+            ->orderByRaw('COALESCE(publish_at, planned_at, created_at) ASC')
+            ->get();
+
+        $events = Event::query()
+            ->with('venue:id,name')
+            ->whereIn('id', $items->pluck('event_id')->filter()->all())
+            ->get()
+            ->keyBy('id');
+
+        $seen = [];
+        $dropIds = [];
+        foreach ($items as $item) {
+            $name = (string) ($events->get($item->event_id)?->venue?->name ?? '');
+            $key = $this->chainKey($name);
+            if ($key === '') {
+                continue;
+            }
+            if (! isset($seen[$key])) {
+                $seen[$key] = true;
+
+                continue;
+            }
+            if ($item->is_pinned) {
+                continue;
+            }
+            $dropIds[] = $item->id;
+        }
+
+        $dropped = $dropIds === [] ? 0 : TelegramChatBroadcastItem::query()
+            ->whereIn('id', $dropIds)
+            ->update([
+                'status' => TelegramChatBroadcastItem::STATUS_SKIPPED,
+                'error_message' => 'снято при разбавлении ленты: площадка уже была на неделе',
+                'publish_at' => null,
+                'claimed_at' => null,
+                'claim_token' => null,
+                'updated_at' => now(),
+            ]);
+
+        $filled = $this->broadcasts->fillFeedDays($broadcast->fresh('chat'), Carbon::now());
+
+        return response()->json([
+            'data' => ['dropped' => $dropped, 'waiting_dropped' => 0] + $filled,
+        ]);
     }
 
     /**
@@ -1642,6 +1722,10 @@ class AdminBroadcastController extends Controller
             'event_id' => $i->event_id ? (int) $i->event_id : null,
             'title' => $event?->title ?? ($venue ? 'Портрет: '.$venue->name : null),
             'venue' => $event?->venue?->name ?? $venue?->name,
+            // Сеть площадок. Без неё лента не отличала «Матрёшку» от
+            // «Матрёшки на Кольцовской»: предупреждение об однообразии считало
+            // по venue_id и трёх филиалов одной сети не видело.
+            'chain' => $this->chainKey((string) ($event?->venue?->name ?? $venue?->name ?? '')) ?: null,
             'event_start_time' => optional($event?->start_time)?->toIso8601String(),
             'event_end_time' => optional($event?->end_time)?->toIso8601String(),
             'event_address' => $event?->address,
