@@ -349,6 +349,7 @@ class AdminBroadcastController extends Controller
                     (int) $broadcast->id,
                     $publishAt,
                     exceptEventId: (int) $event->id,
+                    bySlot: $broadcast->slots !== [],
                 );
 
                 if ($occupant && $occupant->is_pinned) {
@@ -487,10 +488,12 @@ class AdminBroadcastController extends Controller
                         }
                     }
 
+                    $broadcast = TelegramChatBroadcast::query()->find($item->broadcast_id);
                     $occupant = $this->dayOccupant(
                         (int) $item->broadcast_id,
                         $newAt,
                         exceptItemId: (int) $item->id,
+                        bySlot: $broadcast && $broadcast->slots !== [],
                     );
 
                     if ($occupant && $occupant->is_pinned) {
@@ -502,7 +505,6 @@ class AdminBroadcastController extends Controller
                         // возвращаем в общую очередь без дня.
                         $occupant->publish_at = null;
                         $occupant->save();
-                        $broadcast = TelegramChatBroadcast::query()->find($item->broadcast_id);
                         if ($broadcast) {
                             $this->regenerateCaption($occupant, $broadcast);
                         }
@@ -1078,6 +1080,9 @@ class AdminBroadcastController extends Controller
             'template_code' => ['sometimes', 'string', 'max:32'],
             'feed_limit' => ['sometimes', 'integer', 'min:1', 'max:31'],
             'city_id' => ['sometimes', 'nullable', 'integer'],
+            'slots' => ['sometimes', 'array', 'max:'.TelegramChatBroadcast::MAX_SLOTS],
+            'slots.*' => ['integer', 'between:0,23'],
+            'horizon_days' => ['sometimes', 'integer', 'min:1', 'max:31'],
         ]);
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
@@ -1104,6 +1109,12 @@ class AdminBroadcastController extends Controller
         }
         if ($request->has('feed_limit')) {
             $broadcast->feed_limit = (int) $data['feed_limit'];
+        }
+        if ($request->has('slots')) {
+            $broadcast->slots = $data['slots'];
+        }
+        if ($request->has('horizon_days')) {
+            $broadcast->horizon_days = (int) $data['horizon_days'];
         }
 
         // Город пишем ЧЕРЕЗ сервис: city_id вне $fillable у модели чата, и
@@ -1182,8 +1193,13 @@ class AdminBroadcastController extends Controller
         Carbon $publishAt,
         ?int $exceptEventId = null,
         ?int $exceptItemId = null,
+        bool $bySlot = false,
     ): ?TelegramChatBroadcastItem {
-        $targetDay = $publishAt->copy()->setTimezone('Europe/Moscow')->toDateString();
+        // Без слотов место в ленте — это ДЕНЬ: два поста на один день канал
+        // без слотов показать не умеет, и сетка в админке строится по дням.
+        // Со слотами место — день плюс час, иначе два слота схлопнутся в один.
+        $format = $bySlot ? 'Y-m-d H' : 'Y-m-d';
+        $targetDay = $publishAt->copy()->setTimezone('Europe/Moscow')->format($format);
 
         return TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcastId)
@@ -1200,7 +1216,7 @@ class AdminBroadcastController extends Controller
             ->whereNotNull('publish_at')
             ->get()
             ->first(fn (TelegramChatBroadcastItem $x) => Carbon::parse($x->publish_at)
-                ->setTimezone('Europe/Moscow')->toDateString() === $targetDay);
+                ->setTimezone('Europe/Moscow')->format($format) === $targetDay);
     }
 
     private function openStatuses(): array
@@ -1259,6 +1275,10 @@ class AdminBroadcastController extends Controller
             'period' => $b->period,
             'template_code' => $b->template_code,
             'feed_limit' => $b->feed_limit,
+            // Часы публикации внутри дня по Москве. Пустой список — один пост
+            // в день, час берётся из расписания.
+            'slots' => $b->slots,
+            'horizon_days' => $b->horizon_days,
             'in_feed' => $openEvents,
             'waiting' => $waitingEvents,
             'last_posted_at' => $lastPosted ? Carbon::parse($lastPosted)->toIso8601String() : null,

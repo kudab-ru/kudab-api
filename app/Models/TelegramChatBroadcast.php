@@ -34,6 +34,9 @@ class TelegramChatBroadcast extends Model
         return $this->belongsTo(TelegramChat::class, 'chat_id');
     }
 
+    /** Больше четырёх постов в день канал-афиша не выдержит по содержанию. */
+    public const MAX_SLOTS = 4;
+
     // ---- удобные геттеры/сеттеры поверх JSON settings ----
 
     /**
@@ -53,11 +56,10 @@ class TelegramChatBroadcast extends Model
         $settings = $this->settings ?? [];
         $raw = $settings['feed_limit'] ?? null;
 
-        // Умолчание — семь: неделя вперёд, по посту в день. Раньше здесь
-        // стояла единица (прежнее «одно событие в полёте»), она нужна была
-        // только чтобы переход не менял поведение молча.
+        // Умолчание — горизонт в днях, умноженный на число слотов: неделя
+        // вперёд, по посту в каждый слот. Без слотов это прежние семь.
         if (! is_numeric($raw)) {
-            return 7;
+            return max(1, min(31, $this->horizon_days * max(1, count($this->slots))));
         }
 
         return max(1, min(31, (int) $raw));
@@ -67,6 +69,90 @@ class TelegramChatBroadcast extends Model
     {
         $settings = $this->settings ?? [];
         $settings['feed_limit'] = max(1, min(31, $limit));
+        $this->settings = $settings;
+    }
+
+    /**
+     * Часы публикации внутри дня, по Москве: например [10, 19].
+     *
+     * Пустой список — прежнее поведение: один пост в день, час берётся из
+     * period. Так выкат ничего не меняет молча: пока владелец не задал слоты,
+     * канал работает ровно как работал.
+     *
+     * Ключ слота — день плюс час, и именно он определяет «день занят»: при
+     * двух слотах на один день встают два поста, и считать занятость по дате
+     * больше нельзя.
+     *
+     * @return list<int>
+     */
+    public function getSlotsAttribute(): array
+    {
+        $raw = ($this->settings ?? [])['slots'] ?? null;
+        if (! is_array($raw)) {
+            return [];
+        }
+
+        $hours = [];
+        foreach ($raw as $h) {
+            if (! is_numeric($h)) {
+                continue;
+            }
+            $hour = (int) $h;
+            if ($hour >= 0 && $hour <= 23) {
+                $hours[] = $hour;
+            }
+        }
+
+        $hours = array_values(array_unique($hours));
+        sort($hours);
+
+        return array_slice($hours, 0, self::MAX_SLOTS);
+    }
+
+    /** @param  array<int|string>  $hours */
+    public function setSlotsAttribute(array $hours): void
+    {
+        $settings = $this->settings ?? [];
+
+        $clean = [];
+        foreach ($hours as $h) {
+            if (! is_numeric($h)) {
+                continue;
+            }
+            $hour = (int) $h;
+            if ($hour >= 0 && $hour <= 23) {
+                $clean[] = $hour;
+            }
+        }
+        $clean = array_values(array_unique($clean));
+        sort($clean);
+
+        $settings['slots'] = array_slice($clean, 0, self::MAX_SLOTS);
+        $this->settings = $settings;
+    }
+
+    /**
+     * На сколько дней вперёд собирается лента.
+     *
+     * Раньше это значило то же число, что и кап записей (feed_limit), и при
+     * двух слотах смыслы разошлись бы вдвое: «7» либо укоротило бы ленту до
+     * трёх с половиной дней, либо упёрлось бы в кап и молча недозаполнило.
+     */
+    public function getHorizonDaysAttribute(): int
+    {
+        $raw = ($this->settings ?? [])['horizon_days'] ?? null;
+
+        if (! is_numeric($raw)) {
+            return 7;
+        }
+
+        return max(1, min(31, (int) $raw));
+    }
+
+    public function setHorizonDaysAttribute(int $days): void
+    {
+        $settings = $this->settings ?? [];
+        $settings['horizon_days'] = max(1, min(31, $days));
         $this->settings = $settings;
     }
 

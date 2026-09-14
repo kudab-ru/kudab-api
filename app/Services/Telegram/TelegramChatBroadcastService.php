@@ -586,7 +586,18 @@ class TelegramChatBroadcastService
             // Событийный pending/planned постится строго в СВОЁ окно расписания
             // (isSingleRunDue). Портрет площадки (свой недельный каденс) и уже-в-полёте
             // ревью-статусы доставляем независимо от событийного расписания.
-            if (! $isVenue && ! $inReviewFlow && ! $this->isSingleRunDue($broadcast, $now)) {
+            // Запись с назначенным моментом идёт ПО НЕМУ: репозиторий уже
+            // отфильтровал её по publish_at <= now. Суточное окно к ней не
+            // применяется — иначе второй слот дня не открылся бы никогда:
+            // окно закрывается первым же постом.
+            //
+            // Запись БЕЗ момента сохраняет прежнее правило: событийная — под
+            // суточным окном, портрет площадки мимо него. Формулировать надо
+            // именно так: портрет как раз лежит без дня, и правило «окно
+            // только для publish_at = NULL» загнало бы его под окно, которого
+            // у него никогда не было.
+            $hasOwnMoment = $item->publish_at !== null;
+            if (! $isVenue && ! $inReviewFlow && ! $hasOwnMoment && ! $this->isSingleRunDue($broadcast, $now)) {
                 continue;
             }
 
@@ -1448,10 +1459,11 @@ class TelegramChatBroadcastService
             return $summary;
         }
 
-        $hour = $this->periodHour($broadcast);
+        $slots = $this->effectiveSlots($broadcast);
         $weekday = $this->periodWeekday($broadcast);
 
-        // Дни, уже занятые в ленте: второй пост на тот же день не ставим.
+        // Занятые СЛОТЫ, а не дни: при двух слотах на один день встают два
+        // поста, и считать занятость по дате больше нельзя.
         $taken = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
             ->whereIn('status', [
@@ -1463,61 +1475,81 @@ class TelegramChatBroadcastService
             ])
             ->whereNotNull('publish_at')
             ->pluck('publish_at')
-            ->map(fn ($d) => Carbon::parse($d)->setTimezone('Europe/Moscow')->toDateString())
+            ->map(fn ($d) => $this->slotKey(Carbon::parse($d)))
             ->all();
 
         $exclude = [];
-        for ($i = 0; $i < $broadcast->feed_limit; $i++) {
-            $day = $now->copy()->setTimezone('Europe/Moscow')->addDays($i)->startOfDay();
+        for ($i = 0; $i < $broadcast->horizon_days; $i++) {
+            $day = $now->copy()->setTimezone(self::SCHEDULE_TZ)->addDays($i)->startOfDay();
 
             if ($weekday !== null && $day->dayOfWeek !== $weekday) {
                 continue;
             }
             $summary['days']++;
-            if (in_array($day->toDateString(), $taken, true)) {
-                continue;
+
+            foreach ($slots as $hour) {
+                $publishAt = $day->copy()->setTime($hour, 0, 0);
+
+                // Слот, который уже прошёл, не заполняем: пост встал бы
+                // просроченным и тут же потерял бы день.
+                if ($publishAt->lt($now)) {
+                    continue;
+                }
+                if (in_array($this->slotKey($publishAt), $taken, true)) {
+                    continue;
+                }
+
+                // Событие не должно начаться раньше публикации: день в день
+                // можно, но не «пост в 10:00 про концерт в 08:00».
+                $eventId = $this->pickBestEventIdForChat(
+                    $chat,
+                    $broadcast->id,
+                    $exclude,
+                    $publishAt->copy()->utc(),
+                );
+                if (! $eventId) {
+                    $summary['no_candidate']++;
+
+                    continue;
+                }
+                $exclude[] = $eventId;
+
+                // enqueue() возвращает СУЩЕСТВУЮЩУЮ запись, если событие когда-то
+                // уже ставили: на (broadcast_id, event_id) стоит UNIQUE. Такая
+                // запись приходит со старым статусом — обычно skipped после
+                // прошлой пересборки. Если её не оживить, пост осядет невидимым,
+                // а счётчик «заполнено» соврёт: ровно это и случилось на проверке.
+                $item = $this->broadcastItemRepository->enqueue($broadcast->id, $eventId, null);
+                $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+                $item->error_message = null;
+                $item->claimed_at = null;
+                $item->claim_token = null;
+                $item->publish_at = $publishAt->copy()->utc();
+                // Текст пересобираем: он зависит от дня публикации. Свой не трогаем.
+                if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
+                    $item->caption = null;
+                    $item->caption_source = null;
+                }
+                $item->save();
+
+                $this->ensureEventCaption($item, $broadcast);
+                $summary['filled']++;
             }
-
-            // Событие не должно начаться раньше публикации: день в день
-            // можно, но не «пост в 10:00 про концерт в 08:00».
-            $eventId = $this->pickBestEventIdForChat(
-                $chat,
-                $broadcast->id,
-                $exclude,
-                $day->copy()->setTime($hour, 0)->utc(),
-            );
-            if (! $eventId) {
-                $summary['no_candidate']++;
-
-                continue;
-            }
-            $exclude[] = $eventId;
-
-            $publishAt = $day->copy()->setTime($hour, 0, 0);
-
-            // enqueue() возвращает СУЩЕСТВУЮЩУЮ запись, если событие когда-то
-            // уже ставили: на (broadcast_id, event_id) стоит UNIQUE. Такая
-            // запись приходит со старым статусом — обычно skipped после
-            // прошлой пересборки. Если её не оживить, пост осядет невидимым,
-            // а счётчик «заполнено» соврёт: ровно это и случилось на проверке.
-            $item = $this->broadcastItemRepository->enqueue($broadcast->id, $eventId, null);
-            $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
-            $item->error_message = null;
-            $item->claimed_at = null;
-            $item->claim_token = null;
-            $item->publish_at = $publishAt->copy()->utc();
-            // Текст пересобираем: он зависит от дня публикации. Свой не трогаем.
-            if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
-                $item->caption = null;
-                $item->caption_source = null;
-            }
-            $item->save();
-
-            $this->ensureEventCaption($item, $broadcast);
-            $summary['filled']++;
         }
 
         return $summary;
+    }
+
+    /**
+     * Ключ слота: день и час по Москве.
+     *
+     * Один на все сравнения «занято ли это место в ленте». Раньше занятость
+     * считалась по дате (->toDateString()) минимум в четырёх местах, и при
+     * двух слотах в дне такое сравнение схлопнуло бы их в один.
+     */
+    private function slotKey(Carbon|\Carbon\CarbonInterface $at): string
+    {
+        return Carbon::parse($at)->setTimezone(self::SCHEDULE_TZ)->format('Y-m-d H');
     }
 
     /** Час публикации из расписания канала. */
@@ -1678,6 +1710,21 @@ class TelegramChatBroadcastService
         $allowedAt = $this->lastPostedAt($broadcastId)?->addMinutes(self::MIN_GAP_MINUTES);
 
         return $allowedAt && $allowedAt->gt($now) ? $allowedAt : null;
+    }
+
+    /**
+     * Часы публикации канала в порядке возрастания, по Москве.
+     *
+     * Слоты заданы — берём их. Не заданы — один слот из period: так канал без
+     * слотов ведёт себя ровно как раньше.
+     *
+     * @return list<int>
+     */
+    public function effectiveSlots(TelegramChatBroadcast $broadcast): array
+    {
+        $slots = $broadcast->slots;
+
+        return $slots !== [] ? $slots : [$this->periodHour($broadcast)];
     }
 
     /** Когда канал постил в последний раз — любым видом записи. */
