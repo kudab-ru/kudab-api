@@ -5,6 +5,7 @@ namespace App\Services\Telegram;
 use App\Contracts\Telegram\TelegramChatBroadcastRepositoryInterface;
 use App\Models\Event;
 use App\Models\TelegramChat;
+use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\Venue;
 use App\Support\BroadcastSafety;
@@ -29,7 +30,8 @@ use RuntimeException;
  *     последнюю неделю (одно место не мелькает дважды подряд).
  *  + текст (venues.tg_portrait) перегенерится парсером при новых данных.
  *
- * Каденс — раз в неделю (WEEKLY_COOLDOWN_DAYS с последнего портрета канала).
+ * Каденс — настройка канала portrait_every_days (по умолчанию неделя),
+ * считается от последнего отправленного портрета канала.
  */
 class TelegramVenuePortraitService
 {
@@ -42,8 +44,13 @@ class TelegramVenuePortraitService
     /** Кросс-формат: окно, в котором событие площадки блокирует её портрет. */
     private const CROSS_FORMAT_DAYS = 7;
 
-    /** Каденс канала: не чаще одного портрета в N дней (≈ раз в неделю). */
-    private const WEEKLY_COOLDOWN_DAYS = 7;
+    /**
+     * Сколько площадок нужно в пуле на один портрет в неделю.
+     *
+     * Площадка возвращается в ротацию через COOLDOWN_DAYS, то есть пул не
+     * расходуется, а рециркулирует: потолок частоты = пул ÷ (кулдаун ÷ 7).
+     */
+    public const POOL_PER_WEEKLY_POST = self::COOLDOWN_DAYS / 7;
 
     /**
      * Сколько дней не предлагать площадку, чей портрет отклонили или сняли.
@@ -89,7 +96,7 @@ class TelegramVenuePortraitService
         foreach ($this->broadcastRepository->listEnabledWithSchedule() as $broadcast) {
             $summary['checked']++;
 
-            if (! $this->venuePortraitDue($broadcast->id, $now)) {
+            if (! $this->venuePortraitDue($broadcast, $now)) {
                 continue;
             }
             $summary['due']++;
@@ -184,13 +191,14 @@ class TelegramVenuePortraitService
     }
 
     /**
-     * Пора ли каналу постить портрет: последний портрет постнут ≥ недели назад
-     * (или ни разу). Каденс независим от событийного last_run_at.
+     * Пора ли каналу постить портрет: последний портрет постнут ≥ каденса
+     * назад (или ни разу). Каденс независим от событийного last_run_at и
+     * задаётся настройкой канала — раньше он был константой в коде.
      */
-    private function venuePortraitDue(int $broadcastId, Carbon $now): bool
+    private function venuePortraitDue(TelegramChatBroadcast $broadcast, Carbon $now): bool
     {
         $last = TelegramChatBroadcastItem::query()
-            ->where('broadcast_id', $broadcastId)
+            ->where('broadcast_id', $broadcast->id)
             ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
             ->where('status', TelegramChatBroadcastItem::STATUS_POSTED)
             ->max('posted_at');
@@ -199,7 +207,7 @@ class TelegramVenuePortraitService
             return true;
         }
 
-        return Carbon::parse($last)->lt($now->copy()->subDays(self::WEEKLY_COOLDOWN_DAYS));
+        return Carbon::parse($last)->lt($now->copy()->subDays($broadcast->portrait_every_days));
     }
 
     /** Незакрытые айтемы канала (любого типа) — «в полёте». */
@@ -477,6 +485,44 @@ class TelegramVenuePortraitService
      * не ставим. Это и есть «таймаут» — ручной пост не приведёт к двойному.
      * После отправки posted_at площадки обновится → авто-каденс сдвинется на неделю.
      */
+    /**
+     * Следующая площадка в ротации — как карточка предложения.
+     *
+     * Для пустого слота в ленте: «Портрет: бар «Архив» · не показывали
+     * 6 недель». Ротация уже считает и порядок, и дату последнего портрета —
+     * здесь только собираем из этого карточку.
+     *
+     * @return array{venue_id: int, name: string, cover: ?string, weeks_since: ?int}|null
+     */
+    public function nextPortraitSuggestion(TelegramChatBroadcast $broadcast, Carbon $now): ?array
+    {
+        $chat = $broadcast->chat;
+        if (! $chat instanceof TelegramChat || ! $chat->city_id) {
+            return null;
+        }
+
+        $venue = $this->pickNextVenueForChat((int) $chat->city_id, (int) $broadcast->id, $now);
+        if (! $venue) {
+            return null;
+        }
+
+        $lastPosted = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
+            ->where('status', TelegramChatBroadcastItem::STATUS_POSTED)
+            ->where('venue_id', $venue->id)
+            ->max('posted_at');
+
+        return [
+            'venue_id' => (int) $venue->id,
+            'name' => (string) $venue->name,
+            'cover' => $this->venueCoverUrl((int) $venue->id),
+            'weeks_since' => $lastPosted
+                ? (int) floor(Carbon::parse($lastPosted)->diffInDays($now) / 7)
+                : null,
+        ];
+    }
+
     public function enqueueVenueManually(
         int $broadcastId,
         int $venueId,

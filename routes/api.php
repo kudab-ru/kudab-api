@@ -89,6 +89,7 @@ Route::prefix('admin')
         Route::get('/broadcast/channels/{id}/suggestions', [AdminBroadcastController::class, 'suggestions']);
         Route::patch('/broadcast/channels/{id}', [AdminBroadcastController::class, 'updateChannel']);
         Route::post('/broadcast/channels/{id}/enqueue', [AdminBroadcastController::class, 'enqueue']);
+        Route::post('/broadcast/channels/{id}/enqueue-venue', [AdminBroadcastController::class, 'enqueueVenue']);
         Route::post('/broadcast/channels/{id}/rebuild', [AdminBroadcastController::class, 'rebuild']);
         Route::post('/broadcast/channels/{id}/move', [AdminBroadcastController::class, 'move']);
         Route::patch('/broadcast/items/{id}', [AdminBroadcastController::class, 'update']);

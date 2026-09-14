@@ -59,6 +59,9 @@ class AdminBroadcastController extends Controller
         // Город канала: city_id вне fillable, и ставить его надо тем же
         // методом, которым это делают CLI и бот.
         private readonly \App\Services\Telegram\TelegramChatService $chatService,
+        // Портреты площадок: у них свой сборщик текста и свои картинки — у
+        // записи нет события, из которого их берут событийные посты.
+        private readonly \App\Services\Telegram\TelegramVenuePortraitService $venuePortraits,
     ) {}
 
     /** Каналы со сводкой: что в ленте, когда последний пост, молчит ли. */
@@ -259,11 +262,11 @@ class AdminBroadcastController extends Controller
             }
         }
 
-        return response()->json([
-            'data' => collect($ordered)->map(function (array $pair) use ($feedVenueIds, $chainSizes) {
+        $rows = collect($ordered)->map(function (array $pair) use ($feedVenueIds, $chainSizes) {
                 [$e, $key] = $pair;
 
                 return [
+                    'kind' => 'event',
                     'event_id' => (int) $e->id,
                     'title' => (string) $e->title,
                     'venue' => $e->venue?->name,
@@ -280,7 +283,79 @@ class AdminBroadcastController extends Controller
                     'price_min' => $e->price_min,
                     'price_max' => $e->price_max,
                 ];
-            })->values(),
+            })->values();
+
+        // Портрет площадки — такой же кандидат на пустой слот, как событие.
+        // В макете он третьей карточкой: «Портрет: бар «Архив» · площадка · не
+        // показывали 6 недель». Ротацию и порядок считает сервис портретов.
+        $portrait = $this->venuePortraits->nextPortraitSuggestion($broadcast, now());
+        if ($portrait !== null) {
+            $rows->push([
+                'kind' => 'venue',
+                'event_id' => null,
+                'venue_id' => $portrait['venue_id'],
+                'title' => 'Портрет: '.$portrait['name'],
+                'venue' => $portrait['name'],
+                'chain' => 'venue:'.$portrait['venue_id'],
+                'chain_size' => 1,
+                'start_time' => null,
+                'price_status' => null,
+                'reasons' => [
+                    $portrait['weeks_since'] === null
+                        ? 'ни разу не показывали'
+                        : 'не показывали '.$portrait['weeks_since'].' нед.',
+                ],
+                'event_url' => null,
+                'cover' => $portrait['cover'],
+                'end_time' => null,
+                'price_min' => null,
+                'price_max' => null,
+            ]);
+        }
+
+        return response()->json(['data' => $rows->values()]);
+    }
+
+    /** Поставить портрет площадки в ленту канала. */
+    public function enqueueVenue(Request $request, int $broadcastId): JsonResponse
+    {
+        $data = $request->validate([
+            'venue_id' => ['required', 'integer'],
+            'publish_at' => ['nullable', 'date'],
+        ]);
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
+
+        try {
+            $item = $this->venuePortraits->enqueueVenueManually(
+                (int) $broadcast->id,
+                (int) $data['venue_id'],
+                Carbon::now(),
+                // Из админки ставит человек, руками и осознанно: «один портрет
+                // в полёте» здесь не запрет, а подсказка — она уже отработала
+                // на автопостановке.
+                force: true,
+                reviewGate: (bool) config('services.bot.broadcast_review_gate'),
+                reviewerTelegramId: $broadcast->chat?->owner?->telegram_id
+                    ? (int) $broadcast->chat->owner->telegram_id
+                    : null,
+            );
+        } catch (\RuntimeException $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+        }
+
+        if (! empty($data['publish_at'])) {
+            $item->publish_at = $this->toUtc($data['publish_at']);
+            $item->save();
+            $this->buildCaptionFor($item, $broadcast);
+        }
+
+        return response()->json([
+            'data' => $this->itemPayload(
+                $item->fresh(),
+                null,
+                \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']),
+            ),
         ]);
     }
 
@@ -438,13 +513,14 @@ class AdminBroadcastController extends Controller
         if ($request->has('caption')) {
             $caption = trim((string) $data['caption']);
             if ($caption === '') {
-                // Пустая правка = «вернуть шаблонный»: сбрасываем и собираем заново.
+                // Пустая правка = «вернуть шаблонный»: сбрасываем и собираем
+                // заново — и у события, и у портрета площадки.
                 $item->caption = null;
                 $item->caption_source = null;
                 $broadcast = TelegramChatBroadcast::query()->find($item->broadcast_id);
-                $event = Event::query()->find($item->event_id);
-                if ($broadcast && $event) {
-                    $this->fillCaption($item, $broadcast, $event);
+                if ($broadcast) {
+                    $item->save();
+                    $this->buildCaptionFor($item, $broadcast);
                 }
             } else {
                 $item->caption = $caption;
@@ -462,9 +538,13 @@ class AdminBroadcastController extends Controller
                 // Берём ТОЛЬКО картинки самого события. Иначе через ручку
                 // можно было бы отправить в канал любую чужую ссылку, а
                 // ошибка в адресе всплыла бы уже при публикации.
-                $available = $item->event_id
-                    ? $this->broadcasts->eventPhotos((int) $item->event_id, self::PHOTO_CANDIDATES)
-                    : [];
+                $available = match (true) {
+                    $item->kind === TelegramChatBroadcastItem::KIND_VENUE && $item->venue_id !== null
+                        => $this->venuePortraits->venuePhotoUrls((int) $item->venue_id, self::PHOTO_CANDIDATES),
+                    $item->event_id !== null
+                        => $this->broadcasts->eventPhotos((int) $item->event_id, self::PHOTO_CANDIDATES),
+                    default => [],
+                };
 
                 $clean = [];
                 foreach ($chosen as $url) {
@@ -549,10 +629,12 @@ class AdminBroadcastController extends Controller
                 $item->caption = null;
                 $item->caption_source = null;
                 $bc = TelegramChatBroadcast::query()->find($item->broadcast_id);
-                $ev = Event::query()->find($item->event_id);
-                if ($bc && $ev) {
+                if ($bc) {
                     $item->save();
-                    $this->fillCaption($item, $bc, $ev);
+                    // Раньше здесь требовалось событие, и у портрета площадки
+                    // перенос дня просто обнулял текст: запись уходила в бота
+                    // пустой и висела там вечно.
+                    $this->buildCaptionFor($item, $bc);
                 }
             }
         }
@@ -772,13 +854,47 @@ class AdminBroadcastController extends Controller
         if ($item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
             return;
         }
+
+        $item->caption = null;
+        $item->caption_source = null;
+        $item->save();
+
+        $this->buildCaptionFor($item, $broadcast);
+    }
+
+    /**
+     * Собрать текст записи заново — любого вида.
+     *
+     * У портрета площадки нет события, а вся сборка текста шла через него:
+     * пустой текст у портрета сохранялся как NULL, бот на пустом тексте бросал
+     * задачу, ничего не помечая, и «один портрет в полёте» после этого
+     * закрывал постановку следующего навсегда. Поэтому правка портрета и была
+     * выключена в интерфейсе — она действительно вешала канал.
+     */
+    private function buildCaptionFor(TelegramChatBroadcastItem $item, TelegramChatBroadcast $broadcast): void
+    {
+        if ($item->kind === TelegramChatBroadcastItem::KIND_VENUE) {
+            $venue = $item->venue_id ? \App\Models\Venue::query()->find($item->venue_id) : null;
+            if (! $venue) {
+                return;
+            }
+
+            // «Что здесь скоро» считаем от дня публикации, а не от сейчас.
+            $item->caption = $this->venuePortraits->buildVenueCaption(
+                $venue,
+                $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now(),
+            );
+            $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
+            $item->save();
+
+            return;
+        }
+
         $event = Event::query()->find($item->event_id);
         if (! $event) {
             return;
         }
-        $item->caption = null;
-        $item->caption_source = null;
-        $item->save();
+
         $this->fillCaption($item, $broadcast, $event);
     }
 
@@ -1103,6 +1219,7 @@ class AdminBroadcastController extends Controller
             'slots' => ['sometimes', 'array', 'max:'.TelegramChatBroadcast::MAX_SLOTS],
             'slots.*' => ['integer', 'between:0,23'],
             'horizon_days' => ['sometimes', 'integer', 'min:1', 'max:31'],
+            'portrait_every_days' => ['sometimes', 'integer', 'min:1', 'max:90'],
         ]);
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
@@ -1135,6 +1252,9 @@ class AdminBroadcastController extends Controller
         }
         if ($request->has('horizon_days')) {
             $broadcast->horizon_days = (int) $data['horizon_days'];
+        }
+        if ($request->has('portrait_every_days')) {
+            $broadcast->portrait_every_days = (int) $data['portrait_every_days'];
         }
 
         // Город пишем ЧЕРЕЗ сервис: city_id вне $fillable у модели чата, и
@@ -1170,6 +1290,25 @@ class AdminBroadcastController extends Controller
      * Повторяет выбор из TelegramChatBroadcastService: ручной состав сильнее
      * автоподбора, NULL — «собрать автоматически».
      */
+    /**
+     * Картинки портрета: ручной состав сильнее, иначе обложка с записи.
+     *
+     * Ровно то, что уйдёт в канал: выдача задачи боту читает photo_urls, а при
+     * их отсутствии собирает набор по площадке.
+     *
+     * @return list<string>
+     */
+    private function venuePhotos(TelegramChatBroadcastItem $i): array
+    {
+        if (is_array($i->photo_urls)) {
+            return array_values(array_filter($i->photo_urls, 'is_string'));
+        }
+
+        return $i->venue_id
+            ? $this->venuePortraits->venuePhotoUrls((int) $i->venue_id, self::PHOTO_LIMIT)
+            : array_values(array_filter([$i->photo_url]));
+    }
+
     private function effectivePhotos(TelegramChatBroadcastItem $i, ?Event $event = null): array
     {
         if (is_array($i->photo_urls)) {
@@ -1299,6 +1438,19 @@ class AdminBroadcastController extends Controller
             // в день, час берётся из расписания.
             'slots' => $b->slots,
             'horizon_days' => $b->horizon_days,
+            // Каденс портретов и пул площадок, из которого он берётся: без
+            // второго числа первое не с чем сверить. Потолок частоты —
+            // пул ÷ (кулдаун ÷ 7), то есть пул ÷ 12,86.
+            'portrait_every_days' => $b->portrait_every_days,
+            'portrait_pool' => $b->chat?->city_id
+                ? \App\Models\Venue::query()
+                    ->where('city_id', $b->chat->city_id)
+                    ->where('status', 'active')
+                    ->whereNull('deleted_at')
+                    ->whereNotNull('tg_portrait')
+                    ->where('tg_portrait', '<>', '')
+                    ->count()
+                : 0,
             'in_feed' => $openEvents,
             'waiting' => $waitingEvents,
             'last_posted_at' => $lastPosted ? Carbon::parse($lastPosted)->toIso8601String() : null,
@@ -1451,13 +1603,17 @@ class AdminBroadcastController extends Controller
             // — через тот же eventPhotos, которым собирается задача боту;
             // у портрета площадки картинка лежит на самой записи.
             'photos' => $i->kind === TelegramChatBroadcastItem::KIND_VENUE
-                ? array_values(array_filter([$i->photo_url]))
+                ? $this->venuePhotos($i)
                 : $this->effectivePhotos($i, $event),
-            // Всё, из чего можно собрать альбом. Портрет площадки не
-            // собирают руками: там одна картинка, и она на самой записи.
-            'photo_candidates' => $i->kind === TelegramChatBroadcastItem::KIND_VENUE || ! $i->event_id
-                ? []
-                : $this->candidatePhotos($i, $event),
+            // Всё, из чего можно собрать альбом. У портрета это картинки
+            // площадки: раньше здесь был пустой список, и любой выбор состава
+            // упирался в 422 — белый список был пуст по определению.
+            'photo_candidates' => match (true) {
+                $i->kind === TelegramChatBroadcastItem::KIND_VENUE && $i->venue_id !== null
+                    => $this->venuePortraits->venuePhotoUrls((int) $i->venue_id, self::PHOTO_CANDIDATES),
+                $i->event_id !== null => $this->candidatePhotos($i, $event),
+                default => [],
+            },
             // Состав выбран руками — пересборка ленты его не тронет.
             'photos_manual' => is_array($i->photo_urls),
         ];

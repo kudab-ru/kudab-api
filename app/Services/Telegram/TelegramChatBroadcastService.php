@@ -610,11 +610,20 @@ class TelegramChatBroadcastService
             ];
             if ($isVenue) {
                 // Портрет площадки: готовый текст + НЕСКОЛЬКО обложек-прокси (альбом).
-                $photoUrls = $item->venue_id
-                    ? $this->venuePortraitService->venuePhotoUrls((int) $item->venue_id, 4)
-                    : [];
-                if ($photoUrls === [] && $item->photo_url) {
-                    $photoUrls = [(string) $item->photo_url];
+                // Ручной выбор сильнее автоподбора — как у событий. Без этой
+                // ветки состав альбома, собранный в админке, до канала не
+                // доезжал: выдача каждый раз пересобирала набор по площадке.
+                // NULL — «собрать автоматически», пустой массив — осознанное
+                // «без картинок».
+                if (is_array($item->photo_urls)) {
+                    $photoUrls = array_values(array_filter($item->photo_urls, 'is_string'));
+                } else {
+                    $photoUrls = $item->venue_id
+                        ? $this->venuePortraitService->venuePhotoUrls((int) $item->venue_id, 4)
+                        : [];
+                    if ($photoUrls === [] && $item->photo_url) {
+                        $photoUrls = [(string) $item->photo_url];
+                    }
                 }
                 $base += [
                     'kind' => 'venue',

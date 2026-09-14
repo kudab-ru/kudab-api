@@ -156,6 +156,34 @@ class TelegramChatBroadcast extends Model
         $this->settings = $settings;
     }
 
+    /**
+     * Как часто канал публикует портрет площадки, в днях.
+     *
+     * Каденс жил константой в коде: увидеть или сдвинуть его можно было только
+     * деплоем, а состояние («когда следующий») нигде не хранится и выводится
+     * запросом MAX(posted_at).
+     *
+     * Потолок частоты считается из пула: площадка возвращается в ротацию через
+     * COOLDOWN_DAYS, значит пул должен быть не меньше, чем частота × 90/7.
+     */
+    public function getPortraitEveryDaysAttribute(): int
+    {
+        $raw = ($this->settings ?? [])['portrait_every_days'] ?? null;
+
+        if (! is_numeric($raw)) {
+            return 7;
+        }
+
+        return max(1, min(90, (int) $raw));
+    }
+
+    public function setPortraitEveryDaysAttribute(int $days): void
+    {
+        $settings = $this->settings ?? [];
+        $settings['portrait_every_days'] = max(1, min(90, $days));
+        $this->settings = $settings;
+    }
+
     public function getPeriodAttribute(): string
     {
         $settings = $this->settings ?? [];
