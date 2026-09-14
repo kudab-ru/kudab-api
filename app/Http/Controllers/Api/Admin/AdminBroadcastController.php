@@ -56,6 +56,9 @@ class AdminBroadcastController extends Controller
         private readonly TelegramChatBroadcastRepositoryInterface $chatBroadcasts,
         // Только ради загрузки картинок всей ленты одним запросом.
         private readonly EventRepository $events,
+        // Город канала: city_id вне fillable, и ставить его надо тем же
+        // методом, которым это делают CLI и бот.
+        private readonly \App\Services\Telegram\TelegramChatService $chatService,
     ) {}
 
     /** Каналы со сводкой: что в ленте, когда последний пост, молчит ли. */
@@ -66,7 +69,9 @@ class AdminBroadcastController extends Controller
 
         // Порядок стабильный: без него список приходил как ляжет, и в
         // интерфейсе первым оказывался выключенный канал.
-        $rows = TelegramChatBroadcast::query()->with('chat')->orderBy('id')->get();
+        // chat.city — чтобы название города не тянулось отдельным запросом
+        // на каждый канал.
+        $rows = TelegramChatBroadcast::query()->with('chat.city')->orderBy('id')->get();
 
         $templates = \App\Models\TelegramMessageTemplate::query()
             ->where('locale', 'ru')
@@ -75,9 +80,20 @@ class AdminBroadcastController extends Controller
             ->pluck('code')
             ->all();
 
+        // Города — оттуда же и по тому же правилу, что резолвит их запись:
+        // только активные. Готовая ручка admin/select/cities статус не
+        // фильтрует и отдала бы одиннадцать отключённых городов, которые
+        // запись всё равно не примет.
+        $cities = \App\Models\City::query()
+            ->where('status', 'active')
+            ->orderBy('name')
+            ->get(['id', 'name'])
+            ->map(fn ($c) => ['id' => (int) $c->id, 'name' => (string) $c->name])
+            ->all();
+
         return response()->json([
             'data' => $rows->map(fn (TelegramChatBroadcast $b) => $this->channelPayload($b))->values(),
-            'meta' => ['templates' => $templates],
+            'meta' => ['templates' => $templates, 'cities' => $cities],
         ]);
     }
 
@@ -1061,6 +1077,7 @@ class AdminBroadcastController extends Controller
             'period' => ['sometimes', 'string', 'max:32'],
             'template_code' => ['sometimes', 'string', 'max:32'],
             'feed_limit' => ['sometimes', 'integer', 'min:1', 'max:31'],
+            'city_id' => ['sometimes', 'nullable', 'integer'],
         ]);
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
@@ -1087,6 +1104,25 @@ class AdminBroadcastController extends Controller
         }
         if ($request->has('feed_limit')) {
             $broadcast->feed_limit = (int) $data['feed_limit'];
+        }
+
+        // Город пишем ЧЕРЕЗ сервис: city_id вне $fillable у модели чата, и
+        // наивный update() вернул бы 200, ничего не изменив. Сервис заодно
+        // проверяет, что город существует и активен.
+        if ($request->has('city_id') && $broadcast->chat) {
+            $cityId = $data['city_id'] ?? null;
+            if ($cityId === null) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => 'Город нельзя убрать: без него канал перестанет публиковать.',
+                ], 422);
+            }
+
+            try {
+                $this->chatService->forceSetChatCity($broadcast->chat, (string) $cityId);
+            } catch (\RuntimeException $e) {
+                return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+            }
         }
 
         $broadcast->save();
@@ -1235,6 +1271,10 @@ class AdminBroadcastController extends Controller
             // Привязка из админки владельца не пишет — за веб-админом нет
             // телеграм-пользователя, — поэтому признак обязан быть виден.
             'has_owner' => $b->chat?->telegram_user_id !== null,
+            // Город канала: без него подбирать события не из чего, и до сих
+            // пор его не было видно в админке вовсе — только текст проблемы.
+            'city_id' => $b->chat?->city_id ? (int) $b->chat->city_id : null,
+            'city_name' => $b->chat?->city?->name,
             // Может ли ЭТОТ стенд вообще отправлять в этот канал. На проде
             // всегда да; на стенде — нет, если канал не назван в
             // KUDAB_ADMIN_BROADCAST разрешении (см. BroadcastSafety).
