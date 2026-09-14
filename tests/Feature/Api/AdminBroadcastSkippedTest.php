@@ -72,6 +72,48 @@ class AdminBroadcastSkippedTest extends TestCase
         );
     }
 
+    public function test_patch_cannot_put_two_posts_on_one_day(): void
+    {
+        $broadcast = $this->makeChannel();
+        $day = now()->addDays(2)->setTime(10, 0);
+
+        $occupant = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $occupant->publish_at = $day;
+        $occupant->save();
+
+        $moving = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $this->patchJson("/api/admin/broadcast/items/{$moving->id}", [
+            'publish_at' => $day->toIso8601String(),
+        ])->assertOk();
+
+        // Занявший день уступает место и возвращается в общую очередь — как
+        // при постановке. Два поста на одном дне не появляются.
+        $this->assertNull($occupant->fresh()->publish_at);
+        $this->assertNotNull($moving->fresh()->publish_at);
+    }
+
+    public function test_patch_refuses_day_when_pinned_post_holds_it(): void
+    {
+        $broadcast = $this->makeChannel();
+        $day = now()->addDays(2)->setTime(10, 0);
+
+        $pinned = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $pinned->publish_at = $day;
+        $pinned->is_pinned = true;
+        $pinned->save();
+
+        $moving = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $res = $this->patchJson("/api/admin/broadcast/items/{$moving->id}", [
+            'publish_at' => $day->toIso8601String(),
+        ]);
+
+        $res->assertStatus(409);
+        $this->assertNotNull($pinned->fresh()->publish_at, 'закреплённый остался на своём дне');
+        $this->assertNull($moving->fresh()->publish_at);
+    }
+
     private function makeChannel(): TelegramChatBroadcast
     {
         $owner = TelegramUser::create(['telegram_id' => 8307201745]);

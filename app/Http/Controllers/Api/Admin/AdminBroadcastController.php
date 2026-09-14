@@ -329,24 +329,11 @@ class AdminBroadcastController extends Controller
             // в ленте без дня и его можно поставить обратно одним движением.
             $displaced = null;
             if ($publishAt !== null) {
-                $targetDay = $publishAt->copy()->setTimezone('Europe/Moscow')->toDateString();
-
-                $occupant = TelegramChatBroadcastItem::query()
-                    ->where('broadcast_id', $broadcast->id)
-                    // event_id <> ? в SQL молча выбрасывает строки с NULL, а это
-                    // портреты площадок: занятый ими день выглядел свободным.
-                    ->where(function ($q) use ($event) {
-                        $q->whereNull('event_id')->orWhere('event_id', '<>', $event->id);
-                    })
-                    // Пост со статусом «ошибка» день занимает: в сетке он виден,
-                    // и класть поверх него второй — значит показать два поста на
-                    // одном дне.
-                    ->whereIn('status', [...$this->openStatuses(), TelegramChatBroadcastItem::STATUS_ERROR])
-                    ->whereNull('posted_at')
-                    ->whereNotNull('publish_at')
-                    ->get()
-                    ->first(fn (TelegramChatBroadcastItem $x) => Carbon::parse($x->publish_at)
-                        ->setTimezone('Europe/Moscow')->toDateString() === $targetDay);
+                $occupant = $this->dayOccupant(
+                    (int) $broadcast->id,
+                    $publishAt,
+                    exceptEventId: (int) $event->id,
+                );
 
                 if ($occupant && $occupant->is_pinned) {
                     return response()->json([
@@ -468,8 +455,53 @@ class AdminBroadcastController extends Controller
         }
 
         if ($request->has('publish_at')) {
+            $newAt = $this->toUtc($data['publish_at']);
+
+            // Те же две проверки, что при постановке и переносе. Раньше их
+            // здесь не было ни одной, и через карточку правки можно было
+            // поставить два поста на один день или увести анонс за событие —
+            // мимо всех защит, которые стоят на соседних путях.
+            if ($newAt !== null) {
+                $refusal = DB::transaction(function () use ($item, $newAt) {
+                    $event = $item->event_id ? Event::query()->find($item->event_id) : null;
+                    if ($event && $event->start_time) {
+                        $endsAt = $event->end_time ?: $event->start_time;
+                        if (Carbon::parse($endsAt)->lt($newAt)) {
+                            return ['К этому дню событие уже пройдёт — пост будет про прошлое.', 422];
+                        }
+                    }
+
+                    $occupant = $this->dayOccupant(
+                        (int) $item->broadcast_id,
+                        $newAt,
+                        exceptItemId: (int) $item->id,
+                    );
+
+                    if ($occupant && $occupant->is_pinned) {
+                        return ['В этот день закреплён пост — сначала снимите закрепление.', 409];
+                    }
+
+                    if ($occupant) {
+                        // Как при постановке: прежний пост не удаляем, а
+                        // возвращаем в общую очередь без дня.
+                        $occupant->publish_at = null;
+                        $occupant->save();
+                        $broadcast = TelegramChatBroadcast::query()->find($item->broadcast_id);
+                        if ($broadcast) {
+                            $this->regenerateCaption($occupant, $broadcast);
+                        }
+                    }
+
+                    return null;
+                });
+
+                if ($refusal !== null) {
+                    return response()->json(['ok' => false, 'error' => $refusal[0]], $refusal[1]);
+                }
+            }
+
             $before = optional($item->publish_at)?->toDateString();
-            $item->publish_at = $this->toUtc($data['publish_at']);
+            $item->publish_at = $newAt;
             $after = optional($item->publish_at)?->toDateString();
 
             // Дата поменялась — шаблонный текст пересобираем: в нём есть
@@ -1100,6 +1132,39 @@ class AdminBroadcastController extends Controller
         }
 
         return $this->broadcasts->eventPhotos((int) $i->event_id, $limit);
+    }
+
+    /**
+     * Кто занимает этот день в ленте канала.
+     *
+     * Один запрос на все пути, которые пишут publish_at: раньше он был
+     * скопирован в постановку и перенос, а правка текста ставила день вообще
+     * без проверок — через неё в один день клались два поста.
+     */
+    private function dayOccupant(
+        int $broadcastId,
+        Carbon $publishAt,
+        ?int $exceptEventId = null,
+        ?int $exceptItemId = null,
+    ): ?TelegramChatBroadcastItem {
+        $targetDay = $publishAt->copy()->setTimezone('Europe/Moscow')->toDateString();
+
+        return TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            // event_id <> ? в SQL молча выбрасывает строки с NULL, а это
+            // портреты площадок: занятый ими день выглядел свободным.
+            ->when($exceptEventId !== null, fn ($q) => $q->where(function ($w) use ($exceptEventId) {
+                $w->whereNull('event_id')->orWhere('event_id', '<>', $exceptEventId);
+            }))
+            ->when($exceptItemId !== null, fn ($q) => $q->where('id', '<>', $exceptItemId))
+            // Пост со статусом «ошибка» день занимает: в сетке он виден, и
+            // класть поверх него второй — значит показать два поста на одном дне.
+            ->whereIn('status', [...$this->openStatuses(), TelegramChatBroadcastItem::STATUS_ERROR])
+            ->whereNull('posted_at')
+            ->whereNotNull('publish_at')
+            ->get()
+            ->first(fn (TelegramChatBroadcastItem $x) => Carbon::parse($x->publish_at)
+                ->setTimezone('Europe/Moscow')->toDateString() === $targetDay);
     }
 
     private function openStatuses(): array
