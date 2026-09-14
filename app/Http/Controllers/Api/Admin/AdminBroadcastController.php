@@ -288,9 +288,11 @@ class AdminBroadcastController extends Controller
         // Портрет площадки — такой же кандидат на пустой слот, как событие.
         // В макете он третьей карточкой: «Портрет: бар «Архив» · площадка · не
         // показывали 6 недель». Ротацию и порядок считает сервис портретов.
-        $portrait = $this->venuePortraits->nextPortraitSuggestion($broadcast, now());
+        $portrait = $this->venuePortraits->nextPortraitSuggestion($broadcast, $publishAt ?? now());
         if ($portrait !== null) {
-            $rows->push([
+            // В НАЧАЛО: под пустой слот админка берёт три первые карточки, а
+            // событийных строк до сорока — в хвосте портрет не увидел бы никто.
+            $rows->prepend([
                 'kind' => 'venue',
                 'event_id' => null,
                 'venue_id' => $portrait['venue_id'],
@@ -326,37 +328,90 @@ class AdminBroadcastController extends Controller
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
 
-        try {
-            $item = $this->venuePortraits->enqueueVenueManually(
-                (int) $broadcast->id,
-                (int) $data['venue_id'],
-                Carbon::now(),
-                // Из админки ставит человек, руками и осознанно: «один портрет
-                // в полёте» здесь не запрет, а подсказка — она уже отработала
-                // на автопостановке.
-                force: true,
-                reviewGate: (bool) config('services.bot.broadcast_review_gate'),
-                reviewerTelegramId: $broadcast->chat?->owner?->telegram_id
-                    ? (int) $broadcast->chat->owner->telegram_id
-                    : null,
-            );
-        } catch (\RuntimeException $e) {
-            return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+        // Портрет этой площадки уже в ленте. Повтор ловить больше нечем: UNIQUE
+        // стоит на (broadcast_id, event_id), а у портретов event_id пуст — в
+        // постгресе такие строки не конфликтуют, и два поста про одно место
+        // прошли бы молча.
+        $already = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
+            ->where('venue_id', (int) $data['venue_id'])
+            ->whereIn('status', $this->openStatuses())
+            ->exists();
+
+        if ($already) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Портрет этой площадки уже стоит в ленте — дождитесь отправки или снимите его.',
+            ], 422);
         }
 
-        if (! empty($data['publish_at'])) {
-            $item->publish_at = $this->toUtc($data['publish_at']);
-            $item->save();
-            $this->buildCaptionFor($item, $broadcast);
-        }
+        $publishAt = ! empty($data['publish_at']) ? $this->toUtc($data['publish_at']) : null;
 
-        return response()->json([
-            'data' => $this->itemPayload(
-                $item->fresh(),
-                null,
-                \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']),
-            ),
-        ]);
+        return DB::transaction(function () use ($broadcast, $data, $publishAt) {
+            // Тот же замок, что у постановки события: две вкладки иначе
+            // положат два поста в один слот.
+            TelegramChatBroadcast::query()->whereKey($broadcast->id)->lockForUpdate()->first();
+
+            $displaced = null;
+            if ($publishAt !== null) {
+                $occupant = $this->dayOccupant(
+                    (int) $broadcast->id,
+                    $publishAt,
+                    bySlot: $broadcast->slots !== [],
+                );
+
+                if ($occupant && $occupant->is_pinned) {
+                    return response()->json([
+                        'ok' => false,
+                        'error' => 'В этот день закреплён пост — сначала снимите закрепление.',
+                    ], 409);
+                }
+
+                if ($occupant) {
+                    $occupant->publish_at = null;
+                    $occupant->save();
+                    $this->regenerateCaption($occupant, $broadcast);
+                    $displacedEvent = $occupant->event_id ? Event::query()->find($occupant->event_id) : null;
+                    $displaced = ['id' => $occupant->id, 'title' => $displacedEvent?->title];
+                }
+            }
+
+            try {
+                $item = $this->venuePortraits->enqueueVenueManually(
+                    (int) $broadcast->id,
+                    (int) $data['venue_id'],
+                    Carbon::now(),
+                    // «Одно в полёте» среди портретов здесь не запрет: человек
+                    // ставит руками и осознанно, а повтор той же площадки уже
+                    // отклонён выше.
+                    force: true,
+                    reviewGate: (bool) config('services.bot.broadcast_review_gate'),
+                    reviewerTelegramId: $broadcast->chat?->owner?->telegram_id
+                        ? (int) $broadcast->chat->owner->telegram_id
+                        : null,
+                );
+            } catch (\RuntimeException $e) {
+                return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+            }
+
+            // День пришёл из интерфейса — ставим его. Не пришёл: постановка уже
+            // выбрала ближайший свободный слот сама.
+            if ($publishAt !== null) {
+                $item->publish_at = $publishAt;
+                $item->save();
+                $this->buildCaptionFor($item, $broadcast);
+            }
+
+            return response()->json([
+                'data' => $this->itemPayload(
+                    $item->fresh(),
+                    null,
+                    \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']),
+                ),
+                'meta' => ['displaced' => $displaced],
+            ]);
+        });
     }
 
     /** Поставить событие в ленту канала. */
@@ -515,10 +570,9 @@ class AdminBroadcastController extends Controller
             if ($caption === '') {
                 // Пустая правка = «вернуть шаблонный»: сбрасываем и собираем
                 // заново — и у события, и у портрета площадки.
-                $item->caption = null;
-                $item->caption_source = null;
                 $broadcast = TelegramChatBroadcast::query()->find($item->broadcast_id);
                 if ($broadcast) {
+                    $item->caption_source = null;
                     $item->save();
                     $this->buildCaptionFor($item, $broadcast);
                 }
@@ -626,10 +680,9 @@ class AdminBroadcastController extends Controller
                 && $item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL
                 && ! $request->has('caption')
             ) {
-                $item->caption = null;
-                $item->caption_source = null;
                 $bc = TelegramChatBroadcast::query()->find($item->broadcast_id);
                 if ($bc) {
+                    $item->caption_source = null;
                     $item->save();
                     // Раньше здесь требовалось событие, и у портрета площадки
                     // перенос дня просто обнулял текст: запись уходила в бота
@@ -855,10 +908,6 @@ class AdminBroadcastController extends Controller
             return;
         }
 
-        $item->caption = null;
-        $item->caption_source = null;
-        $item->save();
-
         $this->buildCaptionFor($item, $broadcast);
     }
 
@@ -876,6 +925,10 @@ class AdminBroadcastController extends Controller
         if ($item->kind === TelegramChatBroadcastItem::KIND_VENUE) {
             $venue = $item->venue_id ? \App\Models\Venue::query()->find($item->venue_id) : null;
             if (! $venue) {
+                // Площадку удалили или сняли с публикации — прежний текст
+                // оставляем. Обнулить его значило бы отдать боту пустую
+                // задачу: он такую бросает, ничего не помечая, и «один портрет
+                // в полёте» закрыл бы постановку следующего навсегда.
                 return;
             }
 
@@ -895,6 +948,9 @@ class AdminBroadcastController extends Controller
             return;
         }
 
+        $item->caption = null;
+        $item->caption_source = null;
+        $item->save();
         $this->fillCaption($item, $broadcast, $event);
     }
 
@@ -1304,9 +1360,18 @@ class AdminBroadcastController extends Controller
             return array_values(array_filter($i->photo_urls, 'is_string'));
         }
 
-        return $i->venue_id
-            ? $this->venuePortraits->venuePhotoUrls((int) $i->venue_id, self::PHOTO_LIMIT)
-            : array_values(array_filter([$i->photo_url]));
+        if (! $i->venue_id) {
+            return array_values(array_filter([$i->photo_url]));
+        }
+
+        // Та же величина и тот же фолбэк, что в доставке: иначе админка
+        // показывала три картинки, а в канал уходило четыре.
+        $photos = $this->venuePortraits->venuePhotoUrls(
+            (int) $i->venue_id,
+            \App\Services\Telegram\TelegramVenuePortraitService::ALBUM_LIMIT,
+        );
+
+        return $photos !== [] ? $photos : array_values(array_filter([$i->photo_url]));
     }
 
     private function effectivePhotos(TelegramChatBroadcastItem $i, ?Event $event = null): array

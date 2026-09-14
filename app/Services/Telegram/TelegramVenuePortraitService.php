@@ -60,6 +60,9 @@ class TelegramVenuePortraitService
      */
     private const REFUSED_COOLDOWN_DAYS = 30;
 
+    /** Сколько картинок уходит альбомом у портрета. Читается и доставкой, и админкой. */
+    public const ALBUM_LIMIT = 4;
+
     /** Название+адрес ≤ этой длины (символов) — склеиваем в одну строку шапки. */
     private const HEADER_ONE_LINE_MAX = 42;
 
@@ -210,6 +213,12 @@ class TelegramVenuePortraitService
         return Carbon::parse($last)->lt($now->copy()->subDays($broadcast->portrait_every_days));
     }
 
+    /** Канал по id — планировщику нужны его слоты и горизонт. */
+    private function broadcastOf(int $broadcastId): TelegramChatBroadcast
+    {
+        return TelegramChatBroadcast::query()->findOrFail($broadcastId);
+    }
+
     /** Незакрытые айтемы канала (любого типа) — «в полёте». */
     /**
      * Незакрытые записи ПОРТРЕТОВ у канала.
@@ -287,10 +296,28 @@ class TelegramVenuePortraitService
             ->whereNotNull('e.venue_id')
             ->pluck('e.venue_id')->all();
 
+        // 1в) уже стоит в ленте: открытая запись портрета этой площадки. Без
+        // этого списка ротация предлагала её снова, а ручная постановка с
+        // force ставила второй пост про то же место — на стенде так и вышло с
+        // «Попкорн Драмой».
+        $alreadyQueued = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                TelegramChatBroadcastItem::STATUS_APPROVED,
+                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+            ])
+            ->whereNotNull('venue_id')
+            ->pluck('venue_id')->all();
+
         $exclude = array_values(array_unique(array_merge(
             array_map('intval', $onCooldown),
             array_map('intval', $recentlyRefused),
             array_map('intval', $recentEventVenues),
+            array_map('intval', $alreadyQueued),
         )));
 
         // последняя дата портрета по каждой площадке — для ротации (кто дольше молчал)
@@ -546,10 +573,21 @@ class TelegramVenuePortraitService
             throw new RuntimeException("У «{$venue->name}» нет tg_portrait — сначала parser:tg:venue-portrait --venue={$venueId} --save.");
         }
 
-        $caption = $this->buildVenueCaption($venue, $now);
+        // День назначаем ЗДЕСЬ, а не у вызывающего: запись без момента для
+        // портрета означает «ехать следующим тиком в любой час» — ровно то
+        // поведение, ради отмены которого портрету и дали слот.
+        $publishAt = $this->slotPlanner->nextFreeSlot($this->broadcastOf($broadcastId), $now);
+        if (! $publishAt) {
+            throw new RuntimeException('В ленте нет свободного слота на ближайшие дни — освободите день или расширьте горизонт.');
+        }
+
+        $caption = $this->buildVenueCaption($venue, $publishAt);
         $photo = $this->venueCoverUrl($venueId);
 
-        $attrs = ['status' => TelegramChatBroadcastItem::STATUS_PENDING];
+        $attrs = [
+            'status' => TelegramChatBroadcastItem::STATUS_PENDING,
+            'publish_at' => $publishAt->copy()->utc(),
+        ];
         if ($reviewGate) {
             if (! $reviewerTelegramId) {
                 throw new RuntimeException('Ревью-гейт включён, но у канала нет owner для превью.');
@@ -558,6 +596,7 @@ class TelegramVenuePortraitService
                 'status' => TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
                 'review_reviewer_telegram_id' => $reviewerTelegramId,
                 'review_deadline_at' => $now->copy()->addMinutes((int) config('services.bot.broadcast_review_timeout_minutes', 120)),
+                'publish_at' => $publishAt->copy()->utc(),
             ];
         }
 

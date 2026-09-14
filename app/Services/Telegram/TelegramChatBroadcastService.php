@@ -561,11 +561,18 @@ class TelegramChatBroadcastService
                 Log::warning('broadcast.poll.overdue_day_dropped', [
                     'broadcast_id' => $broadcast->id,
                     'item_id' => $item->id,
+                    'kind' => $item->kind,
                     'publish_at' => $item->publish_at->toIso8601String(),
                     'due_at' => $dueAt->toIso8601String(),
                 ]);
 
-                $item->publish_at = null;
+                // Событие без дня ждёт суточного окна — это и есть «потерять
+                // день». Портрету день назначаем заново: без момента он попал
+                // бы под то же окно, что события, и его недельный каденс
+                // растворился бы в событийном расписании.
+                $item->publish_at = $item->kind === TelegramChatBroadcastItem::KIND_VENUE
+                    ? $this->slotPlanner->nextFreeSlot($broadcast, $now)?->utc()
+                    : null;
                 $item->save();
 
                 continue;
@@ -598,7 +605,11 @@ class TelegramChatBroadcastService
             // только для publish_at = NULL» загнало бы его под окно, которого
             // у него никогда не было.
             $hasOwnMoment = $item->publish_at !== null;
-            if (! $isVenue && ! $inReviewFlow && ! $hasOwnMoment && ! $this->isSingleRunDue($broadcast, $now)) {
+            // Портрет площадки раньше шёл мимо гейта целиком: у него не было
+            // момента, и ждать ему было нечего. Теперь момент есть всегда, а
+            // исключение по типу превращало любую запись без дня — после
+            // просрочки или вытеснения — в «уехать первым тиком в любой час».
+            if (! $inReviewFlow && ! $hasOwnMoment && ! $this->isSingleRunDue($broadcast, $now)) {
                 continue;
             }
 
@@ -615,11 +626,15 @@ class TelegramChatBroadcastService
                 // доезжал: выдача каждый раз пересобирала набор по площадке.
                 // NULL — «собрать автоматически», пустой массив — осознанное
                 // «без картинок».
-                if (is_array($item->photo_urls)) {
+                $manualPhotos = is_array($item->photo_urls);
+                if ($manualPhotos) {
                     $photoUrls = array_values(array_filter($item->photo_urls, 'is_string'));
                 } else {
                     $photoUrls = $item->venue_id
-                        ? $this->venuePortraitService->venuePhotoUrls((int) $item->venue_id, 4)
+                        ? $this->venuePortraitService->venuePhotoUrls(
+                            (int) $item->venue_id,
+                            TelegramVenuePortraitService::ALBUM_LIMIT,
+                        )
                         : [];
                     if ($photoUrls === [] && $item->photo_url) {
                         $photoUrls = [(string) $item->photo_url];
@@ -628,7 +643,10 @@ class TelegramChatBroadcastService
                 $base += [
                     'kind' => 'venue',
                     'caption' => (string) $item->caption,
-                    'photo_url' => $photoUrls[0] ?? $item->photo_url,
+                    // При ручном наборе фолбэка на обложку быть не должно:
+                    // пустой массив — это осознанное «без картинок», и обложка
+                    // сводила бы выбор на нет.
+                    'photo_url' => $manualPhotos ? ($photoUrls[0] ?? null) : ($photoUrls[0] ?? $item->photo_url),
                     'photo_urls' => $photoUrls,
                 ];
             } else {

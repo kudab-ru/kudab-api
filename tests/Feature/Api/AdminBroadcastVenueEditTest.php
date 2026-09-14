@@ -83,15 +83,25 @@ class AdminBroadcastVenueEditTest extends TestCase
     {
         [$item, $venue] = $this->portraitItem();
 
+        // Площадка, чей портрет уже стоит в ленте, из ротации исключена —
+        // предлагаться должна другая.
+        $other = new Venue;
+        $other->city_id = $venue->city_id;
+        $other->name = 'Книжный клуб';
+        $other->slug = 'knizhny-klub';
+        $other->status = 'active';
+        $other->tg_portrait = 'Второй этаж, кофе и лекции.';
+        $other->save();
+
         $res = $this->getJson("/api/admin/broadcast/channels/{$item->broadcast_id}/suggestions");
 
         $res->assertOk();
         $portrait = collect($res->json('data'))->firstWhere('kind', 'venue');
 
         $this->assertNotNull($portrait, 'портрет — такой же кандидат на пустой слот');
-        $this->assertSame($venue->id, $portrait['venue_id']);
+        $this->assertSame($other->id, $portrait['venue_id'], 'та, что уже в ленте, не предлагается');
         $this->assertNull($portrait['event_id'], 'у портрета нет события');
-        $this->assertStringContainsString('Зелёный театр', (string) $portrait['title']);
+        $this->assertStringContainsString('Книжный клуб', (string) $portrait['title']);
         $this->assertNotEmpty($portrait['reasons']);
     }
 
@@ -100,15 +110,62 @@ class AdminBroadcastVenueEditTest extends TestCase
         [$item, $venue] = $this->portraitItem();
         $day = now()->addDays(3)->setTime(10, 0);
 
+        $other = new Venue;
+        $other->city_id = $venue->city_id;
+        $other->name = 'Книжный клуб';
+        $other->slug = 'knizhny-klub';
+        $other->status = 'active';
+        $other->tg_portrait = 'Второй этаж, кофе и лекции.';
+        $other->save();
+
         $res = $this->postJson("/api/admin/broadcast/channels/{$item->broadcast_id}/enqueue-venue", [
-            'venue_id' => $venue->id,
+            'venue_id' => $other->id,
             'publish_at' => $day->toIso8601String(),
         ]);
 
         $res->assertOk();
         $this->assertSame('venue', $res->json('data.kind'));
         $this->assertNotNull($res->json('data.publish_at'));
-        $this->assertStringContainsString('Зелёный театр', (string) $res->json('data.caption'));
+        $this->assertStringContainsString('Книжный клуб', (string) $res->json('data.caption'));
+    }
+
+    /** Второй портрет той же площадки в ленту не ставится. */
+    public function test_second_portrait_of_same_venue_is_refused(): void
+    {
+        [$item, $venue] = $this->portraitItem();
+
+        $res = $this->postJson("/api/admin/broadcast/channels/{$item->broadcast_id}/enqueue-venue", [
+            'venue_id' => $venue->id,
+        ]);
+
+        $res->assertStatus(422);
+        $this->assertStringContainsString('уже стоит в ленте', (string) $res->json('error'));
+        $this->assertSame(1, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $item->broadcast_id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
+            ->count());
+    }
+
+    /** Без дня постановка сама берёт ближайший свободный слот. */
+    public function test_portrait_without_day_gets_a_slot(): void
+    {
+        [$item, $venue] = $this->portraitItem();
+
+        $other = new Venue;
+        $other->city_id = $venue->city_id;
+        $other->name = 'Книжный клуб';
+        $other->slug = 'knizhny-klub';
+        $other->status = 'active';
+        $other->tg_portrait = 'Второй этаж, кофе и лекции.';
+        $other->save();
+
+        $res = $this->postJson("/api/admin/broadcast/channels/{$item->broadcast_id}/enqueue-venue", [
+            'venue_id' => $other->id,
+        ]);
+
+        $res->assertOk();
+        // Без момента портрет уезжал бы первым же тиком в произвольный час.
+        $this->assertNotNull($res->json('data.publish_at'));
     }
 
     /** @return array{0: TelegramChatBroadcastItem, 1: Venue} */
