@@ -1010,6 +1010,17 @@ class AdminBroadcastController extends Controller
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
 
+        // Включение канала без владельца — самый тихий из отказов: поллер
+        // пропустит канал, ЛС-сигнал писать некому, в ленте посты будут
+        // копиться. Лучше отказать здесь, где есть кому прочитать причину.
+        if ($request->has('enabled') && (bool) $data['enabled'] && $broadcast->chat?->telegram_user_id === null) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'У канала нет владельца — включать его бессмысленно: посты не уйдут, '
+                    .'а сигнал о простое писать некому. Привяжите канал через бота, чтобы владелец появился.',
+            ], 422);
+        }
+
         if ($request->has('enabled')) {
             $broadcast->enabled = (bool) $data['enabled'];
         }
@@ -1131,6 +1142,11 @@ class AdminBroadcastController extends Controller
             'posted_total' => $postedTotal,
             'venue_in_feed' => $openVenue,
             'errors_count' => $errors,
+            // Владелец канала — не украшение: без него поллер молча пропускает
+            // канал целиком (TelegramChatBroadcastService: skipped_no_owner).
+            // Привязка из админки владельца не пишет — за веб-админом нет
+            // телеграм-пользователя, — поэтому признак обязан быть виден.
+            'has_owner' => $b->chat?->telegram_user_id !== null,
             // Может ли ЭТОТ стенд вообще отправлять в этот канал. На проде
             // всегда да; на стенде — нет, если канал не назван в
             // KUDAB_ADMIN_BROADCAST разрешении (см. BroadcastSafety).
@@ -1181,6 +1197,17 @@ class AdminBroadcastController extends Controller
             $out[] = ['level' => 'info', 'text' => 'Автопостинг выключен — посты не уходят.'];
 
             return $out;
+        }
+
+        // Раньше города: без владельца не уйдёт ни один пост, даже если
+        // город задан и лента полна.
+        if ($b->chat?->telegram_user_id === null) {
+            $out[] = [
+                'level' => 'danger',
+                'text' => 'У канала нет владельца — посты не уходят вовсе, и сигнал о простое писать некому. '
+                    .'Владелец появляется, когда канал привязывают через бота: добавьте бота администратором '
+                    .'канала или откройте привязку из телеграма.',
+            ];
         }
 
         if (! $b->chat?->city_id) {

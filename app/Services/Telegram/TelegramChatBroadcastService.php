@@ -55,6 +55,18 @@ class TelegramChatBroadcastService
     private const CROSS_TIME_WINDOW_DAYS = 14;
 
     /**
+     * Пояс, в котором задано расписание канала.
+     *
+     * Час в period («daily_10») — это 10:00 по Москве: так он подписан в
+     * админке и так его понимает владелец. Приложение живёт в UTC
+     * (config/app.php), поэтому окно выпуска обязано приводиться к этому
+     * поясу явно — иначе daily_10 открывается в 13:00 МСК. Лента день
+     * назначает уже по Москве (fillFeedDays), так что до этой правки план и
+     * выпуск считались в разных поясах.
+     */
+    private const SCHEDULE_TZ = 'Europe/Moscow';
+
+    /**
      * Lease claim'а на публикацию (сек). ≫ времени поста (тик поллера 60с) —
      * за это окно зависший claim реклеймится, но активный пост не перехватят.
      */
@@ -581,6 +593,18 @@ class TelegramChatBroadcastService
             } else {
                 // pending/planned/approved/auto_approved → публикуем в канал.
                 if (! $ownerTelegramId) {
+                    // Канал без владельца не публикует НИЧЕГО, и раньше молчал
+                    // об этом: ни поста, ни лога, ни ЛС-сигнала, ни признака в
+                    // админке. Включённый канал выглядел рабочим и не отдавал
+                    // ни одной ошибки. Теперь отказ хотя бы виден в логе, а в
+                    // админке его показывает channelProblems.
+                    Log::warning('broadcast.poll.skipped_no_owner', [
+                        'broadcast_id' => $broadcast->id,
+                        'telegram_chat_id' => $chat->telegram_chat_id,
+                        'item_id' => $item->id,
+                        'hint' => 'у чата не задан telegram_user_id — владелец канала',
+                    ]);
+
                     continue;
                 }
                 // claim-before-post: атомарно клеймим айтем, чтобы параллельный
@@ -1539,7 +1563,10 @@ class TelegramChatBroadcastService
         if (str_starts_with($period, 'daily_')) {
             $hour = (int) substr($period, 6) ?: 10;
 
-            $candidate = $now->copy()->setTime($hour, 0, 0);
+            // Час расписания — московский, см. SCHEDULE_TZ. Сравнение Carbon
+            // идёт по абсолютному моменту, поэтому разные пояса у $now и
+            // $candidate корректны.
+            $candidate = $now->copy()->setTimezone(self::SCHEDULE_TZ)->setTime($hour, 0, 0);
 
             // если сейчас ещё не HH:00 — берём вчерашнее окно
             if ($now->lt($candidate)) {
@@ -1567,8 +1594,8 @@ class TelegramChatBroadcastService
             ];
             $targetDow = $dowMap[$dowCode] ?? Carbon::FRIDAY;
 
-            // последнее «окно» не позже now
-            $candidate = $now->copy()->setTime($hour, 0, 0);
+            // последнее «окно» не позже now; день недели и час — московские
+            $candidate = $now->copy()->setTimezone(self::SCHEDULE_TZ)->setTime($hour, 0, 0);
 
             // отматываем назад до нужного дня недели и не позже now
             while ($candidate->dayOfWeek !== $targetDow || $candidate->gt($now)) {

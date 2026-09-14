@@ -390,6 +390,49 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertSame($event->id, $tasks[0]['event_id']);
     }
 
+    /**
+     * Окно расписания открывается по Москве, а не по UTC.
+     *
+     * Час в period («daily_10») подписан в админке как московский, и день
+     * ленте назначается по Москве. Окно же считалось в поясе приложения —
+     * UTC, — поэтому daily_10 открывался в 13:00 МСК. Проверяем границу:
+     * в 09:30 МСК пост ещё не уходит, в 10:30 — уже.
+     *
+     * last_run_at стоит на вчерашних 20:00 МСК: это момент между вчерашним
+     * московским окном и сегодняшним, и только на нём старое поведение
+     * отличается от нового.
+     */
+    public function test_daily_window_opens_by_moscow_hour(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 06:30:00', 'UTC')); // 09:30 МСК
+
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Событие', Carbon::parse('2026-09-16 15:00:00', 'UTC'));
+
+        $chat = $this->createChannelChat($city->id, -1017, 555444);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $broadcast->last_run_at = Carbon::parse('2026-09-14 17:00:00', 'UTC'); // вчера 20:00 МСК
+        $broadcast->save();
+
+        $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $this->assertCount(
+            0,
+            $this->service()->collectDueSingleRuns(now()),
+            'в 09:30 МСК окно daily_10 ещё закрыто',
+        );
+
+        Carbon::setTestNow(Carbon::parse('2026-09-15 07:30:00', 'UTC')); // 10:30 МСК
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks, 'в 10:30 МСК окно уже открыто');
+        $this->assertSame('publish', $tasks[0]['type']);
+
+        Carbon::setTestNow();
+    }
+
     public function test_decide_review_approve_sets_approved(): void
     {
         $item = $this->makeStandaloneReviewItem(555333);
