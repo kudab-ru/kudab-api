@@ -584,8 +584,15 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertCount(0, $this->service()->collectDueSingleRuns(now()));
     }
 
-    /** Пост, чей день прошёл давно, снимается, а не уходит задним числом. */
-    public function test_overdue_item_is_skipped(): void
+    /**
+     * Пост, чей день прошёл давно, теряет день — но не выбрасывается.
+     *
+     * Так пачка просроченных не уезжает подряд после паузы канала: без дня
+     * записи уходят по одной за окно расписания. Выбрасывать их нельзя — на
+     * живой очереди три из пяти просроченных оказались многодневками, которые
+     * ещё идут, а подобрать их заново нечем: подбор смотрит на дату начала.
+     */
+    public function test_overdue_item_loses_its_day_but_survives(): void
     {
         $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $community = $this->createCommunity($city->id, 'Организатор');
@@ -597,10 +604,36 @@ class BroadcastEnqueueDueTest extends TestCase
         $item->publish_at = now()->subHours(3);
         $item->save();
 
+        $this->assertCount(0, $this->service()->collectDueSingleRuns(now()), 'в этот тик не уходит');
+
+        $fresh = $item->fresh();
+        $this->assertNull($fresh->publish_at, 'день снят');
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $fresh->status, 'пост остался в ленте');
+    }
+
+    /** Многодневка, которая ещё идёт, просрочку переживает и уходит следующим тиком. */
+    public function test_overdue_running_event_still_goes_later(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Выставка', now()->subDays(2));
+        $event->end_time = now()->addMonths(3);
+        $event->save();
+
+        $chat = $this->createChannelChat($city->id, -1027, 556444);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = now()->subDays(3);
+        $item->save();
+
+        $this->assertCount(0, $this->service()->collectDueSingleRuns(now()));
+        $this->assertNull($item->fresh()->publish_at);
+
+        // Следующий тик: дня нет, но запись жива и уходит по окну расписания.
         $tasks = $this->service()->collectDueSingleRuns(now());
 
-        $this->assertCount(0, $tasks);
-        $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $item->fresh()->status);
+        $this->assertCount(1, $tasks, 'многодневка не потеряна');
+        $this->assertSame($item->id, $tasks[0]['item_id']);
     }
 
     /**
