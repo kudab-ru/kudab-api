@@ -872,14 +872,19 @@ class AdminBroadcastController extends Controller
     {
         DB::beginTransaction();
 
+        // Только записи С ДНЁМ: «Разбавить» про НЕДЕЛЮ, как и предупреждение
+        // над лентой — «одна сеть занимает несколько дней». Снятие записи из
+        // очереди ожидания ни одного дня не освобождает, значит и заполнять
+        // потом нечего: кнопка отработала бы вхолостую и откатилась.
         $items = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
             ->whereIn('status', $this->openStatuses())
             ->whereNull('posted_at')
+            ->whereNotNull('publish_at')
             ->where(function ($q) {
                 $q->whereNull('kind')->orWhere('kind', '<>', TelegramChatBroadcastItem::KIND_VENUE);
             })
-            ->orderByRaw('COALESCE(publish_at, planned_at, created_at) ASC')
+            ->orderBy('publish_at')
             ->get();
 
         $events = Event::query()
