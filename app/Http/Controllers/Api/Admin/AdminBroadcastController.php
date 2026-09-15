@@ -1851,14 +1851,35 @@ class AdminBroadcastController extends Controller
         // запись встаёт без дня, в «Ждут свободного дня», и займёт ближайший
         // освободившийся. Отказ здесь читался бы как «вернуть нельзя», хотя
         // вернуть как раз можно.
-        $slot = app(\App\Services\Telegram\BroadcastSlotPlanner::class)
-            ->nextFreeSlot($broadcast, Carbon::now());
+        //
+        // У подборки слот СВОЙ — день недели рубрики и вечерний час канала.
+        // Событийный планировщик отдал бы первый свободный слот горизонта, то
+        // есть утро вторника, и недельный каденс рубрики растворился бы.
+        $slot = $item->kind === TelegramChatBroadcastItem::KIND_DIGEST
+            ? $this->digestBooking->slotFor($broadcast, Carbon::now())
+            : app(\App\Services\Telegram\BroadcastSlotPlanner::class)->nextFreeSlot($broadcast, Carbon::now());
 
         $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
         $item->error_message = null;
         $item->claimed_at = null;
         $item->claim_token = null;
         $item->publish_at = $slot?->copy()->utc();
+
+        // Подборку возвращают спустя дни, и её прежний состав к этому моменту
+        // наполовину прошёл. Снимаем состав и текст целиком: на новом слоте она
+        // соберётся заново, как любая другая. Правленый человеком текст
+        // (`caption_source = manual`) — исключение, его оставляет regenerate.
+        if ($item->kind === TelegramChatBroadcastItem::KIND_DIGEST
+            && $item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->delete();
+            $item->digest_meta = null;
+            $item->caption = null;
+            $item->caption_source = null;
+            $item->save();
+
+            return null;
+        }
+
         $item->save();
 
         // Текст собран под прежний день — пересобираем под новый. Свой не трогаем.

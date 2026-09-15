@@ -326,6 +326,87 @@ class BroadcastSlotsTest extends TestCase
     }
 
     /** @return array{0: TelegramChatBroadcast, 1: list<Event>} */
+    /**
+     * Дальний слот выбирает из СВОЕГО горизонта, а не из сегодняшнего.
+     *
+     * Верхняя граница окна кандидатов считалась от «сейчас», нижняя — от слота:
+     * чем дальше слот, тем уже окно, и в конце недели оно схлопывалось в ноль.
+     * Замер по живому каналу: на слот через 13 дней кандидатов с суточной форой
+     * было НОЛЬ против 59 при окне от слота.
+     */
+    public function test_far_slot_sees_events_within_its_own_horizon(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10],
+            'horizon_days' => 14,
+        ]);
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $venue = $this->insertVenue($city->id, 'Дальняя площадка', 'far-venue');
+        // Событие через 20 дней: из окна «сегодня + 14» оно не видно ни одному
+        // слоту, из окна «слот + 14» — видно слотам начиная с шестого дня.
+        $this->insertEvent($city->id, $venue, 'Событие дальнего дня', 20, attractive: true);
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $event = Event::query()->where('title', 'Событие дальнего дня')->firstOrFail();
+
+        $this->assertSame(1, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('event_id', $event->id)
+            ->count(), 'событие дальнего дня обязано попасть в ленту');
+    }
+
+    /**
+     * Пост не встаёт впритык к началу события и тем более после него.
+     *
+     * Прежнее условие пускало однодневку по `end_time >= момент публикации`:
+     * мастер-класс 13:00–15:00 стоял в слоте 15:00, то есть пост уходил в
+     * минуту окончания. Из 27 записей живой ленты 5 были про уже начавшееся.
+     */
+    public function test_event_starting_right_after_the_slot_is_not_scheduled(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC')); // 06:00 МСК
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10],
+            'horizon_days' => 2,
+        ]);
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $venue = $this->insertVenue($city->id, 'Площадка впритык', 'tight-venue');
+
+        // Сегодня в 12:00 МСК — через два часа после слота 10:00.
+        $community = Community::create(['name' => 'Орг впритык', 'city_id' => $city->id]);
+        $tight = new Event;
+        $tight->community_id = $community->id;
+        $tight->title = 'Событие через два часа';
+        $tight->status = 'active';
+        $tight->city_id = $city->id;
+        $tight->venue_id = $venue;
+        $tight->start_time = Carbon::parse('2026-09-15 12:00', 'Europe/Moscow');
+        $tight->end_time = Carbon::parse('2026-09-15 14:00', 'Europe/Moscow');
+        $tight->start_date = $tight->start_time->toDateString();
+        $tight->description = str_repeat('Подробное описание вечера. ', 12);
+        $tight->tickets_status = 'available';
+        $tight->save();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $scheduled = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('event_id', $tight->id)
+            ->first();
+
+        $this->assertNull($scheduled, 'пост за два часа до начала ленте не нужен');
+    }
+
     private function channelWithEvents(int $count): array
     {
         $city = $this->insertCity();

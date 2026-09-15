@@ -629,6 +629,50 @@ class BroadcastDigestComposerTest extends TestCase
             'строки про события остаются: они привязаны к id');
     }
 
+    /**
+     * Снятую подборку возвращают в ЕЁ слот, а не в первый свободный.
+     *
+     * Событийный планировщик отдаёт первый свободный слот горизонта — то есть
+     * утро ближайшего дня. Подборка в утреннем вторнике теряет весь смысл
+     * рубрики и при этом закрывает бронь настоящей следующей.
+     */
+    public function test_restored_digest_returns_to_its_own_weekday(): void
+    {
+        \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
+        $user = \App\Models\User::factory()->create();
+        $user->assignRole('superadmin');
+        \Laravel\Sanctum\Sanctum::actingAs($user);
+
+        $broadcast = $this->makeChannel();
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'digest_weekday' => 1, // понедельник
+            'digest_hour' => 19,
+            'slots' => [10, 19],
+        ]);
+        $broadcast->save();
+
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $digest = $this->digestItem($broadcast, Carbon::now()->subDay());
+        $draft = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now(), $digest);
+        app(\App\Services\Telegram\TelegramChatBroadcastService::class)->applyDigestDraft($digest, $draft);
+        $digest->status = TelegramChatBroadcastItem::STATUS_SKIPPED;
+        $digest->save();
+
+        $this->postJson("/api/admin/broadcast/items/{$digest->id}/restore")->assertOk();
+
+        $digest->refresh();
+        $at = Carbon::parse($digest->publish_at)->setTimezone('Europe/Moscow');
+
+        $this->assertSame(1, $at->isoWeekday(), 'подборка возвращается в свой день недели');
+        $this->assertSame(19, $at->hour, 'и в свой час');
+        $this->assertNull($digest->caption, 'состав к возврату протух — собирается заново');
+        $this->assertSame(0, DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $digest->id)->count(), 'прежний состав снят');
+    }
+
     private function digestItem(TelegramChatBroadcast $broadcast, Carbon $at): TelegramChatBroadcastItem
     {
         $item = new TelegramChatBroadcastItem;
