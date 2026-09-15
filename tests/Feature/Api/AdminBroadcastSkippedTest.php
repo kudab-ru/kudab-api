@@ -236,6 +236,44 @@ class AdminBroadcastSkippedTest extends TestCase
     }
 
     /** Прошедшее: вернуть такое нельзя, и в списке снятых ему не место. */
+    public function test_suggestion_can_be_published_out_of_turn(): void
+    {
+        $broadcast = $this->makeChannel();
+        $event = $this->futureEvent();
+
+        // Неделя занята целиком — вне очереди это не мешает: пост не встаёт
+        // в сетку, его момент «сейчас».
+        $busy = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $busy->publish_at = now()->addDay()->setTime(10, 0);
+        $busy->event_id = $this->futureEvent()->id;
+        $busy->save();
+
+        $res = $this->postJson("/api/admin/broadcast/channels/{$broadcast->id}/publish-suggestion", [
+            'event_id' => $event->id,
+        ]);
+
+        $res->assertOk();
+        $item = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('event_id', $event->id)
+            ->firstOrFail();
+
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $item->status);
+        $this->assertNotNull($item->publish_at);
+        $this->assertTrue($item->publish_at->lessThanOrEqualTo(now()), 'момент — сейчас, а не будущий слот');
+        // Занявший завтрашний день не тронут: вне очереди никого не вытесняет.
+        $this->assertNotNull($busy->fresh()->publish_at);
+    }
+
+    public function test_past_event_cannot_be_published_out_of_turn(): void
+    {
+        $broadcast = $this->makeChannel();
+
+        $this->postJson("/api/admin/broadcast/channels/{$broadcast->id}/publish-suggestion", [
+            'event_id' => $this->pastEvent()->id,
+        ])->assertStatus(422);
+    }
+
     private function pastEvent(): \App\Models\Event
     {
         return $this->makeEvent(now()->subDays(2), now()->subDay());

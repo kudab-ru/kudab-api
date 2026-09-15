@@ -354,6 +354,89 @@ class AdminBroadcastController extends Controller
         return response()->json(['data' => $rows->values()]);
     }
 
+    /**
+     * Опубликовать предложение вне очереди — одним действием.
+     *
+     * Иначе это два клика с промежуточным состоянием: «Поставить» (а при
+     * полной неделе она откажет — свободного слота нет) и затем «Отправить
+     * сейчас». Пост вне очереди в сетку не встаёт и ничей день не занимает:
+     * его момент — сейчас, а не слот. Зазор между постами при этом остаётся —
+     * он стоит на выдаче задач боту.
+     */
+    public function publishSuggestion(Request $request, int $broadcastId): JsonResponse
+    {
+        $data = $request->validate(['event_id' => ['required', 'integer']]);
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
+
+        $event = Event::query()->find((int) $data['event_id']);
+        if (! $event) {
+            return response()->json(['ok' => false, 'error' => 'Событие не найдено.'], 404);
+        }
+
+        $endsAt = $event->end_time ?: $event->start_time;
+        if ($endsAt && Carbon::parse($endsAt)->lt(Carbon::now())) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Событие уже прошло — публиковать анонс незачем.',
+            ], 422);
+        }
+
+        return DB::transaction(function () use ($broadcast, $event) {
+            TelegramChatBroadcast::query()->whereKey($broadcast->id)->lockForUpdate()->first();
+
+            $item = TelegramChatBroadcastItem::query()
+                ->where('broadcast_id', $broadcast->id)
+                ->where('event_id', $event->id)
+                ->first();
+
+            if ($item && $item->posted_at !== null) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => 'Это событие уже публиковалось в канале.',
+                ], 409);
+            }
+
+            // Снятое и отклонённое оживляем — как при обычной постановке: на
+            // (broadcast_id, event_id) стоит UNIQUE, второй записи не создать.
+            $item ??= new TelegramChatBroadcastItem;
+            $item->broadcast_id = $broadcast->id;
+            $item->event_id = $event->id;
+            $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+            $item->error_message = null;
+            $item->claimed_at = null;
+            $item->claim_token = null;
+            // Придержка на генерацию текста тут не нужна: текст собираем сразу.
+            $item->planned_at = null;
+            $item->publish_at = Carbon::now();
+            if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
+                $item->caption = null;
+                $item->caption_source = null;
+            }
+            $item->save();
+
+            $this->fillCaption($item, $broadcast, $event);
+
+            $willSend = $broadcast->chat?->telegram_chat_id
+                ? BroadcastSafety::postingAllowed((int) $broadcast->chat->telegram_chat_id)
+                : false;
+            $waitUntil = $this->broadcasts->nextPostAllowedAt((int) $broadcast->id, Carbon::now());
+
+            return response()->json([
+                'data' => $this->itemPayload(
+                    $item->fresh(),
+                    Event::query()->with('venue:id,name')->find($item->event_id),
+                ),
+                'meta' => [
+                    'will_send' => $willSend,
+                    'wait_minutes' => $waitUntil
+                        ? (int) ceil(Carbon::now()->diffInSeconds($waitUntil) / 60)
+                        : 0,
+                ],
+            ]);
+        });
+    }
+
     /** Поставить портрет площадки в ленту канала. */
     public function enqueueVenue(Request $request, int $broadcastId): JsonResponse
     {
