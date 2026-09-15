@@ -578,7 +578,11 @@ class TelegramVenuePortraitService
         // поведение, ради отмены которого портрету и дали слот.
         $publishAt = $this->slotPlanner->nextFreeSlot($this->broadcastOf($broadcastId), $now);
         if (! $publishAt) {
-            throw new RuntimeException('В ленте нет свободного слота на ближайшие дни — освободите день или расширьте горизонт.');
+            throw new RuntimeException(
+                'Неделя занята целиком: свободного слота нет. '
+                .'Перетащите портрет на нужный день — он вытеснит стоящий там пост, '
+                .'либо расширьте горизонт ленты в настройках.',
+            );
         }
 
         $caption = $this->buildVenueCaption($venue, $publishAt);

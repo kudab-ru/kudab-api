@@ -1549,11 +1549,12 @@ class TelegramChatBroadcastService
             ])
             ->whereNull('publish_at')
             ->whereNull('posted_at')
-            ->whereNotNull('event_id')
             ->get()
-            ->sortBy(fn (TelegramChatBroadcastItem $i) => (string) optional(
-                Event::query()->find($i->event_id)
-            )?->start_time)
+            // Сначала события, по близости; портреты площадок — в хвост: у них
+            // нет срока, и уступить слот событию для них не потеря.
+            ->sortBy(fn (TelegramChatBroadcastItem $i) => $i->kind === TelegramChatBroadcastItem::KIND_VENUE
+                ? '9999'
+                : (string) optional(Event::query()->find($i->event_id))?->start_time)
             ->values()
             ->all();
 
@@ -1582,6 +1583,14 @@ class TelegramChatBroadcastService
                 $fromWaiting = null;
                 $sameDayKey = null;
                 foreach ($waiting as $k => $candidate) {
+                    // Портрет площадки сроком не связан: занимает слот как есть.
+                    if ($candidate->kind === TelegramChatBroadcastItem::KIND_VENUE) {
+                        $fromWaiting = $candidate;
+                        $sameDayKey = null;
+                        unset($waiting[$k]);
+                        break;
+                    }
+
                     $event = Event::query()->find($candidate->event_id);
                     if (! $event) {
                         unset($waiting[$k]);
@@ -1629,8 +1638,21 @@ class TelegramChatBroadcastService
                         $fromWaiting->caption_source = null;
                     }
                     $fromWaiting->save();
-                    $this->ensureEventCaption($fromWaiting, $broadcast);
-                    $exclude[] = (int) $fromWaiting->event_id;
+
+                    if ($fromWaiting->kind === TelegramChatBroadcastItem::KIND_VENUE) {
+                        // Текст портрета собирается своим сборщиком: события,
+                        // от которого считается «сегодня», у него нет.
+                        $venue = $fromWaiting->venue_id ? Venue::query()->find($fromWaiting->venue_id) : null;
+                        if ($venue && $fromWaiting->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
+                            $fromWaiting->caption = $this->venuePortraitService->buildVenueCaption($venue, $publishAt);
+                            $fromWaiting->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
+                            $fromWaiting->save();
+                        }
+                    } else {
+                        $this->ensureEventCaption($fromWaiting, $broadcast);
+                        $exclude[] = (int) $fromWaiting->event_id;
+                    }
+
                     $summary['filled']++;
 
                     continue;
