@@ -361,7 +361,7 @@ class TelegramChatBroadcastService
             ->active()
             ->upcoming()
             // не брать события, по которым уже есть элемент очереди/отправки
-            ->whereDoesntHave('broadcastItems', function ($q) use ($broadcast, $usedStatuses) {
+            ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcast, $usedStatuses) {
                 $q->where('broadcast_id', $broadcast->id)
                     ->whereIn('status', $usedStatuses);
             });
@@ -1066,11 +1066,11 @@ class TelegramChatBroadcastService
         $query = Event::query()
             ->active()
             ->upcoming()
-            ->whereDoesntHave('broadcastItems', function ($q) use ($broadcastId, $usedStatuses) {
+            ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId, $usedStatuses) {
                 $q->where('broadcast_id', $broadcastId)
                     ->whereIn('status', $usedStatuses);
             })
-            ->whereDoesntHave('broadcastItems', function ($q) use ($broadcastId, $rejectedSince) {
+            ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId, $rejectedSince) {
                 $q->where('broadcast_id', $broadcastId)
                     // ТОЛЬКО rejected. skipped — это «снято из очереди», а не
                     // «не предлагать»: так помечается и снятое руками, и
@@ -1078,7 +1078,10 @@ class TelegramChatBroadcastService
                     // Держать их в остывании значило бы прятать событие на
                     // месяц каждый раз, когда его просто убрали из ленты.
                     ->where('status', TelegramChatBroadcastItem::STATUS_REJECTED)
-                    ->where('updated_at', '>=', $rejectedSince);
+                    // Полным именем: подзапрос джойнит две таблицы, и короткое
+                    // имя разрешается однозначно только пока в таблице связи
+                    // нет такой колонки (её там нет намеренно).
+                    ->where('telegram.chat_broadcast_items.updated_at', '>=', $rejectedSince);
             })
             ->whereHas('community', function ($q) use ($chat) {
                 $q->where('city_id', $chat->city_id);

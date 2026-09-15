@@ -298,11 +298,19 @@ class AdminBroadcastController extends Controller
             return response()->json(['data' => [], 'meta' => ['reason' => 'у канала не задан город']]);
         }
 
-        $inFeed = TelegramChatBroadcastItem::query()
-            ->where('broadcast_id', $broadcast->id)
-            ->whereIn('status', $this->openStatuses())
-            ->pluck('event_id')
-            ->filter()
+        // Что канал уже показывает — по связи «пост → события», а не по колонке
+        // записи: пост-подборка рассказывает о нескольких событиях сразу, и по
+        // колонке ни одно из них не считалось бы занятым. На этом читателе
+        // держится весь анти-дубль пула: события, стоящие в ленте, исключаются
+        // отсюда, а не проверками ниже.
+        $inFeed = DB::table('telegram.chat_broadcast_item_events as l')
+            ->join('telegram.chat_broadcast_items as i', 'i.id', '=', 'l.item_id')
+            ->where('i.broadcast_id', $broadcast->id)
+            ->whereIn('i.status', $this->openStatuses())
+            ->pluck('l.event_id')
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values()
             ->all();
 
         $feedVenueIds = Event::query()->whereIn('id', $inFeed)->pluck('venue_id')->filter()->unique()->all();
@@ -313,21 +321,24 @@ class AdminBroadcastController extends Controller
             ->with('venue:id,name')
             ->whereHas('community', fn ($q) => $q->where('city_id', $chat->city_id))
             ->whereNotIn('id', $inFeed)
-            // Опубликованное не предлагаем: повторить пост нельзя, на
-            // (broadcast_id, event_id) стоит UNIQUE.
-            ->whereDoesntHave('broadcastItems', function ($q) use ($broadcast) {
+            // Опубликованное не предлагаем. Раньше это объяснялось через
+            // UNIQUE(broadcast_id, event_id), но для события, названного
+            // подборкой, строки очереди нет и UNIQUE ничего не гарантирует —
+            // теперь заслон именно здесь, по связи.
+            ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcast) {
                 $q->where('broadcast_id', $broadcast->id)->whereNotNull('posted_at');
             })
             // Отклонённое и снятое остывает 30 дней — тот же срок, что у
             // автоподбора (REJECTED_COOLDOWN_DAYS), иначе пул и предложения
             // расходились бы во мнениях.
-            ->whereDoesntHave('broadcastItems', function ($q) use ($broadcast) {
+            ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcast) {
                 $q->where('broadcast_id', $broadcast->id)
                     // Только rejected: skipped значит «снято из ленты», и
                     // прятать за это событие на месяц было бы наказанием
                     // за обычную перестановку.
                     ->where('status', TelegramChatBroadcastItem::STATUS_REJECTED)
-                    ->where('updated_at', '>=', now()->subDays(30));
+                    // Полным именем — см. докблок Event::broadcastPosts().
+                    ->where('telegram.chat_broadcast_items.updated_at', '>=', now()->subDays(self::REJECTED_COOLDOWN_DAYS));
             })
             ->where('start_time', '<=', now()->addDays(14))
             ->when(
