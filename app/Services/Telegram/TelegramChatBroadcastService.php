@@ -583,6 +583,20 @@ class TelegramChatBroadcastService
                     'due_at' => $dueAt->toIso8601String(),
                 ]);
 
+                // Подборка недели просрочку не переживает: её ценность в
+                // моменте — вечер понедельника, когда неделя ещё вся впереди.
+                // Опоздавшая на день, она рассказывает про позавчера, а состав
+                // ей собирают на отправке, так что «донести старую» нечего.
+                // Снимаем честно, следующую поставит бронь слота.
+                if ($item->kind === TelegramChatBroadcastItem::KIND_DIGEST) {
+                    $this->broadcastItemRepository->markSkipped(
+                        $item,
+                        'подборка не вышла в свой слот — соберём следующую',
+                    );
+
+                    continue;
+                }
+
                 // Событие без дня ждёт суточного окна — это и есть «потерять
                 // день». Портрету день назначаем заново: без момента он попал
                 // бы под то же окно, что события, и его недельный каденс
@@ -601,6 +615,11 @@ class TelegramChatBroadcastService
                 continue;
             }
 
+            // «Текст готов» вместо «это портрет»: подборка недели устроена так
+            // же — свой caption, своё событие не одно. Сравнение с одним типом
+            // зачисляло бы её в события, и первый же тик снял бы её с причиной
+            // «событие недоступно (удалено)», соврав человеку про удаление.
+            $hasReadyCaption = $item->hasReadyCaption();
             $isVenue = $item->kind === TelegramChatBroadcastItem::KIND_VENUE;
             $inReviewFlow = in_array($item->status, [
                 TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
@@ -636,8 +655,9 @@ class TelegramChatBroadcastService
                 'item_id' => (int) $item->id,
                 'telegram_chat_id' => (int) $chat->telegram_chat_id,
             ];
-            if ($isVenue) {
-                // Портрет площадки: готовый текст + НЕСКОЛЬКО обложек-прокси (альбом).
+            if ($hasReadyCaption) {
+                // Готовый текст + НЕСКОЛЬКО обложек-прокси (альбом).
+                // Портрет площадки: картинки берутся у площадки.
                 // Ручной выбор сильнее автоподбора — как у событий. Без этой
                 // ветки состав альбома, собранный в админке, до канала не
                 // доезжал: выдача каждый раз пересобирала набор по площадке.
@@ -647,6 +667,9 @@ class TelegramChatBroadcastService
                 if ($manualPhotos) {
                     $photoUrls = array_values(array_filter($item->photo_urls, 'is_string'));
                 } else {
+                    // У подборки своей площадки нет: автоподбирать ей нечего,
+                    // картинки кладёт композитор (или их нет вовсе — текстовый
+                    // пост это нормальный вид подборки).
                     $photoUrls = $item->venue_id
                         ? $this->venuePortraitService->venuePhotoUrls(
                             (int) $item->venue_id,
@@ -658,7 +681,9 @@ class TelegramChatBroadcastService
                     }
                 }
                 $base += [
-                    'kind' => 'venue',
+                    // Тип отдаём как есть: бот разбирает задачу по нему, и
+                    // подборка обязана прийти к нему подборкой.
+                    'kind' => (string) $item->kind,
                     'caption' => (string) $item->caption,
                     // При ручном наборе фолбэка на обложку быть не должно:
                     // пустой массив — это осознанное «без картинок», и обложка
@@ -1642,7 +1667,11 @@ class TelegramChatBroadcastService
             ->get()
             // Сначала события, по близости; портреты площадок — в хвост: у них
             // нет срока, и уступить слот событию для них не потеря.
-            ->sortBy(fn (TelegramChatBroadcastItem $i) => $i->kind === TelegramChatBroadcastItem::KIND_VENUE
+            // В хвост — ВСЁ, у чего нет своего события: у такой записи нет и
+            // срока, уступить слот событию для неё не потеря. Сравнение с одним
+            // типом ставило подборку ПЕРВОЙ: Event::find(null) даёт null, а он
+            // приводится к пустой строке — меньше любой даты.
+            ->sortBy(fn (TelegramChatBroadcastItem $i) => $i->hasReadyCaption()
                 ? '9999'
                 : (string) optional(Event::query()->find($i->event_id))?->start_time)
             ->values()
@@ -1674,7 +1703,12 @@ class TelegramChatBroadcastService
                 $sameDayKey = null;
                 foreach ($waiting as $k => $candidate) {
                     // Портрет площадки сроком не связан: занимает слот как есть.
-                    if ($candidate->kind === TelegramChatBroadcastItem::KIND_VENUE) {
+                    // Запись с готовым текстом занимает слот как есть — у неё
+                    // нет события, по которому можно было бы проверять сроки.
+                    // Сравнение с одним типом выбрасывало подборку из
+                    // кандидатов, и publish_at у неё оставался пустым НАВСЕГДА:
+                    // в базе запись есть, для планировщика её нет.
+                    if ($candidate->hasReadyCaption()) {
                         $fromWaiting = $candidate;
                         $sameDayKey = null;
                         unset($waiting[$k]);
@@ -1729,7 +1763,7 @@ class TelegramChatBroadcastService
                     }
                     $fromWaiting->save();
 
-                    if ($fromWaiting->kind === TelegramChatBroadcastItem::KIND_VENUE) {
+                    if ($fromWaiting->hasReadyCaption()) {
                         // Текст портрета собирается своим сборщиком: события,
                         // от которого считается «сегодня», у него нет.
                         $venue = $fromWaiting->venue_id ? Venue::query()->find($fromWaiting->venue_id) : null;

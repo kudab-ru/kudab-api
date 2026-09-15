@@ -127,6 +127,28 @@ class TelegramChatBroadcastItem extends Model
 
     public const KIND_VENUE = 'venue';  // портрет площадки (готовый caption)
 
+    public const KIND_DIGEST = 'digest'; // подборка недели: несколько событий, готовый caption
+
+    /**
+     * Виды записей, у которых текст уже готов и события в колонке нет.
+     *
+     * Такие идут по доставке одной веткой: «взять caption и картинки, отдать
+     * боту». Спрашивать этот список, а не сравнивать с одним типом: проверка
+     * вида `kind !== venue` молча зачисляет каждую новую рубрику в события, и
+     * первая же запись подборки снималась бы с причиной «событие недоступно».
+     *
+     * @return list<string>
+     */
+    public static function readyCaptionKinds(): array
+    {
+        return [self::KIND_VENUE, self::KIND_DIGEST];
+    }
+
+    public function hasReadyCaption(): bool
+    {
+        return in_array($this->kind, self::readyCaptionKinds(), true);
+    }
+
     /**
      * Настройки рассылки для чата.
      */
