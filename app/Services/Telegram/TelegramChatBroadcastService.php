@@ -1510,9 +1510,13 @@ class TelegramChatBroadcastService
         if (! $chat instanceof TelegramChat || ! $chat->city_id) {
             return $summary;
         }
-        if (! BroadcastSafety::postingAllowed((int) $chat->telegram_chat_id)) {
-            return $summary;
-        }
+
+        // ПЛАНИРОВАНИЕ — не публикация. Здесь стоял тот же запрет, что на
+        // отправке, и на стенде «Пересобрать неделю» снимала всю ленту, а
+        // заполнить не могла ничего: fillFeedDays выходила первой же строкой.
+        // Запрет остаётся там, где он и нужен, — в выдаче задач боту
+        // (collectDueSingleRuns) и в АВТОМАТИЧЕСКОМ наполнении, которое на
+        // стенде копило записи молча. Нажатое человеком должно работать.
 
         $slots = $this->effectiveSlots($broadcast);
         $weekday = $this->periodWeekday($broadcast);

@@ -114,6 +114,40 @@ class AdminBroadcastSkippedTest extends TestCase
         $this->assertNull($moving->fresh()->publish_at);
     }
 
+    public function test_rebuild_is_rolled_back_when_nothing_to_fill(): void
+    {
+        $broadcast = $this->makeChannel();
+        $item = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = now()->addDay()->setTime(10, 0);
+        $item->save();
+
+        // У канала нет города — заполнить нечем. Раньше пересборка всё равно
+        // снимала ленту, и кнопка работала как «Снять всё».
+        $res = $this->postJson("/api/admin/broadcast/channels/{$broadcast->id}/rebuild");
+
+        $res->assertStatus(409);
+        $this->assertSame(
+            TelegramChatBroadcastItem::STATUS_PENDING,
+            $item->fresh()->status,
+            'лента осталась на месте',
+        );
+    }
+
+    public function test_skipped_item_can_be_restored(): void
+    {
+        $broadcast = $this->makeChannel();
+        $item = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
+        $item->error_message = 'снято при пересборке ленты';
+        $item->save();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/restore")->assertOk();
+
+        $fresh = $item->fresh();
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $fresh->status);
+        $this->assertNull($fresh->error_message);
+        $this->assertNotNull($fresh->publish_at, 'вернулся на свободный слот');
+    }
+
     private function makeChannel(): TelegramChatBroadcast
     {
         $owner = TelegramUser::create(['telegram_id' => 8307201745]);

@@ -95,6 +95,7 @@ Route::prefix('admin')
         Route::patch('/broadcast/items/{id}', [AdminBroadcastController::class, 'update']);
         Route::post('/broadcast/items/{id}/publish-now', [AdminBroadcastController::class, 'publishNow']);
         Route::post('/broadcast/items/{id}/retry', [AdminBroadcastController::class, 'retry']);
+        Route::post('/broadcast/items/{id}/restore', [AdminBroadcastController::class, 'restore']);
         Route::delete('/broadcast/items/{id}', [AdminBroadcastController::class, 'remove']);
 
         // community-social-links (статус active|gray|black, аналог make link-ban/unban/gray)

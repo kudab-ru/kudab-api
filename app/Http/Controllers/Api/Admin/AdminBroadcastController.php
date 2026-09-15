@@ -770,6 +770,8 @@ class AdminBroadcastController extends Controller
             return $this->diversify($broadcast);
         }
 
+        DB::beginTransaction();
+
         // Сколько из снимаемого — те, что ждали свободного дня. Их человек
         // положил туда руками (вытеснив предложением), и молча выметать их
         // нельзя: в интерфейсе написано «дождитесь, пока день освободится».
@@ -799,6 +801,10 @@ class AdminBroadcastController extends Controller
             ->update([
                 'status' => TelegramChatBroadcastItem::STATUS_SKIPPED,
                 'error_message' => 'снято при пересборке ленты',
+                // День отдаём вместе со статусом: снятая запись, сохранившая
+                // publish_at, продолжала занимать слот в недельной сетке —
+                // лента выглядела полной, а живого поста в ней не было ни одного.
+                'publish_at' => null,
                 'claimed_at' => null,
                 'claim_token' => null,
                 'updated_at' => now(),
@@ -812,6 +818,20 @@ class AdminBroadcastController extends Controller
             Carbon::now(),
         );
 
+        // Заменить оказалось нечем — возвращаем ленту как была. Иначе кнопка
+        // «Пересобрать» работает как «Снять всё»: ровно это и случилось на
+        // стенде, где планирование стояло за тем же запретом, что и отправка.
+        if ($dropped > 0 && ($filled['filled'] ?? 0) === 0) {
+            DB::rollBack();
+
+            return response()->json([
+                'ok' => false,
+                'error' => 'Пересборка отменена: заменить ленту нечем — пул пуст. Всё осталось на месте.',
+            ], 409);
+        }
+
+        DB::commit();
+
         return response()->json(['data' => ['dropped' => $dropped, 'waiting_dropped' => $waitingDropped] + $filled]);
     }
 
@@ -823,6 +843,8 @@ class AdminBroadcastController extends Controller
      */
     private function diversify(TelegramChatBroadcast $broadcast): JsonResponse
     {
+        DB::beginTransaction();
+
         $items = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
             ->whereIn('status', $this->openStatuses())
@@ -870,6 +892,17 @@ class AdminBroadcastController extends Controller
             ]);
 
         $filled = $this->broadcasts->fillFeedDays($broadcast->fresh('chat'), Carbon::now());
+
+        if ($dropped > 0 && ($filled['filled'] ?? 0) === 0) {
+            DB::rollBack();
+
+            return response()->json([
+                'ok' => false,
+                'error' => 'Разбавить нечем: других площадок в пуле не нашлось. Лента осталась как была.',
+            ], 409);
+        }
+
+        DB::commit();
 
         return response()->json([
             'data' => ['dropped' => $dropped, 'waiting_dropped' => 0] + $filled,
@@ -1084,6 +1117,75 @@ class AdminBroadcastController extends Controller
             'will_send' => $willSend,
             'wait_minutes' => $waitUntil ? (int) ceil(Carbon::now()->diffInSeconds($waitUntil) / 60) : 0,
         ]]);
+    }
+
+    /**
+     * Вернуть снятый пост в ленту.
+     *
+     * Снятое копилось и не возвращалось ничем: «Снято автоматически» была
+     * витриной без действия, а событие оттуда в пул предложений попадало не
+     * всегда — UNIQUE(broadcast_id, event_id) не даёт поставить его второй раз,
+     * пока старая запись цела.
+     */
+    public function restore(int $itemId): JsonResponse
+    {
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+
+        if ($item->posted_at !== null) {
+            return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
+        }
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat')->find($item->broadcast_id);
+        if (! $broadcast) {
+            return response()->json(['ok' => false, 'error' => 'Канал не найден.'], 404);
+        }
+
+        // Событие могло закончиться, пока запись лежала снятой — возвращать
+        // такое значит вернуть анонс прошлого.
+        if ($item->event_id) {
+            $event = Event::query()->find($item->event_id);
+            if (! $event) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => 'События больше нет — вернуть нечего.',
+                ], 422);
+            }
+            $endsAt = $event->end_time ?: $event->start_time;
+            if ($endsAt && Carbon::parse($endsAt)->lt(Carbon::now())) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => 'Событие уже прошло — возвращать его в ленту незачем.',
+                ], 422);
+            }
+        }
+
+        $slot = app(\App\Services\Telegram\BroadcastSlotPlanner::class)
+            ->nextFreeSlot($broadcast, Carbon::now());
+
+        if (! $slot) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'В ленте нет свободного слота — освободите день или расширьте горизонт.',
+            ], 422);
+        }
+
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->error_message = null;
+        $item->claimed_at = null;
+        $item->claim_token = null;
+        $item->publish_at = $slot->copy()->utc();
+        $item->save();
+
+        // Текст собран под прежний день — пересобираем под новый. Свой не трогаем.
+        $this->regenerateCaption($item, $broadcast);
+
+        return response()->json([
+            'data' => $this->itemPayload(
+                $item->fresh(),
+                $item->event_id ? Event::query()->with('venue:id,name')->find($item->event_id) : null,
+                $item->venue_id ? \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']) : null,
+            ),
+        ]);
     }
 
     /** Вернуть пост в очередь после ошибки — попробовать ещё раз. */
