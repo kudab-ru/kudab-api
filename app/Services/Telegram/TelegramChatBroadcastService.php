@@ -1537,6 +1537,26 @@ class TelegramChatBroadcastService
             ->map(fn ($d) => $this->slotKey(Carbon::parse($d)))
             ->all();
 
+        // Записи, ждущие свободного дня, — ПЕРВЫМИ в освободившиеся слоты.
+        // Иначе очередь ожидания не разбирается никогда: наполнитель каждый
+        // раз берёт новое событие из пула, а в интерфейсе при этом написано
+        // «дождитесь, пока день освободится».
+        $waiting = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+            ])
+            ->whereNull('publish_at')
+            ->whereNull('posted_at')
+            ->whereNotNull('event_id')
+            ->get()
+            ->sortBy(fn (TelegramChatBroadcastItem $i) => (string) optional(
+                Event::query()->find($i->event_id)
+            )?->start_time)
+            ->values()
+            ->all();
+
         $exclude = [];
         for ($i = 0; $i < $broadcast->horizon_days; $i++) {
             $day = $now->copy()->setTimezone(self::SCHEDULE_TZ)->addDays($i)->startOfDay();
@@ -1555,6 +1575,64 @@ class TelegramChatBroadcastService
                     continue;
                 }
                 if (in_array($this->slotKey($publishAt), $taken, true)) {
+                    continue;
+                }
+
+                // Сначала пробуем закрыть слот тем, что уже ждёт дня.
+                $fromWaiting = null;
+                $sameDayKey = null;
+                foreach ($waiting as $k => $candidate) {
+                    $event = Event::query()->find($candidate->event_id);
+                    if (! $event) {
+                        unset($waiting[$k]);
+
+                        continue;
+                    }
+                    $endsAt = $event->end_time ?: $event->start_time;
+                    // То же правило, что у подбора: событие не должно начаться
+                    // раньше публикации, а многодневное — не кончиться.
+                    if (! $endsAt || Carbon::parse($endsAt)->lt($publishAt)) {
+                        continue;
+                    }
+
+                    // Анонс в день события — крайний случай, а не норма: если
+                    // событие ещё впереди, лучше поставить на этот слот то, до
+                    // чего есть время, а «сегодняшнее» отдать более раннему.
+                    $startsAt = $event->start_time ? Carbon::parse($event->start_time) : null;
+                    $sameDay = $startsAt
+                        && $startsAt->copy()->setTimezone(self::SCHEDULE_TZ)->toDateString()
+                            === $publishAt->copy()->setTimezone(self::SCHEDULE_TZ)->toDateString();
+
+                    if ($sameDay && $fromWaiting === null) {
+                        $fromWaiting = $candidate;
+                        $sameDayKey = $k;
+
+                        continue;
+                    }
+
+                    $fromWaiting = $candidate;
+                    $sameDayKey = null;
+                    unset($waiting[$k]);
+                    break;
+                }
+
+                // Никого, кроме «день в день», не нашлось — берём его.
+                if ($fromWaiting !== null && isset($sameDayKey) && $sameDayKey !== null) {
+                    unset($waiting[$sameDayKey]);
+                }
+                $sameDayKey = null;
+
+                if ($fromWaiting !== null) {
+                    $fromWaiting->publish_at = $publishAt->copy()->utc();
+                    if ($fromWaiting->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
+                        $fromWaiting->caption = null;
+                        $fromWaiting->caption_source = null;
+                    }
+                    $fromWaiting->save();
+                    $this->ensureEventCaption($fromWaiting, $broadcast);
+                    $exclude[] = (int) $fromWaiting->event_id;
+                    $summary['filled']++;
+
                     continue;
                 }
 

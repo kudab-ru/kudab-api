@@ -249,6 +249,35 @@ class BroadcastSlotsTest extends TestCase
         $event->save();
     }
 
+    /**
+     * Ждущие дня разбираются первыми, а не лежат вечно.
+     *
+     * Наполнитель каждый раз брал новое событие из пула, и очередь ожидания не
+     * рассасывалась никогда — при том что в интерфейсе написано «дождитесь,
+     * пока день освободится».
+     */
+    public function test_waiting_items_take_free_slots_first(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC')); // 06:00 МСК
+
+        [$broadcast, $events] = $this->channelWithEvents(3);
+
+        // Запись без дня: ждёт свободного слота.
+        $waiting = $this->makeItem($broadcast->id, $events[0]->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $fresh = $waiting->fresh();
+        $this->assertNotNull($fresh->publish_at, 'ждавшая запись получила день');
+        $this->assertSame(
+            '2026-09-15 10',
+            Carbon::parse($fresh->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H'),
+            'и именно ближайший свободный слот',
+        );
+
+        Carbon::setTestNow();
+    }
+
     /** @return list<int> */
     private function publishHours(int $broadcastId): array
     {
