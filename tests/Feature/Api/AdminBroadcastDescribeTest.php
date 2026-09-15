@@ -350,6 +350,57 @@ class AdminBroadcastDescribeTest extends TestCase
         );
     }
 
+    /**
+     * Правку текста можно отменить — вернувшись к сохранённой версии.
+     *
+     * До этого правка была необратима: «Вернуть шаблонный текст» собирает
+     * текст заново по шаблону, то есть возвращает не то, что было, а то, что
+     * сгенерировалось бы сейчас. Свой текст, случайно затёртый, восстановить
+     * было нечем.
+     */
+    public function test_edit_can_be_undone_from_history(): void
+    {
+        $broadcast = $this->makeChannel();
+        $item = $this->makeItem($broadcast->id);
+        $original = (string) $item->caption;
+
+        $this->patchJson("/api/admin/broadcast/items/{$item->id}", ['caption' => 'Первая правка'])
+            ->assertOk();
+        $this->patchJson("/api/admin/broadcast/items/{$item->id}", ['caption' => 'Вторая правка'])
+            ->assertOk();
+
+        $list = $this->getJson("/api/admin/broadcast/items/{$item->id}/revisions");
+        $list->assertOk();
+        $rows = $list->json('data');
+
+        $this->assertCount(2, $rows, 'две правки — две версии');
+        $this->assertSame('Первая правка', $rows[0]['caption'], 'свежая версия — то, что было перед второй правкой');
+        $this->assertSame($original, $rows[1]['caption'], 'самая старая — исходный текст');
+        $this->assertSame(['caption'], $rows[0]['changed']);
+
+        $oldest = $rows[1]['id'];
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/revisions/{$oldest}/restore")
+            ->assertOk();
+
+        $this->assertSame($original, (string) $item->fresh()->caption, 'вернулся исходный текст');
+    }
+
+    /** Возврат тоже пишется в историю: отменить отмену должно быть можно. */
+    public function test_restoring_is_itself_recorded(): void
+    {
+        $broadcast = $this->makeChannel();
+        $item = $this->makeItem($broadcast->id);
+
+        $this->patchJson("/api/admin/broadcast/items/{$item->id}", ['caption' => 'Правка'])->assertOk();
+        $rev = $this->getJson("/api/admin/broadcast/items/{$item->id}/revisions")->json('data.0.id');
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/revisions/{$rev}/restore")->assertOk();
+
+        $rows = $this->getJson("/api/admin/broadcast/items/{$item->id}/revisions")->json('data');
+
+        $this->assertSame('Правка', $rows[0]['caption'], 'версия перед возвратом сохранена');
+        $this->assertSame(['restore'], $rows[0]['changed']);
+    }
+
     /** @return array<string, mixed> */
     private function feedRow(int $broadcastId, int $itemId): array
     {

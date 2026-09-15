@@ -794,6 +794,15 @@ class AdminBroadcastController extends Controller
             ], 409);
         }
 
+        // Состояние ДО любых присваиваний — из него соберётся строка истории.
+        // Имя намеренно не $before: ниже этим словом уже назван день публикации
+        // до правки, и вторая переменная молча затирала бы первую.
+        $snapshot = [
+            'caption' => $item->caption,
+            'caption_source' => $item->caption_source,
+            'photo_urls' => $item->photo_urls,
+        ];
+
         // Что человек ДЕЙСТВИТЕЛЬНО изменил. Сравниваем со значением в базе, а
         // не верим факту прихода поля: форма правки шлёт текст всегда, и без
         // сравнения сохранение с одной лишь подвинутой датой навсегда метило бы
@@ -950,6 +959,13 @@ class AdminBroadcastController extends Controller
             $item->is_pinned = (bool) $data['is_pinned'];
         }
 
+        // Снимок ДО правки — чтобы её можно было отменить. Пишем только когда
+        // что-то действительно изменилось: иначе история заросла бы пустыми
+        // строками от каждого открытия карточки.
+        if ($edited !== []) {
+            $this->saveRevision($item, $edited, $snapshot);
+        }
+
         $item->markEdited($edited);
         $item->save();
 
@@ -1025,6 +1041,119 @@ class AdminBroadcastController extends Controller
         $item->save();
 
         return response()->json(['ok' => true]);
+    }
+
+    /** Сколько версий поста храним: история нужна для отмены, а не для архива. */
+    private const REVISIONS_KEPT = 20;
+
+    /**
+     * Запомнить состояние поста ДО правки.
+     *
+     * @param  list<string>  $changed  что изменила правка
+     * @param  array<string, mixed>  $before
+     */
+    private function saveRevision(TelegramChatBroadcastItem $item, array $changed, array $before): void
+    {
+        DB::table('telegram.chat_broadcast_item_revisions')->insert([
+            'item_id' => $item->id,
+            'caption' => $before['caption'],
+            'caption_source' => $before['caption_source'],
+            'photo_urls' => $before['photo_urls'] === null
+                ? null
+                : json_encode($before['photo_urls'], JSON_UNESCAPED_UNICODE),
+            'changed' => json_encode($changed, JSON_UNESCAPED_UNICODE),
+            'user_id' => optional(request()->user())->id,
+            'created_at' => now(),
+        ]);
+
+        // Подрезаем хвост: без этого у поста, который правят каждый день,
+        // история росла бы вечно и ради ничего.
+        $keep = DB::table('telegram.chat_broadcast_item_revisions')
+            ->where('item_id', $item->id)
+            ->orderByDesc('id')
+            ->limit(self::REVISIONS_KEPT)
+            ->pluck('id');
+
+        DB::table('telegram.chat_broadcast_item_revisions')
+            ->where('item_id', $item->id)
+            ->whereNotIn('id', $keep)
+            ->delete();
+    }
+
+    /**
+     * История правок поста — что было до каждой из них.
+     *
+     * GET /api/admin/broadcast/items/{id}/revisions
+     */
+    public function revisions(int $itemId): JsonResponse
+    {
+        TelegramChatBroadcastItem::query()->findOrFail($itemId);
+
+        $rows = DB::table('telegram.chat_broadcast_item_revisions as r')
+            ->leftJoin('users as u', 'u.id', '=', 'r.user_id')
+            ->where('r.item_id', $itemId)
+            ->orderByDesc('r.id')
+            ->limit(self::REVISIONS_KEPT)
+            ->get(['r.id', 'r.caption', 'r.caption_source', 'r.photo_urls', 'r.changed', 'r.created_at', 'u.name as user_name']);
+
+        return response()->json([
+            'data' => $rows->map(fn ($r) => [
+                'id' => (int) $r->id,
+                'caption' => $r->caption,
+                'caption_source' => $r->caption_source,
+                'photos' => $r->photo_urls ? json_decode($r->photo_urls, true) : null,
+                'changed' => $r->changed ? json_decode($r->changed, true) : [],
+                'at' => $r->created_at ? Carbon::parse($r->created_at)->toIso8601String() : null,
+                'user' => $r->user_name,
+            ])->values(),
+        ]);
+    }
+
+    /**
+     * Вернуть пост к сохранённой версии.
+     *
+     * Возвращаем ТОЛЬКО текст и картинки — то, что человек боится потерять.
+     * День публикации не трогаем: он виден в сетке, правится перетаскиванием,
+     * а молчаливый возврат старого дня вытеснил бы занявший его пост.
+     *
+     * Сам возврат тоже пишется в историю: отменить отмену должно быть можно.
+     */
+    public function restoreRevision(int $itemId, int $revisionId): JsonResponse
+    {
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+
+        if ($item->posted_at !== null) {
+            return response()->json(['ok' => false, 'error' => 'Пост уже опубликован — править нечего.'], 409);
+        }
+
+        $rev = DB::table('telegram.chat_broadcast_item_revisions')
+            ->where('item_id', $itemId)
+            ->where('id', $revisionId)
+            ->first();
+
+        if (! $rev) {
+            return response()->json(['ok' => false, 'error' => 'Такой версии у поста нет.'], 404);
+        }
+
+        $this->saveRevision($item, ['restore'], [
+            'caption' => $item->caption,
+            'caption_source' => $item->caption_source,
+            'photo_urls' => $item->photo_urls,
+        ]);
+
+        $item->caption = $rev->caption;
+        $item->caption_source = $rev->caption_source;
+        $item->photo_urls = $rev->photo_urls ? json_decode($rev->photo_urls, true) : null;
+        $item->markEdited([TelegramChatBroadcastItem::EDIT_CAPTION]);
+        $item->save();
+
+        return response()->json([
+            'data' => $this->itemPayload(
+                $item->fresh(),
+                Event::query()->with('venue:id,name')->find($item->event_id),
+                $item->venue_id ? \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']) : null,
+            ),
+        ]);
     }
 
     /**

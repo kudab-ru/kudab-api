@@ -99,6 +99,8 @@ Route::prefix('admin')
         Route::post('/broadcast/items/{id}/describe', [AdminBroadcastController::class, 'describe']);
         Route::post('/broadcast/items/{id}/restore', [AdminBroadcastController::class, 'restore']);
         Route::post('/broadcast/items/{id}/unreject', [AdminBroadcastController::class, 'unreject']);
+        Route::get('/broadcast/items/{id}/revisions', [AdminBroadcastController::class, 'revisions']);
+        Route::post('/broadcast/items/{id}/revisions/{revision}/restore', [AdminBroadcastController::class, 'restoreRevision']);
         Route::post('/broadcast/channels/{id}/restore-many', [AdminBroadcastController::class, 'restoreMany']);
         Route::delete('/broadcast/items/{id}', [AdminBroadcastController::class, 'remove']);
 
