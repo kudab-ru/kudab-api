@@ -135,18 +135,40 @@ class AdminBroadcastController extends Controller
                     });
             })
             ->orderByRaw('COALESCE(publish_at, planned_at, posted_at, created_at) ASC')
-            ->get()
-            // Снятые из-за прошедшего или исчезнувшего события в списке не
-            // нужны: вернуть их нельзя, а решать по ним нечего — они просто
-            // копятся и закрывают то, по чему решение принимать надо.
-            ->reject(fn (TelegramChatBroadcastItem $i) => $i->status === TelegramChatBroadcastItem::STATUS_SKIPPED
-                && $this->skipReason((string) $i->error_message) === 'stale')
-            ->values();
+            ->get();
 
         $events = Event::query()
             ->with('venue:id,name')
             ->whereIn('id', $items->pluck('event_id')->filter()->all())
-            ->get();
+            ->get()
+            ->keyBy('id');
+
+        // Снятые, которые уже не вернуть, в списке не нужны: решать по ним
+        // нечего, а копятся они быстрее всех. Смотрим на САМО событие, а не на
+        // текст причины: запись, снятая руками неделю назад, к сегодняшнему дню
+        // тоже могла протухнуть — и список предлагал вернуть то, что возврат
+        // честно отклонял («Вернул 0, не вышло 12»).
+        $now = Carbon::now();
+        $items = $items->reject(function (TelegramChatBroadcastItem $i) use ($events, $now) {
+            if ($i->status !== TelegramChatBroadcastItem::STATUS_SKIPPED) {
+                return false;
+            }
+            if ($i->kind === TelegramChatBroadcastItem::KIND_VENUE) {
+                return false; // портрет площадки не протухает
+            }
+            if (! $i->event_id) {
+                return true; // ни события, ни площадки — возвращать нечего
+            }
+
+            $event = $events->get($i->event_id);
+            if (! $event) {
+                return true;
+            }
+
+            $endsAt = $event->end_time ?: $event->start_time;
+
+            return $endsAt && Carbon::parse($endsAt)->lt($now);
+        })->values();
 
         // Площадки портретов — одним запросом. Без них интерфейс рисовал
         // литерал «(портрет площадки)» без названия: title и venue брались
@@ -161,7 +183,6 @@ class AdminBroadcastController extends Controller
         // под список кандидатов. На неделе это два десятка запросов вместо
         // одного.
         $this->events->hydrateImagesFor($events);
-        $events = $events->keyBy('id');
 
         return response()->json([
             'data' => [
@@ -1182,18 +1203,18 @@ class AdminBroadcastController extends Controller
             }
         }
 
+        // Свободного слота может не быть — это не повод отказывать в возврате:
+        // запись встаёт без дня, в «Ждут свободного дня», и займёт ближайший
+        // освободившийся. Отказ здесь читался бы как «вернуть нельзя», хотя
+        // вернуть как раз можно.
         $slot = app(\App\Services\Telegram\BroadcastSlotPlanner::class)
             ->nextFreeSlot($broadcast, Carbon::now());
-
-        if (! $slot) {
-            return 'В ленте нет свободного слота — освободите день или расширьте горизонт.';
-        }
 
         $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
         $item->error_message = null;
         $item->claimed_at = null;
         $item->claim_token = null;
-        $item->publish_at = $slot->copy()->utc();
+        $item->publish_at = $slot?->copy()->utc();
         $item->save();
 
         // Текст собран под прежний день — пересобираем под новый. Свой не трогаем.

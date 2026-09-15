@@ -40,6 +40,7 @@ class AdminBroadcastSkippedTest extends TestCase
         $broadcast = $this->makeChannel();
         $item = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
         $item->error_message = 'день публикации прошёл больше 2 ч назад';
+        $item->event_id = $this->futureEvent()->id;
         $item->save();
 
         $res = $this->getJson("/api/admin/broadcast/channels/{$broadcast->id}/feed");
@@ -149,16 +150,45 @@ class AdminBroadcastSkippedTest extends TestCase
         $this->assertNotNull($fresh->publish_at, 'вернулся на свободный слот');
     }
 
+    /** Свободных слотов нет — возврат всё равно проходит, запись ждёт дня. */
+    public function test_restore_without_free_slot_waits_for_a_day(): void
+    {
+        $broadcast = $this->makeChannel();
+        $broadcast->horizon_days = 1;
+        $broadcast->save();
+
+        // Единственный слот горизонта занят.
+        $busy = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $busy->publish_at = now()->addDay()->setTime(10, 0);
+        $busy->event_id = $this->futureEvent()->id;
+        $busy->save();
+
+        $item = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
+        $item->error_message = 'снято из ленты';
+        $item->event_id = $this->futureEvent()->id;
+        $item->save();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/restore")->assertOk();
+
+        $fresh = $item->fresh();
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $fresh->status);
+        $this->assertNull($fresh->publish_at, 'без дня — в «Ждут свободного дня»');
+    }
+
     public function test_stale_skips_are_hidden_and_reason_is_typed(): void
     {
         $broadcast = $this->makeChannel();
 
         $manual = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
         $manual->error_message = 'снято из ленты';
+        $manual->event_id = $this->futureEvent()->id;
         $manual->save();
 
+        // Снято РУКАМИ, но событие с тех пор прошло: вернуть такое нельзя, и
+        // в списке ему не место — иначе кнопка возврата отвечает «не вышло».
         $stale = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
-        $stale->error_message = 'событие 42 уже прошло к моменту отправки — снято из очереди';
+        $stale->error_message = 'снято из ленты';
+        $stale->event_id = $this->pastEvent()->id;
         $stale->save();
 
         $res = $this->getJson("/api/admin/broadcast/channels/{$broadcast->id}/feed");
@@ -179,6 +209,7 @@ class AdminBroadcastSkippedTest extends TestCase
 
         $ok = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
         $ok->error_message = 'снято из ленты';
+        $ok->event_id = $this->futureEvent()->id;
         $ok->save();
 
         // Событие прошло — вернуть такое нельзя, и массовый возврат обязан
@@ -198,27 +229,55 @@ class AdminBroadcastSkippedTest extends TestCase
         $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $gone->fresh()->status);
     }
 
+    /** Живое событие: снятая запись под ним возвращается, поэтому видна. */
+    private function futureEvent(): \App\Models\Event
+    {
+        return $this->makeEvent(now()->addDays(2), now()->addDays(3));
+    }
+
+    /** Прошедшее: вернуть такое нельзя, и в списке снятых ему не место. */
     private function pastEvent(): \App\Models\Event
     {
-        DB::insert(
-            'INSERT INTO cities (name, country_code, location, status, slug, created_at, updated_at)
-             VALUES (?, ?, ST_SetSRID(ST_Point(?, ?), 4326), ?, ?, ?, ?)',
-            ['Воронеж', 'RU', 39.2, 51.6, 'active', 'voronezh-past', now(), now()]
-        );
-        $city = \App\Models\City::query()->where('slug', 'voronezh-past')->firstOrFail();
-        $community = \App\Models\Community::create(['name' => 'Организатор', 'city_id' => $city->id]);
+        return $this->makeEvent(now()->subDays(2), now()->subDay());
+    }
+
+    private function makeEvent(\Carbon\Carbon $start, \Carbon\Carbon $end): \App\Models\Event
+    {
+        // Город один на весь тест: имя города уникально в пределах страны,
+        // второй «Воронеж» упирается в cities_country_name_ci_uniq.
+        $city = $this->city();
+        $community = \App\Models\Community::create([
+            'name' => 'Организатор '.uniqid(),
+            'city_id' => $city->id,
+        ]);
 
         $event = new \App\Models\Event;
         $event->community_id = $community->id;
-        $event->title = 'Вчерашнее';
+        $event->title = 'Событие '.uniqid();
         $event->status = 'active';
         $event->city_id = $city->id;
-        $event->start_time = now()->subDays(2);
-        $event->start_date = $event->start_time->toDateString();
-        $event->end_time = now()->subDay();
+        $event->start_time = $start;
+        $event->start_date = $start->toDateString();
+        $event->end_time = $end;
         $event->save();
 
         return $event;
+    }
+
+    private function city(): \App\Models\City
+    {
+        $existing = \App\Models\City::query()->where('slug', 'voronezh-test')->first();
+        if ($existing) {
+            return $existing;
+        }
+
+        DB::insert(
+            'INSERT INTO cities (name, country_code, location, status, slug, created_at, updated_at)
+             VALUES (?, ?, ST_SetSRID(ST_Point(?, ?), 4326), ?, ?, ?, ?)',
+            ['Воронеж', 'RU', 39.2, 51.6, 'active', 'voronezh-test', now(), now()]
+        );
+
+        return \App\Models\City::query()->where('slug', 'voronezh-test')->firstOrFail();
     }
 
     private function makeChannel(): TelegramChatBroadcast
