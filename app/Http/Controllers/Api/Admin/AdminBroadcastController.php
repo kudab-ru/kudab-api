@@ -184,6 +184,26 @@ class AdminBroadcastController extends Controller
         // одного.
         $this->events->hydrateImagesFor($events);
 
+        // Подпись, которой нет, собираем здесь же. Пустой она остаётся после
+        // того, как парсер написал событию свежий ТГ-анонс: снять устаревший
+        // текст он умеет, а собрать новый — нет, шаблоны постов живут в api.
+        // Сборка бесплатная, это подстановка в шаблон.
+        foreach ($items as $i) {
+            if ($i->kind !== TelegramChatBroadcastItem::KIND_EVENT || ! $i->event_id) {
+                continue;
+            }
+            if (trim((string) $i->caption) !== '' || $i->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
+                continue;
+            }
+            if (! in_array($i->status, $this->openStatuses(), true)) {
+                continue;
+            }
+            $event = $events->get($i->event_id);
+            if ($event) {
+                $this->fillCaption($i, $broadcast, $event);
+            }
+        }
+
         return response()->json([
             'data' => [
                 'channel' => $this->channelPayload($broadcast),
@@ -1376,6 +1396,53 @@ class AdminBroadcastController extends Controller
         return response()->json(['ok' => true]);
     }
 
+    /**
+     * Попросить модель написать анонс этому посту — сейчас, а не перед публикацией.
+     *
+     * ПОЧЕМУ ЗАЯВКА, А НЕ ВЫЗОВ. Тексты пишет парсер: там живут промпт, гейты
+     * качества, учёт расхода и ключи провайдера. kudab-api его команд не зовёт
+     * и ключей не держит, поэтому кладём просьбу в ту же таблицу очереди, а
+     * parser:tg:describe-due забирает её в ближайшую минуту. Ответ здесь —
+     * «принято», а не «готово»: лента дальше сама перечитывает запись.
+     *
+     * Пожелание (hint) уходит в промпт как есть — это просьба к ЭТОМУ посту.
+     */
+    public function describe(Request $request, int $itemId): JsonResponse
+    {
+        $data = $request->validate([
+            'hint' => ['sometimes', 'nullable', 'string', 'max:500'],
+        ]);
+
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+
+        if ($item->kind !== TelegramChatBroadcastItem::KIND_EVENT || ! $item->event_id) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Текст пишется событиям. У портрета площадки свой текст — правьте его вручную.',
+            ], 422);
+        }
+
+        if ($item->posted_at !== null) {
+            return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
+        }
+
+        $event = Event::query()->find($item->event_id);
+        if (! $event) {
+            return response()->json(['ok' => false, 'error' => 'Событие не найдено.'], 404);
+        }
+
+        $hint = trim((string) ($data['hint'] ?? ''));
+
+        $item->text_requested_at = Carbon::now();
+        $item->text_hint = $hint !== '' ? $hint : null;
+        $item->save();
+
+        return response()->json([
+            'ok' => true,
+            'data' => $this->itemPayload($item->fresh(), $event, null),
+        ]);
+    }
+
     /** Шаблоны постов: тексты, которыми собираются все неправленые посты. */
     public function templates(): JsonResponse
     {
@@ -2057,6 +2124,12 @@ class AdminBroadcastController extends Controller
             'event_url' => $event ? $this->siteUrl().'/events/'.$event->id : null,
             'caption' => $i->caption,
             'caption_source' => $i->caption_source,
+            // Текст анонса пишет модель — но только тому, что вот-вот уйдёт в
+            // канал. Поэтому у поста, стоящего на неделю вперёд, в подписи пока
+            // сырое описание из парсера, и это надо показать, а не скрывать.
+            'has_ai_text' => $event ? trim((string) $event->tg_description) !== '' : null,
+            'text_pending' => $i->text_requested_at !== null,
+            'text_hint' => $i->text_hint,
             'is_pinned' => (bool) $i->is_pinned,
             'publish_at' => optional($i->publish_at)?->toIso8601String(),
             'posted_at' => optional($i->posted_at)?->toIso8601String(),

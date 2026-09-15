@@ -521,6 +521,61 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertNotSame('СТАРЫЙ ТЕКСТ', (string) $item->fresh()->caption);
     }
 
+    /**
+     * Анонс, написанный ПОСЛЕ сборки подписи, доезжает до поста.
+     *
+     * Лента стоит на неделю вперёд, а ТГ-анонс парсер пишет перед самой
+     * публикацией — ради экономии: платим только за то, что действительно
+     * уйдёт в канал. Если подпись не пересобрать перед отправкой, свежий текст
+     * останется в базе, а подписчик получит сырое описание из парсера.
+     */
+    public function test_tg_description_written_after_enqueue_reaches_the_post(): void
+    {
+        $this->seedBasicTemplate();
+        // Базовый шаблон в тестах — только заголовок и дата; здесь проверяется
+        // как раз описание, поэтому кладём его в тело шаблона.
+        DB::table('telegram.message_templates')
+            ->where('code', 'basic')
+            ->update(['body' => "🎟 <b>{title}</b>\n{description}"]);
+
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent(
+            $city->id,
+            $community->id,
+            'Концерт',
+            Carbon::now('Europe/Moscow')->addDay()->setTime(19, 0, 0),
+        );
+        $event->description = 'сырое описание из парсера';
+        $event->save();
+
+        $chat = $this->createChannelChat($city->id, -1029, 555991);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = now();
+        $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
+        $item->save();
+
+        // Подпись собрана в момент постановки — с тем описанием, что было тогда.
+        $this->service()->collectDueSingleRuns(now());
+        $this->assertStringContainsString('сырое описание из парсера', (string) $item->fresh()->caption);
+
+        // Парсер написал анонс уже после — ровно так и работает describe-due.
+        $event->tg_description = 'Свежий анонс от парсера';
+        $event->save();
+        $item->refresh();
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->posted_at = null;
+        $item->claimed_at = null;
+        $item->save();
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks);
+        $this->assertStringContainsString('Свежий анонс от парсера', $tasks[0]['caption']);
+        $this->assertStringNotContainsString('сырое описание из парсера', $tasks[0]['caption']);
+    }
+
     /** Свой текст писал человек — его не пересобирают, даже если день разъехался. */
     public function test_manual_caption_survives_stale_day(): void
     {

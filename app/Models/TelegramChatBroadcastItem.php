@@ -44,6 +44,8 @@ class TelegramChatBroadcastItem extends Model
         'claim_token',
         'caption_source',
         'is_pinned',
+        'text_requested_at',
+        'text_hint',
     ];
 
     protected $casts = [
@@ -53,6 +55,7 @@ class TelegramChatBroadcastItem extends Model
         'review_deadline_at' => 'datetime',
         'reviewed_at' => 'datetime',
         'claimed_at' => 'datetime',
+        'text_requested_at' => 'datetime',
         'is_pinned' => 'bool',
         // NULL = собрать автоматически; массив = ровно эти картинки.
         'photo_urls' => 'array',
