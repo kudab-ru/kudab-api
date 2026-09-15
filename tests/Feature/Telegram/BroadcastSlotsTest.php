@@ -163,6 +163,31 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
+    /** Зазор берётся из настроек канала, а не из константы. */
+    public function test_gap_comes_from_channel_settings(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 16:30:00', 'UTC'));
+
+        [$broadcast, $events] = $this->channelWithEvents(2);
+        $broadcast->min_gap_minutes = 0; // тестовый канал: ждать незачем
+        $broadcast->save();
+
+        $posted = $this->makeItem($broadcast->id, $events[0]->id, TelegramChatBroadcastItem::STATUS_POSTED);
+        $posted->posted_at = now()->subMinutes(2);
+        $posted->save();
+
+        $next = $this->makeItem($broadcast->id, $events[1]->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $next->publish_at = now()->subMinute();
+        $next->save();
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks, 'с нулевым зазором пост уходит сразу');
+        $this->assertSame($next->id, $tasks[0]['item_id']);
+
+        Carbon::setTestNow();
+    }
+
     /** Окно простоя делится на число слотов: два поста в день — окно вдвое короче. */
     public function test_idle_window_is_divided_by_slots(): void
     {

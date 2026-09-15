@@ -64,6 +64,8 @@ class TelegramChatBroadcastService
      */
     private const MIN_GAP_MINUTES = 90;
 
+    // Значение по умолчанию; канал может задать своё в settings.min_gap_minutes.
+
     /**
      * Насколько просроченный пост ещё отправляем, в часах.
      *
@@ -515,7 +517,7 @@ class TelegramChatBroadcastService
             // проблему заново. Портрет площадки гейт расписания не проходит
             // вовсе, поэтому уходил вплотную за дневным событием.
             $lastPostedAt = $this->lastPostedAt((int) $broadcast->id);
-            $channelFreeAt = $lastPostedAt?->copy()->addMinutes(self::MIN_GAP_MINUTES);
+            $channelFreeAt = $lastPostedAt?->copy()->addMinutes($broadcast->min_gap_minutes);
 
             // Активный (в полёте) элемент канала — pending/planned/pending_review/approved/auto_approved.
             $item = $this->broadcastItemRepository->findActiveForBroadcast($broadcast->id, $now);
@@ -1872,7 +1874,8 @@ class TelegramChatBroadcastService
      */
     public function nextPostAllowedAt(int $broadcastId, Carbon $now): ?Carbon
     {
-        $allowedAt = $this->lastPostedAt($broadcastId)?->addMinutes(self::MIN_GAP_MINUTES);
+        $gap = TelegramChatBroadcast::query()->find($broadcastId)?->min_gap_minutes ?? self::MIN_GAP_MINUTES;
+        $allowedAt = $this->lastPostedAt($broadcastId)?->addMinutes($gap);
 
         return $allowedAt && $allowedAt->gt($now) ? $allowedAt : null;
     }

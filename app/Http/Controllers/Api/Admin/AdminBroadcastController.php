@@ -1625,6 +1625,7 @@ class AdminBroadcastController extends Controller
             'slots.*' => ['integer', 'between:0,23'],
             'horizon_days' => ['sometimes', 'integer', 'min:1', 'max:31'],
             'portrait_every_days' => ['sometimes', 'integer', 'min:1', 'max:90'],
+            'min_gap_minutes' => ['sometimes', 'integer', 'min:0', 'max:1440'],
         ]);
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
@@ -1660,6 +1661,9 @@ class AdminBroadcastController extends Controller
         }
         if ($request->has('portrait_every_days')) {
             $broadcast->portrait_every_days = (int) $data['portrait_every_days'];
+        }
+        if ($request->has('min_gap_minutes')) {
+            $broadcast->min_gap_minutes = (int) $data['min_gap_minutes'];
         }
 
         // Город пишем ЧЕРЕЗ сервис: city_id вне $fillable у модели чата, и
@@ -1894,6 +1898,13 @@ class AdminBroadcastController extends Controller
             // второго числа первое не с чем сверить. Потолок частоты —
             // пул ÷ (кулдаун ÷ 7), то есть пул ÷ 12,86.
             'portrait_every_days' => $b->portrait_every_days,
+            'min_gap_minutes' => $b->min_gap_minutes,
+            // Когда канал снова сможет постить. Без этого пост, ждущий
+            // зазора, выглядел как «ничего не происходит»: в ленте он стоит
+            // со временем в прошлом и молчит.
+            'next_post_allowed_at' => optional(
+                $this->broadcasts->nextPostAllowedAt((int) $b->id, Carbon::now())
+            )?->toIso8601String(),
             'portrait_pool' => $b->chat?->city_id
                 ? \App\Models\Venue::query()
                     ->where('city_id', $b->chat->city_id)

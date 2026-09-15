@@ -184,6 +184,31 @@ class TelegramChatBroadcast extends Model
         $this->settings = $settings;
     }
 
+    /**
+     * Минимальный зазор между постами канала, в минутах.
+     *
+     * Жил константой в коде, а нужен разный: боевому каналу с двумя слотами
+     * полтора часа в самый раз, тестовому — помеха, из-за которой проверка
+     * отправки упирается в ожидание.
+     */
+    public function getMinGapMinutesAttribute(): int
+    {
+        $raw = ($this->settings ?? [])['min_gap_minutes'] ?? null;
+
+        if (! is_numeric($raw)) {
+            return 90;
+        }
+
+        return max(0, min(24 * 60, (int) $raw));
+    }
+
+    public function setMinGapMinutesAttribute(int $minutes): void
+    {
+        $settings = $this->settings ?? [];
+        $settings['min_gap_minutes'] = max(0, min(24 * 60, $minutes));
+        $this->settings = $settings;
+    }
+
     public function getPeriodAttribute(): string
     {
         $settings = $this->settings ?? [];
