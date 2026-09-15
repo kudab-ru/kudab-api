@@ -150,10 +150,25 @@ final class EventCaptionBuilder
             'price_text' => trim((string) ($raw['price_text'] ?? '')),
             'canonical_url' => $canonicalUrl,
             'url' => $this->eventUrl($eventId),
+            // Готовые ссылки для шаблона. Голый {canonical_url} в теге даёт
+            // пустой href у события без источника — строка остаётся, а вести
+            // ей некуда. Эти два ключа рендерятся в целый тег или в пустоту,
+            // и шаблон честно показывает, откуда в посте берутся ссылки.
+            'original_link' => $canonicalUrl === '' ? '' : $this->link($canonicalUrl, 'Открыть оригинал'),
+            'more_link' => $eventId === '' ? '' : $this->link($this->eventUrl($eventId), 'Подробнее на kudab.ru'),
             // Ключа tags в боте нет вовсе, значение всегда пустое, и строка
             // «🏷 …» не печаталась ни разу. Сохраняем это поведение явно.
             'tags' => '',
         ];
+    }
+
+    /** Ссылка с неразрывными пробелами и стрелкой — как в готовых постах канала. */
+    private function link(string $href, string $label): string
+    {
+        $nb = "\u{00A0}";
+        $text = str_replace(' ', $nb, $label).$nb."\u{2192}";
+
+        return '<a href="'.htmlspecialchars($href, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'">'.$text.'</a>';
     }
 
     private function eventUrl(string $eventId): string

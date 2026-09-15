@@ -314,6 +314,9 @@ class AdminBroadcastController extends Controller
                     'price_status' => $e->price_status,
                     'reasons' => $this->reasons($e, $feedVenueIds),
                     'event_url' => $this->siteUrl().'/events/'.$e->id,
+                    // Источник, из которого событие пришло: в посте на него
+                    // ведёт «Открыть оригинал», а в админке открыть было нечем.
+                    'original_url' => $this->originalUrl($e),
                     'cover' => (is_array($e->getAttribute('images')) ? ($e->getAttribute('images')[0] ?? null) : null),
                     'end_time' => optional($e->end_time)?->toIso8601String(),
                     'price_min' => $e->price_min,
@@ -344,6 +347,7 @@ class AdminBroadcastController extends Controller
                         : 'не показывали '.$portrait['weeks_since'].' нед.',
                 ],
                 'event_url' => null,
+                'original_url' => null,
                 'cover' => $portrait['cover'],
                 'end_time' => null,
                 'price_min' => null,
@@ -1756,6 +1760,24 @@ class AdminBroadcastController extends Controller
      * Словарь причин принадлежит серверу: он их и пишет, а фронт не должен
      * разбирать русский текст.
      */
+    /**
+     * Откуда событие пришло — та же ссылка, что стоит в посте «Открыть оригинал».
+     *
+     * Поля источника разные у разных парсеров, поэтому берём первое непустое —
+     * ровно в том же порядке, что и сборщик текста.
+     */
+    private function originalUrl(Event $event): ?string
+    {
+        foreach (['canonical_url', 'external_url', 'source_url', 'original_url'] as $key) {
+            $value = trim((string) ($event->{$key} ?? ''));
+            if ($value !== '') {
+                return $value;
+            }
+        }
+
+        return null;
+    }
+
     private function skipReason(string $message): string
     {
         $m = mb_strtolower($message);
@@ -2009,6 +2031,7 @@ class AdminBroadcastController extends Controller
             // «Матрёшки на Кольцовской»: предупреждение об однообразии считало
             // по venue_id и трёх филиалов одной сети не видело.
             'chain' => $this->chainKey((string) ($event?->venue?->name ?? $venue?->name ?? '')) ?: null,
+            'original_url' => $event ? $this->originalUrl($event) : null,
             'event_start_time' => optional($event?->start_time)?->toIso8601String(),
             'event_end_time' => optional($event?->end_time)?->toIso8601String(),
             'event_address' => $event?->address,
