@@ -100,6 +100,55 @@ class BroadcastDigestComposerTest extends TestCase
         $this->assertSame(5, $out['total'], 'занятое событие вычтено и из счётчика');
     }
 
+    /**
+     * Событие, которое в первой строке описания называет ЧУЖОЙ жанр, в тему не
+     * идёт — какой бы тег ему ни поставила разметка.
+     *
+     * Живой случай: квест «Припять 36» попал в подборку концертов. Первичная
+     * тема «музыка» проставлена ему 235 раз подряд, то есть переголосовать её
+     * повторами нельзя — они ошибаются одинаково. Зато в первой строке описания
+     * прямым текстом «квеста».
+     */
+    public function test_event_naming_a_foreign_genre_is_rejected(): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 5) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $quest = $this->themedEvent('Припять 36', 6);
+        DB::table('events')->where('id', $quest)->update([
+            'description' => 'Главный герой квеста «Припять 36» в Воронеже — учёный Адрианов, '
+                .'много лет изучавший аномалии зоны отчуждения и оставивший дневники.',
+        ]);
+
+        $out = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $this->assertNotContains($quest, $out['event_ids'], 'квест не место в подборке спектаклей');
+        $this->assertSame(5, $out['total'], 'и в счётчике его тоже нет');
+    }
+
+    /** Названные события идут по датам — подборка про «что впереди». */
+    public function test_named_events_are_ordered_by_date(): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $out = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $starts = DB::table('events')->whereIn('id', $out['event_ids'])
+            ->orderByRaw('array_position(ARRAY['.implode(',', $out['event_ids']).']::bigint[], id)')
+            ->pluck('start_time')->map(fn ($t) => (string) $t)->all();
+
+        $sorted = $starts;
+        sort($sorted);
+        $this->assertSame($sorted, $starts, 'порядок в тексте — хронологический');
+    }
+
     /** Заголовок не по теме в подборку не идёт, даже с нужным тегом. */
     public function test_stop_list_rejects_off_theme_titles(): void
     {
@@ -211,7 +260,10 @@ class BroadcastDigestComposerTest extends TestCase
         $event->start_time = Carbon::now()->addDays($n)->setTime(19, 0);
         $event->start_date = Carbon::now()->addDays($n)->toDateString();
         $event->end_time = Carbon::now()->addDays($n)->setTime(21, 0);
-        $event->description = str_repeat('описание события достаточной длины. ', 5);
+        // Длина описания РАСТЁТ с номером дня: отбор идёт по полноте карточки,
+        // значит без сортировки на выходе получится обратный хронологии
+        // порядок — иначе тест на порядок проходил бы сам собой.
+        $event->description = str_repeat('описание события достаточной длины. ', 4 + $n);
         $event->price_min = 500 * $n;
         $event->save();
 

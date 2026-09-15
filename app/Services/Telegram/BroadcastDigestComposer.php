@@ -122,6 +122,7 @@ final class BroadcastDigestComposer
             ]);
 
         $rows = $this->rejectStopList($rows);
+        $rows = $this->rejectForeignGenre($rows, (string) $theme['slug']);
         $rows = $this->rejectAlreadyShown($broadcast, $rows);
         $rows = $this->collapseRepeats($rows);
 
@@ -169,6 +170,36 @@ final class BroadcastDigestComposer
             $title = mb_strtolower(trim((string) $row->title));
             foreach ($stop as $word) {
                 if (str_starts_with($title, (string) $word)) {
+                    return true;
+                }
+            }
+
+            return false;
+        })->values();
+    }
+
+    /**
+     * Событие, которое в первых словах описания называет ЧУЖОЙ жанр.
+     *
+     * Разметка интересов ошибается систематически — у квеста «Припять 36» тема
+     * «музыка» проставлена 235 раз, — и переголосовать её повторами нельзя:
+     * повторы ошибаются одинаково. Зато событие само говорит, что оно такое, и
+     * говорит в первой строке. Если названный жанр принадлежит другой теме
+     * реестра, событие не наше, какой бы тег ему ни поставили.
+     */
+    private function rejectForeignGenre(\Illuminate\Support\Collection $rows, string $themeSlug): \Illuminate\Support\Collection
+    {
+        $words = (array) config('broadcast_digest.genre_words', []);
+        $limit = (int) config('broadcast_digest.genre_lookup_chars', 150);
+
+        return $rows->reject(function ($row) use ($words, $themeSlug, $limit) {
+            $head = mb_strtolower(mb_substr(trim((string) $row->description), 0, $limit));
+            if ($head === '') {
+                return false;
+            }
+
+            foreach ($words as $word => $slug) {
+                if ($slug !== $themeSlug && mb_strpos($head, (string) $word) !== false) {
                     return true;
                 }
             }
@@ -292,6 +323,11 @@ final class BroadcastDigestComposer
                 break;
             }
         }
+
+        // По датам: подборка отвечает на вопрос «что впереди», и читать её
+        // удобно по порядку недели. Отбор шёл по полноте карточки, поэтому
+        // порядок на выходе был случайным — сначала суббота, потом среда.
+        usort($named, fn ($a, $b) => strcmp((string) $a->start_time, (string) $b->start_time));
 
         return $named;
     }
