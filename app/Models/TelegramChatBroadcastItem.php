@@ -46,6 +46,8 @@ class TelegramChatBroadcastItem extends Model
         'is_pinned',
         'text_requested_at',
         'text_hint',
+        'edited_at',
+        'edited_fields',
     ];
 
     protected $casts = [
@@ -56,6 +58,8 @@ class TelegramChatBroadcastItem extends Model
         'reviewed_at' => 'datetime',
         'claimed_at' => 'datetime',
         'text_requested_at' => 'datetime',
+        'edited_at' => 'datetime',
+        'edited_fields' => 'array',
         'is_pinned' => 'bool',
         // NULL = собрать автоматически; массив = ровно эти картинки.
         'photo_urls' => 'array',
@@ -87,6 +91,39 @@ class TelegramChatBroadcastItem extends Model
     public const CAPTION_TEMPLATE = 'template';
 
     public const CAPTION_MANUAL = 'manual';
+
+    /** Что мог поправить человек — словарь для edited_fields. */
+    public const EDIT_CAPTION = 'caption';
+
+    public const EDIT_PHOTOS = 'photos';
+
+    public const EDIT_TIME = 'time';
+
+    /**
+     * Запомнить ручную правку. Поля копятся: поправили текст вчера, время
+     * сегодня — в следе оба, потому что оба по-прежнему не автоматические.
+     *
+     * @param  list<string>  $fields
+     */
+    public function markEdited(array $fields): void
+    {
+        if ($fields === []) {
+            return;
+        }
+
+        $this->edited_fields = array_values(array_unique(array_merge($this->edited_fields ?? [], $fields)));
+        $this->edited_at = now();
+    }
+
+    /** Поле вернулось к автоматическому — след о нём снимаем. */
+    public function forgetEdit(string $field): void
+    {
+        $left = array_values(array_diff($this->edited_fields ?? [], [$field]));
+        $this->edited_fields = $left === [] ? null : $left;
+        if ($left === []) {
+            $this->edited_at = null;
+        }
+    }
 
     public const KIND_VENUE = 'venue';  // портрет площадки (готовый caption)
 

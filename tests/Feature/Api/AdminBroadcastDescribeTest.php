@@ -274,6 +274,82 @@ class AdminBroadcastDescribeTest extends TestCase
         $this->assertSame(2, $row['text_repeats']);
     }
 
+    /**
+     * Перенос поста оставляет след, а сохранение без правки текста — нет.
+     *
+     * Форма правки шлёт подпись всегда, и раньше сохранение с одной лишь
+     * подвинутой датой навсегда метило текст «своим»: он переставал
+     * обновляться вслед за событием, причём молча.
+     */
+    public function test_moving_a_post_is_marked_but_untouched_text_is_not(): void
+    {
+        $broadcast = $this->makeChannel();
+        $item = $this->makeItem($broadcast->id);
+        $was = (string) $item->caption;
+
+        $this->patchJson("/api/admin/broadcast/items/{$item->id}", [
+            'caption' => $was, // текст не трогали, форма прислала как есть
+            'publish_at' => now()->addDays(2)->setTime(10, 0)->toIso8601String(),
+        ])->assertOk();
+
+        $item->refresh();
+        $this->assertSame(['time'], $item->edited_fields, 'правили только время');
+        $this->assertNotNull($item->edited_at);
+        $this->assertNotSame(
+            TelegramChatBroadcastItem::CAPTION_MANUAL,
+            $item->caption_source,
+            'нетронутый текст не становится своим',
+        );
+    }
+
+    /** Правка текста помечается как правка текста. */
+    public function test_editing_the_text_is_marked(): void
+    {
+        $broadcast = $this->makeChannel();
+        $item = $this->makeItem($broadcast->id);
+
+        $this->patchJson("/api/admin/broadcast/items/{$item->id}", ['caption' => 'Мой текст'])
+            ->assertOk();
+
+        $item->refresh();
+        $this->assertSame(['caption'], $item->edited_fields);
+        $this->assertSame(TelegramChatBroadcastItem::CAPTION_MANUAL, $item->caption_source);
+    }
+
+    /**
+     * Пересборка недели не трогает правленное руками.
+     *
+     * Докблок обещал это с самого начала, а в условии не было ни слова:
+     * «Пересобрать неделю» выметало и свой текст, и перенесённый день.
+     */
+    public function test_rebuild_keeps_hand_edited_posts(): void
+    {
+        $broadcast = $this->makeChannel();
+        $edited = $this->makeItem($broadcast->id);
+        $plain = $this->makeItem($broadcast->id);
+        // Пересборке нужно, чем заполнять: если заполнить нечем, она честно
+        // откатывается целиком и ничего не проверяет.
+        foreach (range(1, 3) as $n) {
+            $this->makeFreeEvent();
+        }
+
+        $this->patchJson("/api/admin/broadcast/items/{$edited->id}", ['caption' => 'Мой текст'])
+            ->assertOk();
+
+        $this->postJson("/api/admin/broadcast/channels/{$broadcast->id}/rebuild")->assertOk();
+
+        $this->assertNotSame(
+            TelegramChatBroadcastItem::STATUS_SKIPPED,
+            $edited->fresh()->status,
+            'правленный пост пересборка не снимает',
+        );
+        $this->assertSame(
+            TelegramChatBroadcastItem::STATUS_SKIPPED,
+            $plain->fresh()->status,
+            'обычный — снимает, иначе пересборка ничего не пересобирает',
+        );
+    }
+
     /** @return array<string, mixed> */
     private function feedRow(int $broadcastId, int $itemId): array
     {
@@ -308,6 +384,8 @@ class AdminBroadcastDescribeTest extends TestCase
         $chat->chat_type = 'channel';
         $chat->is_active = true;
         $chat->telegram_user_id = $owner->id;
+        // Без города канал ничего не подбирает, и пересборке нечем заполнять.
+        $chat->city_id = $this->city()->id;
         $chat->save();
 
         return TelegramChatBroadcast::create([
@@ -315,6 +393,29 @@ class AdminBroadcastDescribeTest extends TestCase
             'enabled' => true,
             'settings' => ['period' => 'daily_10', 'template_code' => 'basic'],
         ]);
+    }
+
+    /** Событие, которое ещё не стоит в очереди — корм для пересборки. */
+    private function makeFreeEvent(): \App\Models\Event
+    {
+        $city = $this->city();
+        $community = \App\Models\Community::create([
+            'name' => 'Организатор '.uniqid(),
+            'city_id' => $city->id,
+        ]);
+
+        $event = new \App\Models\Event;
+        $event->community_id = $community->id;
+        $event->title = 'Свободное событие '.uniqid();
+        $event->status = 'active';
+        $event->city_id = $city->id;
+        $event->start_time = now()->addDays(3);
+        $event->start_date = now()->addDays(3)->toDateString();
+        $event->end_time = now()->addDays(3)->addHours(2);
+        $event->description = 'описание события длиннее ста двадцати символов, чтобы отбор считал карточку полной и событие вообще попадало в подбор канала';
+        $event->save();
+
+        return $event;
     }
 
     private function makeItem(int $broadcastId): TelegramChatBroadcastItem

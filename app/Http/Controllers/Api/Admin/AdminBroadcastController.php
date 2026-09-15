@@ -748,6 +748,13 @@ class AdminBroadcastController extends Controller
             ], 409);
         }
 
+        // Что человек ДЕЙСТВИТЕЛЬНО изменил. Сравниваем со значением в базе, а
+        // не верим факту прихода поля: форма правки шлёт текст всегда, и без
+        // сравнения сохранение с одной лишь подвинутой датой навсегда метило бы
+        // текст «своим» — после чего он переставал обновляться вслед за
+        // событием, причём молча.
+        $edited = [];
+
         if ($request->has('caption')) {
             $caption = trim((string) $data['caption']);
             if ($caption === '') {
@@ -756,21 +763,26 @@ class AdminBroadcastController extends Controller
                 $broadcast = TelegramChatBroadcast::query()->find($item->broadcast_id);
                 if ($broadcast) {
                     $item->caption_source = null;
+                    $item->forgetEdit(TelegramChatBroadcastItem::EDIT_CAPTION);
                     $item->save();
                     $this->buildCaptionFor($item, $broadcast);
                 }
-            } else {
+            } elseif ($caption !== trim((string) $item->caption)) {
                 $item->caption = $caption;
                 // С этой минуты пересборка ленты текст не трогает.
                 $item->caption_source = TelegramChatBroadcastItem::CAPTION_MANUAL;
+                $edited[] = TelegramChatBroadcastItem::EDIT_CAPTION;
             }
         }
 
         if ($request->has('photo_urls')) {
             $chosen = $data['photo_urls'] ?? null;
 
+            $wasPhotos = $item->photo_urls;
+
             if ($chosen === null) {
                 $item->photo_urls = null;
+                $item->forgetEdit(TelegramChatBroadcastItem::EDIT_PHOTOS);
             } else {
                 // Берём ТОЛЬКО картинки самого события. Иначе через ручку
                 // можно было бы отправить в канал любую чужую ссылку, а
@@ -801,6 +813,9 @@ class AdminBroadcastController extends Controller
                 // Телеграм принимает в альбом не больше десяти, но постом
                 // уходит три: больше — стена картинок вместо анонса.
                 $item->photo_urls = array_slice($clean, 0, self::PHOTO_LIMIT);
+                if ($item->photo_urls !== $wasPhotos) {
+                    $edited[] = TelegramChatBroadcastItem::EDIT_PHOTOS;
+                }
             }
         }
 
@@ -852,8 +867,16 @@ class AdminBroadcastController extends Controller
             }
 
             $before = optional($item->publish_at)?->toDateString();
+            $wasAt = optional($item->publish_at)?->toIso8601String();
             $item->publish_at = $newAt;
             $after = optional($item->publish_at)?->toDateString();
+
+            // Перенос поста — тоже ручная правка, и до сих пор он не оставлял
+            // никакого следа: лента выглядела одинаково, собрал ли её сервис
+            // или переставил человек.
+            if ($wasAt !== optional($item->publish_at)?->toIso8601String()) {
+                $edited[] = TelegramChatBroadcastItem::EDIT_TIME;
+            }
 
             // Дата поменялась — шаблонный текст пересобираем: в нём есть
             // «сегодня» и «завтра», и они считаются от дня публикации.
@@ -876,9 +899,12 @@ class AdminBroadcastController extends Controller
         }
 
         if ($request->has('is_pinned')) {
+            // Закрепление в след не пишем: у него своя пометка в ленте, и
+            // «правлено» на каждом закреплённом посте значило бы уже ничего.
             $item->is_pinned = (bool) $data['is_pinned'];
         }
 
+        $item->markEdited($edited);
         $item->save();
 
         return response()->json([
@@ -952,6 +978,7 @@ class AdminBroadcastController extends Controller
             ->where('is_pinned', false)
             ->whereNull('posted_at')
             ->whereNull('publish_at')
+            ->whereNull('edited_at')
             ->where(function ($q) {
                 $q->whereNull('kind')->orWhere('kind', '<>', TelegramChatBroadcastItem::KIND_VENUE);
             })
@@ -962,6 +989,11 @@ class AdminBroadcastController extends Controller
             ->whereIn('status', $this->openStatuses())
             ->where('is_pinned', false)
             ->whereNull('posted_at')
+            // Правленные руками пересборка НЕ трогает. Докблок обещал это с
+            // самого начала, а в условии не было ни слова: человек правил
+            // текст, двигал день — и «Пересобрать неделю» выметало всё это
+            // молча. Теперь у правки есть след, и обещание наконец выполнимо.
+            ->whereNull('edited_at')
             // Портреты площадок пересборка НЕ трогает: у них свой недельный
             // каденс и свой слот в неделе, они не конкурируют с событиями за
             // место. Снести портрет заодно с лентой значило бы сбросить его
@@ -1173,11 +1205,15 @@ class AdminBroadcastController extends Controller
 
         DB::transaction(function () use ($item, $occupant, $target, $from) {
             $item->publish_at = $target;
+            // Перетащили мышью — это ручная правка ровно в той же мере, что и
+            // правка даты в карточке.
+            $item->markEdited([TelegramChatBroadcastItem::EDIT_TIME]);
             $item->save();
 
             if ($occupant) {
                 // Меняемся местами. Если у переносимого дня не было, соседу
                 // достаётся пустая дата — он вернётся в общую очередь.
+                // Соседа НЕ помечаем: его подвинули, он этого не просил.
                 $occupant->publish_at = $from;
                 $occupant->save();
             }
@@ -2217,6 +2253,11 @@ class AdminBroadcastController extends Controller
             // Сколько будущих повторов события делят один анонс. null и 1 —
             // событие одиночное, говорить не о чем.
             'text_repeats' => $repeats !== null && $repeats > 1 ? $repeats : null,
+            // След ручной правки: что именно трогали и когда. Без него лента
+            // выглядела одинаково независимо от того, собрал её сервис или
+            // переставил человек.
+            'edited_at' => optional($i->edited_at)?->toIso8601String(),
+            'edited_fields' => $i->edited_fields ?: [],
             'text_hint' => $i->text_hint,
             'is_pinned' => (bool) $i->is_pinned,
             'publish_at' => optional($i->publish_at)?->toIso8601String(),
