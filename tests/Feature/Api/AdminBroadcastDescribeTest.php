@@ -174,6 +174,106 @@ class AdminBroadcastDescribeTest extends TestCase
         $this->assertNotNull($item->fresh()->text_requested_at);
     }
 
+    /**
+     * «Отправить сейчас» по посту без анонса даёт время его написать.
+     *
+     * Иначе пост уходит через считаные секунды, писать текст некогда, и в канал
+     * уезжает сырое описание из парсера — а человек нажимал кнопку именно
+     * потому, что хотел опубликовать этот пост.
+     */
+    public function test_publish_now_waits_for_the_text_when_there_is_none(): void
+    {
+        $broadcast = $this->makeChannel();
+        $item = $this->makeItem($broadcast->id);
+
+        $res = $this->postJson("/api/admin/broadcast/items/{$item->id}/publish-now");
+
+        $res->assertOk();
+        $this->assertTrue($res->json('data.waiting_for_text'));
+
+        $item->refresh();
+        $this->assertNotNull($item->text_requested_at, 'парсер должен увидеть заявку');
+        $this->assertNotNull($item->planned_at, 'пост придержан на время генерации');
+        $this->assertTrue($item->planned_at->isFuture());
+    }
+
+    /** Анонс уже есть — ждать нечего, пост уходит сразу. */
+    public function test_publish_now_does_not_wait_when_text_is_ready(): void
+    {
+        $broadcast = $this->makeChannel();
+        $item = $this->makeItem($broadcast->id);
+        DB::table('events')->where('id', $item->event_id)->update(['tg_description' => 'Готовый анонс']);
+
+        $res = $this->postJson("/api/admin/broadcast/items/{$item->id}/publish-now");
+
+        $res->assertOk();
+        $this->assertFalse($res->json('data.waiting_for_text'));
+        $this->assertNull($item->fresh()->planned_at);
+    }
+
+    /** Канал отказался от анонсов — ждать тем более нечего. */
+    public function test_publish_now_does_not_wait_when_ai_text_is_off(): void
+    {
+        $broadcast = $this->makeChannel();
+        $broadcast->ai_text = false;
+        $broadcast->save();
+        $item = $this->makeItem($broadcast->id);
+
+        $res = $this->postJson("/api/admin/broadcast/items/{$item->id}/publish-now");
+
+        $res->assertOk();
+        $this->assertFalse($res->json('data.waiting_for_text'));
+        $this->assertNull($item->fresh()->planned_at);
+    }
+
+    /**
+     * Посты, ушедшие без анонса, становятся видимой проблемой канала.
+     *
+     * Молчащая генерация раньше никак себя не проявляла: пост уходил с сырым
+     * описанием, и понять это можно было только по тому, что пометка «написан
+     * ИИ» так и не появилась.
+     */
+    public function test_channel_complains_when_posts_go_out_without_ai_text(): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach ([1, 2] as $n) {
+            $item = $this->makeItem($broadcast->id);
+            $item->status = TelegramChatBroadcastItem::STATUS_POSTED;
+            $item->posted_at = now()->subDays($n);
+            $item->save();
+        }
+
+        $res = $this->getJson("/api/admin/broadcast/channels/{$broadcast->id}/feed");
+
+        $res->assertOk();
+        $texts = collect($res->json('data.channel.problems'))->pluck('text')->implode(' | ');
+        $this->assertStringContainsString('без анонса ИИ', $texts);
+    }
+
+    /** Один анонс на все даты спектакля — это надо показать до клика. */
+    public function test_feed_shows_how_many_repeats_share_the_text(): void
+    {
+        $broadcast = $this->makeChannel();
+        $item = $this->makeItem($broadcast->id);
+
+        $groupId = DB::table('event_groups')->insertGetId([
+            'community_id' => DB::table('events')->where('id', $item->event_id)->value('community_id'),
+            'city_id' => $this->city()->id,
+            'group_key' => 'grp-'.uniqid(),
+            'title_norm' => 'повтор',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('events')->where('id', $item->event_id)->update(['event_group_id' => $groupId]);
+        // второй показ того же спектакля — он делит анонс с первым
+        $twin = $this->makeItem($broadcast->id);
+        DB::table('events')->where('id', $twin->event_id)->update(['event_group_id' => $groupId]);
+
+        $row = $this->feedRow($broadcast->id, $item->id);
+
+        $this->assertSame(2, $row['text_repeats']);
+    }
+
     /** @return array<string, mixed> */
     private function feedRow(int $broadcastId, int $itemId): array
     {

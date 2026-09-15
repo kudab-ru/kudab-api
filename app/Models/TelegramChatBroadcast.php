@@ -210,6 +210,32 @@ class TelegramChatBroadcast extends Model
     }
 
     /**
+     * За сколько минут до слота парсер пишет анонс посту ленты.
+     *
+     * Настройка канала, а не общая: у канала с двумя слотами в день час
+     * упреждения в самый раз, а тестовому нужнее короткое — там пост правят и
+     * отправляют сразу. Держать согласованным с llm_text.tg_lead_minutes в
+     * kudab-parser: оттуда берётся умолчание, когда у канала ничего не задано.
+     */
+    public function getTextLeadMinutesAttribute(): int
+    {
+        $raw = ($this->settings ?? [])['text_lead_minutes'] ?? null;
+
+        if (! is_numeric($raw)) {
+            return max(1, (int) config('services.bot.broadcast_text_lead_minutes', 60));
+        }
+
+        return max(1, min(24 * 60, (int) $raw));
+    }
+
+    public function setTextLeadMinutesAttribute(int $minutes): void
+    {
+        $settings = $this->settings ?? [];
+        $settings['text_lead_minutes'] = max(1, min(24 * 60, $minutes));
+        $this->settings = $settings;
+    }
+
+    /**
      * Писать ли анонсы ИИ автоматически перед публикацией.
      *
      * Выключатель канала, а не поста: выключенный канал постит то, что пришло из

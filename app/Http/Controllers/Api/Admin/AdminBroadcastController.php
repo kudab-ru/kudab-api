@@ -184,6 +184,21 @@ class AdminBroadcastController extends Controller
         // одного.
         $this->events->hydrateImagesFor($events);
 
+        // Анонс пишется на ВСЮ группу повторов сразу — один текст на все даты
+        // одного спектакля. Значит кнопка «написать заново» в одном посте
+        // меняет текст и у соседних, и человек должен это видеть до клика.
+        $groupIds = $events->pluck('event_group_id')->filter()->unique()->values();
+        $repeats = $groupIds->isEmpty()
+            ? collect()
+            : Event::query()
+                ->whereIn('event_group_id', $groupIds)
+                ->where('status', 'active')
+                ->whereNull('deleted_at')
+                ->where('start_time', '>=', Carbon::now())
+                ->selectRaw('event_group_id, count(*) as c')
+                ->groupBy('event_group_id')
+                ->pluck('c', 'event_group_id');
+
         // Подпись пересобираем на чтении — ту же, что уйдёт в канал.
         //
         // Пост стоит в очереди днями, и за это время текст меняется под ним:
@@ -214,11 +229,17 @@ class AdminBroadcastController extends Controller
         return response()->json([
             'data' => [
                 'channel' => $this->channelPayload($broadcast),
-                'items' => $items->map(fn (TelegramChatBroadcastItem $i) => $this->itemPayload(
-                    $i,
-                    $events->get($i->event_id),
-                    $i->venue_id ? $venues->get($i->venue_id) : null,
-                ))->values(),
+                'items' => $items->map(function (TelegramChatBroadcastItem $i) use ($events, $venues, $repeats) {
+                    $event = $events->get($i->event_id);
+                    $group = $event?->event_group_id;
+
+                    return $this->itemPayload(
+                        $i,
+                        $event,
+                        $i->venue_id ? $venues->get($i->venue_id) : null,
+                        $group ? (int) ($repeats[$group] ?? 1) : null,
+                    );
+                })->values(),
             ],
         ]);
     }
@@ -437,12 +458,20 @@ class AdminBroadcastController extends Controller
             $item->error_message = null;
             $item->claimed_at = null;
             $item->claim_token = null;
-            // Придержка на генерацию текста тут не нужна: текст собираем сразу.
-            $item->planned_at = null;
             $item->publish_at = Carbon::now();
             if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
                 $item->caption = null;
                 $item->caption_source = null;
+            }
+            // Событию без анонса даём время его написать: пост вне очереди уходит
+            // через секунды, и иначе в канал уедет сырое описание из парсера.
+            // Придержку снимет парсер, как только текст готов.
+            $waitForText = $broadcast->ai_text
+                && $item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL
+                && trim((string) $event->tg_description) === '';
+            $item->planned_at = $waitForText ? Carbon::now()->addMinutes($this->textGraceMinutes()) : null;
+            if ($waitForText) {
+                $item->text_requested_at = Carbon::now();
             }
             $item->save();
 
@@ -463,6 +492,7 @@ class AdminBroadcastController extends Controller
                     'wait_minutes' => $waitUntil
                         ? (int) ceil(Carbon::now()->diffInSeconds($waitUntil) / 60)
                         : 0,
+                    'waiting_for_text' => $waitForText,
                 ],
             ]);
         });
@@ -1230,16 +1260,28 @@ class AdminBroadcastController extends Controller
             return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
         }
 
+        $broadcast = TelegramChatBroadcast::query()->with('chat')->find($item->broadcast_id);
+
+        // Пост без анонса, отправленный «сейчас», уходит через считаные секунды —
+        // написать ему текст физически некогда, и в канал уезжает сырое описание
+        // из парсера. Поэтому просим текст и придерживаем пост на время
+        // генерации: парсер снимет придержку сам, как только текст готов.
+        $waitForText = $this->needsTextBeforeSending($item, $broadcast);
+
         $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
         $item->publish_at = Carbon::now();
-        // Придержку снимаем: она ждала генерации текста, а текст уже есть.
-        $item->planned_at = null;
+        $item->planned_at = $waitForText
+            ? Carbon::now()->addMinutes($this->textGraceMinutes())
+            // Придержку снимаем: она ждала генерации текста, а текст уже есть.
+            : null;
+        if ($waitForText) {
+            $item->text_requested_at = Carbon::now();
+        }
         $item->error_message = null;
         $item->claimed_at = null;
         $item->claim_token = null;
         $item->save();
 
-        $broadcast = TelegramChatBroadcast::query()->with('chat')->find($item->broadcast_id);
         if ($broadcast) {
             $this->regenerateCaption($item, $broadcast);
         }
@@ -1262,6 +1304,9 @@ class AdminBroadcastController extends Controller
         return response()->json(['ok' => true, 'data' => [
             'will_send' => $willSend,
             'wait_minutes' => $waitUntil ? (int) ceil(Carbon::now()->diffInSeconds($waitUntil) / 60) : 0,
+            // Пост ждёт не зазора, а собственного текста — это другая причина
+            // подождать, и человеку надо сказать именно её.
+            'waiting_for_text' => $waitForText,
         ]]);
     }
 
@@ -1701,6 +1746,7 @@ class AdminBroadcastController extends Controller
             'portrait_every_days' => ['sometimes', 'integer', 'min:1', 'max:90'],
             'min_gap_minutes' => ['sometimes', 'integer', 'min:0', 'max:1440'],
             'ai_text' => ['sometimes', 'boolean'],
+            'text_lead_minutes' => ['sometimes', 'integer', 'min:1', 'max:1440'],
         ]);
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
@@ -1739,6 +1785,9 @@ class AdminBroadcastController extends Controller
         }
         if ($request->has('ai_text')) {
             $broadcast->ai_text = (bool) $data['ai_text'];
+        }
+        if ($request->has('text_lead_minutes')) {
+            $broadcast->text_lead_minutes = (int) $data['text_lead_minutes'];
         }
         if ($request->has('min_gap_minutes')) {
             $broadcast->min_gap_minutes = (int) $data['min_gap_minutes'];
@@ -1980,7 +2029,7 @@ class AdminBroadcastController extends Controller
             'ai_text' => $b->ai_text,
             // за сколько минут до слота появится анонс — чтобы лента показывала
             // человеку время, а не абстрактное «перед публикацией»
-            'text_lead_minutes' => max(1, (int) config('services.bot.broadcast_text_lead_minutes', 60)),
+            'text_lead_minutes' => $b->text_lead_minutes,
             // Когда канал снова сможет постить. Без этого пост, ждущий
             // зазора, выглядел как «ничего не происходит»: в ленте он стоит
             // со временем в прошлом и молчит.
@@ -2064,6 +2113,22 @@ class AdminBroadcastController extends Controller
             return $out;
         }
 
+        // Анонс пишется перед самой публикацией, и если модель не справилась,
+        // пост уходит с сырым описанием из парсера. Молча: в ленте это видно
+        // только по тому, что пометка «написан ИИ» так и не появилась. Один
+        // такой пост — случайность, несколько подряд — модель не успевает или
+        // падает, и об этом надо сказать.
+        if ($b->ai_text) {
+            $raw = $this->postedWithoutAiText($b);
+            if ($raw >= 2) {
+                $out[] = [
+                    'level' => 'warning',
+                    'text' => "За неделю {$raw} поста ушли с описанием из парсера, без анонса ИИ. "
+                        .'Проверьте, работает ли генерация: обычно это молчащий парсер или кончившийся ключ.',
+                ];
+            }
+        }
+
         // Раньше города: без владельца не уйдёт ни один пост, даже если
         // город задан и лента полна.
         if ($b->chat?->telegram_user_id === null) {
@@ -2113,7 +2178,12 @@ class AdminBroadcastController extends Controller
     }
 
     /** @return array<string, mixed> */
-    private function itemPayload(TelegramChatBroadcastItem $i, ?Event $event, ?\App\Models\Venue $venue = null): array
+    private function itemPayload(
+        TelegramChatBroadcastItem $i,
+        ?Event $event,
+        ?\App\Models\Venue $venue = null,
+        ?int $repeats = null,
+    ): array
     {
         return [
             'id' => (int) $i->id,
@@ -2144,6 +2214,9 @@ class AdminBroadcastController extends Controller
             // сырое описание из парсера, и это надо показать, а не скрывать.
             'has_ai_text' => $event ? trim((string) $event->tg_description) !== '' : null,
             'text_pending' => $i->text_requested_at !== null,
+            // Сколько будущих повторов события делят один анонс. null и 1 —
+            // событие одиночное, говорить не о чем.
+            'text_repeats' => $repeats !== null && $repeats > 1 ? $repeats : null,
             'text_hint' => $i->text_hint,
             'is_pinned' => (bool) $i->is_pinned,
             'publish_at' => optional($i->publish_at)?->toIso8601String(),
@@ -2249,6 +2322,55 @@ class AdminBroadcastController extends Controller
         $custom = trim((string) config('services.bot.admin_site_url'));
 
         return rtrim($custom !== '' ? $custom : (string) (config('app.url') ?: 'https://kudab.ru'), '/');
+    }
+
+    /**
+     * Сколько постов за неделю ушло без анонса ИИ.
+     *
+     * Считаем по самому событию: анонс живёт на нём, и его отсутствие сейчас
+     * означает, что и в момент отправки его не было. Портреты площадок не в
+     * счёт — у них свой текст и модель им не нужна.
+     */
+    private function postedWithoutAiText(TelegramChatBroadcast $b): int
+    {
+        return (int) TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $b->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
+            ->where('status', TelegramChatBroadcastItem::STATUS_POSTED)
+            ->where('posted_at', '>=', Carbon::now()->subDays(7))
+            ->whereIn('event_id', Event::query()
+                ->whereRaw("coalesce(btrim(tg_description), '') = ''")
+                ->select('id'))
+            ->count();
+    }
+
+    /**
+     * Надо ли дать парсеру время написать анонс, прежде чем пост уйдёт.
+     *
+     * Только там, где текст действительно напишут: событие (у портрета площадки
+     * свой текст), канал не отказался от анонсов ИИ, и анонса ещё нет.
+     */
+    private function needsTextBeforeSending(TelegramChatBroadcastItem $item, ?TelegramChatBroadcast $broadcast): bool
+    {
+        if (! $broadcast || ! $broadcast->ai_text) {
+            return false;
+        }
+        if ($item->kind !== TelegramChatBroadcastItem::KIND_EVENT || ! $item->event_id) {
+            return false;
+        }
+        if ($item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            return false; // текст писал человек — модели тут делать нечего
+        }
+
+        $event = Event::query()->find($item->event_id);
+
+        return $event !== null && trim((string) $event->tg_description) === '';
+    }
+
+    /** Сколько минут держим пост, пока парсер пишет ему анонс. */
+    private function textGraceMinutes(): int
+    {
+        return max(1, (int) config('services.bot.broadcast_text_grace_minutes', 6));
     }
 
     private function fillCaption(TelegramChatBroadcastItem $item, TelegramChatBroadcast $broadcast, Event $event): void
