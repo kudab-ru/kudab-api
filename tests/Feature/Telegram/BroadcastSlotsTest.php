@@ -383,4 +383,66 @@ class BroadcastSlotsTest extends TestCase
 
         return City::query()->where('slug', 'voronezh')->firstOrFail();
     }
+    /**
+     * Перетаскивание в вечерний слот не меняется местами с утренним.
+     *
+     * Место в ленте — это слот, а не день: со сравнением по дню перенос в
+     * свободный вечер находил «занявшим» утренний пост того же дня и менялся
+     * местами с ним. Человек двигал пост в пустое место, а получал обмен с
+     * чужим и отказ «второй пост уехал бы за своё событие».
+     */
+    public function test_moving_into_the_evening_slot_ignores_the_morning_post(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+
+        \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
+        $user = \App\Models\User::factory()->create();
+        $user->assignRole('superadmin');
+        \Laravel\Sanctum\Sanctum::actingAs($user);
+
+        [$broadcast] = $this->channelWithEvents(6);
+        $broadcast->slots = [10, 19];
+        $broadcast->save();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $items = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereNotNull('publish_at')
+            ->orderBy('publish_at')
+            ->get();
+
+        $morning = $items->first(fn ($i) => Carbon::parse($i->publish_at)
+            ->setTimezone('Europe/Moscow')->hour === 10);
+        $evening = $items->first(fn ($i) => Carbon::parse($i->publish_at)
+            ->setTimezone('Europe/Moscow')->hour === 19 && $i->id !== $morning?->id);
+
+        $this->assertNotNull($morning);
+        $this->assertNotNull($evening);
+
+        // Освобождаем вечер того дня, где стоит утренний пост, и переносим туда.
+        $target = Carbon::parse($morning->publish_at)->setTimezone('Europe/Moscow')->setTime(19, 0);
+        TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereNotNull('publish_at')
+            ->get()
+            ->filter(fn ($i) => $i->id !== $morning->id
+                && Carbon::parse($i->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H') === $target->format('Y-m-d H'))
+            ->each(fn ($i) => $i->forceFill(['publish_at' => null])->save());
+
+        $morningAt = $morning->publish_at;
+
+        $this->postJson("/api/admin/broadcast/channels/{$broadcast->id}/move", [
+            'item_id' => $evening->id,
+            'publish_at' => $target->format('Y-m-d\TH:i:sP'),
+        ])->assertOk();
+
+        $this->assertSame(
+            Carbon::parse($morningAt)->toIso8601String(),
+            Carbon::parse($morning->fresh()->publish_at)->toIso8601String(),
+            'утренний пост остался на своём месте — его никто не двигал',
+        );
+
+        Carbon::setTestNow();
+    }
 }

@@ -1513,19 +1513,27 @@ class AdminBroadcastController extends Controller
             }
         }
 
-        $targetDay = $target->copy()->setTimezone('Europe/Moscow')->toDateString();
+        // Место в ленте — это СЛОТ, а не день, когда у канала слотов несколько.
+        // Со сравнением по дню перетаскивание в вечерний слот находило «занявшим»
+        // утренний пост того же дня и менялось местами с ним: человек двигал
+        // пост в свободное место, а получал обмен с чужим и отказ «второй пост
+        // уехал бы за своё событие». Ту же гранулярность использует dayOccupant,
+        // здесь она была забыта.
+        $bySlot = $broadcast->slots !== [];
+        $format = $bySlot ? 'Y-m-d H' : 'Y-m-d';
+        $targetKey = $target->copy()->setTimezone('Europe/Moscow')->format($format);
 
-        // Кто уже занимает этот день.
+        // Кто уже занимает это место.
         $occupant = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
-            // Ошибочный пост день занимает — в сетке он виден.
+            // Ошибочный пост место занимает — в сетке он виден.
             ->whereIn('status', [...$this->openStatuses(), TelegramChatBroadcastItem::STATUS_ERROR])
             ->whereNull('posted_at')
             ->whereNotNull('publish_at')
             ->where('id', '<>', $item->id)
             ->get()
             ->first(fn (TelegramChatBroadcastItem $x) => Carbon::parse($x->publish_at)
-                ->setTimezone('Europe/Moscow')->toDateString() === $targetDay);
+                ->setTimezone('Europe/Moscow')->format($format) === $targetKey);
 
         if ($occupant && $occupant->is_pinned) {
             return response()->json([
@@ -1543,9 +1551,15 @@ class AdminBroadcastController extends Controller
             if ($otherEvent && $otherEvent->start_time) {
                 $otherEnds = $otherEvent->end_time ?: $otherEvent->start_time;
                 if (Carbon::parse($otherEnds)->lt($from)) {
+                    // Отказ обязан называть, КТО мешает и почему: без этого он
+                    // читается как «нельзя, и всё» — человек видит два поста и
+                    // не понимает, при чём тут второй.
+                    $when = Carbon::parse($from)->setTimezone('Europe/Moscow')->format('j.m');
+
                     return response()->json([
                         'ok' => false,
-                        'error' => 'Обмен невозможен: второй пост уехал бы за своё событие.',
+                        'error' => 'Обмен невозможен: «'.($otherEvent->title ?? 'второй пост')
+                            .'» уехал бы на '.$when.', а событие к тому дню уже пройдёт.',
                     ], 422);
                 }
             }
