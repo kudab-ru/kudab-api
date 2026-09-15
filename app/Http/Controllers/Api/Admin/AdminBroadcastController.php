@@ -135,7 +135,13 @@ class AdminBroadcastController extends Controller
                     });
             })
             ->orderByRaw('COALESCE(publish_at, planned_at, posted_at, created_at) ASC')
-            ->get();
+            ->get()
+            // Снятые из-за прошедшего или исчезнувшего события в списке не
+            // нужны: вернуть их нельзя, а решать по ним нечего — они просто
+            // копятся и закрывают то, по чему решение принимать надо.
+            ->reject(fn (TelegramChatBroadcastItem $i) => $i->status === TelegramChatBroadcastItem::STATUS_SKIPPED
+                && $this->skipReason((string) $i->error_message) === 'stale')
+            ->values();
 
         $events = Event::query()
             ->with('venue:id,name')
@@ -1140,22 +1146,39 @@ class AdminBroadcastController extends Controller
             return response()->json(['ok' => false, 'error' => 'Канал не найден.'], 404);
         }
 
+        $error = $this->restoreItem($item, $broadcast);
+        if ($error !== null) {
+            return response()->json(['ok' => false, 'error' => $error], 422);
+        }
+
+        return response()->json([
+            'data' => $this->itemPayload(
+                $item->fresh(),
+                $item->event_id ? Event::query()->with('venue:id,name')->find($item->event_id) : null,
+                $item->venue_id ? \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']) : null,
+            ),
+        ]);
+    }
+
+    /**
+     * Вернуть одну запись в ленту. null — получилось, строка — почему нет.
+     *
+     * Общий для одиночного и массового возврата: правила «что нельзя вернуть»
+     * должны быть одни, иначе кнопка «вернуть все» тихо сделает то, что
+     * поштучный возврат запрещает.
+     */
+    private function restoreItem(TelegramChatBroadcastItem $item, TelegramChatBroadcast $broadcast): ?string
+    {
         // Событие могло закончиться, пока запись лежала снятой — возвращать
         // такое значит вернуть анонс прошлого.
         if ($item->event_id) {
             $event = Event::query()->find($item->event_id);
             if (! $event) {
-                return response()->json([
-                    'ok' => false,
-                    'error' => 'События больше нет — вернуть нечего.',
-                ], 422);
+                return 'События больше нет — вернуть нечего.';
             }
             $endsAt = $event->end_time ?: $event->start_time;
             if ($endsAt && Carbon::parse($endsAt)->lt(Carbon::now())) {
-                return response()->json([
-                    'ok' => false,
-                    'error' => 'Событие уже прошло — возвращать его в ленту незачем.',
-                ], 422);
+                return 'Событие уже прошло — возвращать его в ленту незачем.';
             }
         }
 
@@ -1163,10 +1186,7 @@ class AdminBroadcastController extends Controller
             ->nextFreeSlot($broadcast, Carbon::now());
 
         if (! $slot) {
-            return response()->json([
-                'ok' => false,
-                'error' => 'В ленте нет свободного слота — освободите день или расширьте горизонт.',
-            ], 422);
+            return 'В ленте нет свободного слота — освободите день или расширьте горизонт.';
         }
 
         $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
@@ -1179,13 +1199,45 @@ class AdminBroadcastController extends Controller
         // Текст собран под прежний день — пересобираем под новый. Свой не трогаем.
         $this->regenerateCaption($item, $broadcast);
 
-        return response()->json([
-            'data' => $this->itemPayload(
-                $item->fresh(),
-                $item->event_id ? Event::query()->with('venue:id,name')->find($item->event_id) : null,
-                $item->venue_id ? \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']) : null,
-            ),
+        return null;
+    }
+
+    /**
+     * Вернуть в ленту сразу несколько снятых.
+     *
+     * Одной ручкой, а не N запросами подряд: слот каждому подбирается по
+     * текущему состоянию ленты, и между отдельными запросами оно менялось бы
+     * под ногами.
+     */
+    public function restoreMany(Request $request, int $broadcastId): JsonResponse
+    {
+        $data = $request->validate([
+            'ids' => ['required', 'array', 'max:50'],
+            'ids.*' => ['integer'],
         ]);
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
+
+        $items = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereIn('id', $data['ids'])
+            ->whereNull('posted_at')
+            ->orderBy('id')
+            ->get();
+
+        $restored = 0;
+        $failed = [];
+        foreach ($items as $item) {
+            $error = $this->restoreItem($item, $broadcast);
+            if ($error === null) {
+                $restored++;
+
+                continue;
+            }
+            $failed[] = ['id' => (int) $item->id, 'error' => $error];
+        }
+
+        return response()->json(['data' => ['restored' => $restored, 'failed' => $failed]]);
     }
 
     /** Вернуть пост в очередь после ошибки — попробовать ещё раз. */
@@ -1588,6 +1640,26 @@ class AdminBroadcastController extends Controller
     }
 
     /**
+     * Причина снятия в машинном виде.
+     *
+     * manual — убрали руками; rebuild — пересборка или разбавление;
+     * stale — событие прошло или исчезло, возвращать такое незачем.
+     * Словарь причин принадлежит серверу: он их и пишет, а фронт не должен
+     * разбирать русский текст.
+     */
+    private function skipReason(string $message): string
+    {
+        $m = mb_strtolower($message);
+
+        return match (true) {
+            str_contains($m, 'пересборк'), str_contains($m, 'разбавлен') => 'rebuild',
+            str_contains($m, 'прошло'), str_contains($m, 'недоступно') => 'stale',
+            str_contains($m, 'снято из ленты') => 'manual',
+            default => 'other',
+        };
+    }
+
+    /**
      * Кто занимает этот день в ленте канала.
      *
      * Один запрос на все пути, которые пишут publish_at: раньше он был
@@ -1846,6 +1918,9 @@ class AdminBroadcastController extends Controller
             // Причина — и для ошибки, и для автоматического снятия: markSkipped
             // пишет её в то же поле, а человеку нужно понимать, почему поста
             // больше нет в ленте.
+            'skip_reason' => $i->status === TelegramChatBroadcastItem::STATUS_SKIPPED
+                ? $this->skipReason((string) $i->error_message)
+                : null,
             'error_message' => in_array($i->status, [
                 TelegramChatBroadcastItem::STATUS_ERROR,
                 TelegramChatBroadcastItem::STATUS_SKIPPED,

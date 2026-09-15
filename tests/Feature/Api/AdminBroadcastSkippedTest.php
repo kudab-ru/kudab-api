@@ -8,6 +8,7 @@ use App\Models\TelegramChatBroadcastItem;
 use App\Models\TelegramUser;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
@@ -146,6 +147,78 @@ class AdminBroadcastSkippedTest extends TestCase
         $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $fresh->status);
         $this->assertNull($fresh->error_message);
         $this->assertNotNull($fresh->publish_at, 'вернулся на свободный слот');
+    }
+
+    public function test_stale_skips_are_hidden_and_reason_is_typed(): void
+    {
+        $broadcast = $this->makeChannel();
+
+        $manual = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
+        $manual->error_message = 'снято из ленты';
+        $manual->save();
+
+        $stale = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
+        $stale->error_message = 'событие 42 уже прошло к моменту отправки — снято из очереди';
+        $stale->save();
+
+        $res = $this->getJson("/api/admin/broadcast/channels/{$broadcast->id}/feed");
+        $res->assertOk();
+        $rows = collect($res->json('data.items'));
+
+        $this->assertNotNull($rows->firstWhere('id', $manual->id));
+        $this->assertSame('manual', $rows->firstWhere('id', $manual->id)['skip_reason']);
+        $this->assertNull(
+            $rows->firstWhere('id', $stale->id),
+            'прошедшее событие в списке снятых не нужно: вернуть его нельзя',
+        );
+    }
+
+    public function test_restore_many_returns_what_failed(): void
+    {
+        $broadcast = $this->makeChannel();
+
+        $ok = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
+        $ok->error_message = 'снято из ленты';
+        $ok->save();
+
+        // Событие прошло — вернуть такое нельзя, и массовый возврат обязан
+        // отказать ровно так же, как поштучный.
+        $gone = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
+        $gone->event_id = $this->pastEvent()->id;
+        $gone->save();
+
+        $res = $this->postJson("/api/admin/broadcast/channels/{$broadcast->id}/restore-many", [
+            'ids' => [$ok->id, $gone->id],
+        ]);
+
+        $res->assertOk();
+        $this->assertSame(1, $res->json('data.restored'));
+        $this->assertCount(1, $res->json('data.failed'));
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $ok->fresh()->status);
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $gone->fresh()->status);
+    }
+
+    private function pastEvent(): \App\Models\Event
+    {
+        DB::insert(
+            'INSERT INTO cities (name, country_code, location, status, slug, created_at, updated_at)
+             VALUES (?, ?, ST_SetSRID(ST_Point(?, ?), 4326), ?, ?, ?, ?)',
+            ['Воронеж', 'RU', 39.2, 51.6, 'active', 'voronezh-past', now(), now()]
+        );
+        $city = \App\Models\City::query()->where('slug', 'voronezh-past')->firstOrFail();
+        $community = \App\Models\Community::create(['name' => 'Организатор', 'city_id' => $city->id]);
+
+        $event = new \App\Models\Event;
+        $event->community_id = $community->id;
+        $event->title = 'Вчерашнее';
+        $event->status = 'active';
+        $event->city_id = $city->id;
+        $event->start_time = now()->subDays(2);
+        $event->start_date = $event->start_time->toDateString();
+        $event->end_time = now()->subDay();
+        $event->save();
+
+        return $event;
     }
 
     private function makeChannel(): TelegramChatBroadcast
