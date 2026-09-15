@@ -856,6 +856,13 @@ class AdminBroadcastController extends Controller
                 $available = match (true) {
                     $item->kind === TelegramChatBroadcastItem::KIND_VENUE && $item->venue_id !== null
                         => $this->venuePortraits->venuePhotoUrls((int) $item->venue_id, self::PHOTO_CANDIDATES),
+                    // У подборки своего события нет: её картинки — обложки
+                    // названных событий. Без этой ветки список разрешённых
+                    // оставался пустым, и любой выбор человека отбивался
+                    // ошибкой «среди выбранных есть чужие» — при том, что
+                    // сами картинки лента ему показывала.
+                    $item->kind === TelegramChatBroadcastItem::KIND_DIGEST
+                        => $this->broadcasts->digestPhotoUrls((int) $item->id, self::PHOTO_CANDIDATES),
                     $item->event_id !== null
                         => $this->broadcasts->eventPhotos((int) $item->event_id, self::PHOTO_CANDIDATES),
                     default => [],
@@ -1072,7 +1079,17 @@ class AdminBroadcastController extends Controller
             ? Carbon::parse((string) $request->query('at'))
             : Carbon::now();
 
-        $draft = $this->digestComposer->compose($broadcast, $at);
+        // Открытая бронь этого канала — не «чужой пост»: если состав ей уже
+        // собрали, превью без этой оговорки показало бы СЛЕДУЮЩУЮ тройку и
+        // соврало бы про то, что лежит в записи.
+        $booked = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->whereNull('posted_at')
+            ->orderBy('publish_at')
+            ->first();
+
+        $draft = $this->digestComposer->compose($broadcast, $at, $booked);
 
         if ($draft === null) {
             return response()->json(['data' => null, 'meta' => [
@@ -1117,7 +1134,10 @@ class AdminBroadcastController extends Controller
         }
 
         $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($item->broadcast_id);
-        $draft = $this->digestComposer->compose($broadcast, $item->publish_at ?? Carbon::now());
+        // $item третьим аргументом: иначе повторное нажатие выбирает ДРУГУЮ
+        // тройку — состав, записанный первым нажатием, вычитается как «канал
+        // это уже показывает».
+        $draft = $this->digestComposer->compose($broadcast, $item->publish_at ?? Carbon::now(), $item);
 
         if ($draft === null) {
             return response()->json(['ok' => false, 'error' => 'Ни одна тема не набрала состава — собирать нечего.'], 422);
@@ -1669,6 +1689,21 @@ class AdminBroadcastController extends Controller
             return;
         }
 
+        // Подборка: состав уже выбран, меняется момент. Пересобираем подпись
+        // по НЕМУ — иначе пост уезжает с чужой неделей в шапке: так ушёл пост
+        // 210, собранный под 16 сентября и отправленный 15-го.
+        if ($item->kind === TelegramChatBroadcastItem::KIND_DIGEST) {
+            $at = $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now();
+            $draft = $this->digestComposer->recompose($item, $broadcast, $at)
+                ?? $this->digestComposer->compose($broadcast, $at, $item);
+
+            if ($draft !== null) {
+                $this->broadcasts->applyDigestDraft($item, $draft);
+            }
+
+            return;
+        }
+
         $event = Event::query()->find($item->event_id);
         if (! $event) {
             return;
@@ -1721,6 +1756,14 @@ class AdminBroadcastController extends Controller
 
         if ($broadcast) {
             $this->regenerateCaption($item, $broadcast);
+        }
+
+        // Подборка: состав выбирается той же пересборкой выше, и только ПОСЛЕ
+        // неё видно, про что писать. Поэтому текст просим здесь, а не вместе с
+        // событиями, — иначе парсер получил бы заявку на пустой состав.
+        if ($this->digestNeedsText($item, $broadcast)) {
+            $this->holdDigestForText($item);
+            $waitForText = true;
         }
 
         // Говорим прямо, уйдёт ли пост на самом деле. Раньше админка обещала
@@ -1904,15 +1947,24 @@ class AdminBroadcastController extends Controller
 
         $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
 
+        if ($item->posted_at !== null) {
+            return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
+        }
+
+        // Подборке текст пишется так же, как событию, — только сначала должно
+        // быть решено, ПРО ЧТО писать. Обычно состав выбирается на отправке;
+        // если человек просит текст раньше, выбираем состав сейчас и тем самым
+        // замораживаем его — это осознанный обмен: свежесть на возможность
+        // прочитать и поправить текст заранее.
+        if ($item->kind === TelegramChatBroadcastItem::KIND_DIGEST) {
+            return $this->describeDigest($item, trim((string) ($data['hint'] ?? '')));
+        }
+
         if ($item->kind !== TelegramChatBroadcastItem::KIND_EVENT || ! $item->event_id) {
             return response()->json([
                 'ok' => false,
-                'error' => 'Текст пишется событиям. У портрета площадки свой текст — правьте его вручную.',
+                'error' => 'Текст пишется событиям и подборкам. У портрета площадки свой текст — правьте его вручную.',
             ], 422);
-        }
-
-        if ($item->posted_at !== null) {
-            return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
         }
 
         $event = Event::query()->find($item->event_id);
@@ -1930,6 +1982,75 @@ class AdminBroadcastController extends Controller
             'ok' => true,
             'data' => $this->itemPayload($item->fresh(), $event, null),
         ]);
+    }
+
+    /**
+     * Заказать текст подборке: состав — если его ещё нет, и заявка парсеру.
+     *
+     * Подпись снимаем: она собрана из фактов и первых фраз описаний, а сейчас
+     * её перепишет модель. Пустая подпись — тот же сигнал «собрать заново»,
+     * что и на доставке.
+     */
+    private function describeDigest(TelegramChatBroadcastItem $item, string $hint): JsonResponse
+    {
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->find($item->broadcast_id);
+        if (! $broadcast) {
+            return response()->json(['ok' => false, 'error' => 'Канал не найден.'], 404);
+        }
+
+        $hasRoster = DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->exists();
+
+        if (! $hasRoster || $item->digestTheme() === null) {
+            $draft = $this->digestComposer->compose(
+                $broadcast,
+                $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now(),
+                $item,
+            );
+
+            if ($draft === null) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => 'Ни одна тема не набрала состава — писать пока не о чем.',
+                ], 422);
+            }
+
+            $this->broadcasts->applyDigestDraft($item, $draft);
+            $item->refresh();
+        }
+
+        $item->text_hint = $hint !== '' ? $hint : null;
+        $this->holdDigestForText($item);
+
+        return response()->json([
+            'ok' => true,
+            'data' => $this->itemPayload($item->fresh(), null, null),
+        ]);
+    }
+
+    /**
+     * Снять подпись и попросить текст подборке.
+     *
+     * Пустая подпись — единственный сигнал, по которому доставка вернётся к
+     * сборке; оставленная шаблонная уехала бы в канал первой же попыткой.
+     * Придержка — то же окно, что у события: парсер снимет её сам.
+     */
+    private function holdDigestForText(TelegramChatBroadcastItem $item): void
+    {
+        $item->caption = null;
+        $item->caption_source = null;
+        $item->text_requested_at = Carbon::now();
+        $item->planned_at = Carbon::now()->addMinutes($this->textGraceMinutes());
+        $item->save();
+    }
+
+    /** Стоит ли дать модели написать текст подборке перед отправкой. */
+    private function digestNeedsText(TelegramChatBroadcastItem $item, ?TelegramChatBroadcast $broadcast): bool
+    {
+        return $broadcast !== null
+            && $broadcast->ai_text
+            && $item->kind === TelegramChatBroadcastItem::KIND_DIGEST
+            && $item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL
+            && ! $item->hasDigestText();
     }
 
     /** Шаблоны постов: тексты, которыми собираются все неправленые посты. */
@@ -2702,7 +2823,14 @@ class AdminBroadcastController extends Controller
             // Текст анонса пишет модель — но только тому, что вот-вот уйдёт в
             // канал. Поэтому у поста, стоящего на неделю вперёд, в подписи пока
             // сырое описание из парсера, и это надо показать, а не скрывать.
-            'has_ai_text' => $event ? trim((string) $event->tg_description) !== '' : null,
+            // У подборки своего события нет, а текст модели есть: он лежит на
+            // самой записи. Без этой ветки плашка в админке вечно обещала бы
+            // «напишет ИИ», даже когда текст уже написан и стоит в посте.
+            'has_ai_text' => match (true) {
+                $i->kind === TelegramChatBroadcastItem::KIND_DIGEST => $i->hasDigestText(),
+                $event !== null => trim((string) $event->tg_description) !== '',
+                default => null,
+            },
             'text_pending' => $i->text_requested_at !== null,
             // Сколько будущих повторов события делят один анонс. null и 1 —
             // событие одиночное, говорить не о чем.

@@ -58,8 +58,10 @@ class BroadcastDigestComposerTest extends TestCase
         $this->assertCount(3, $out['event_ids'], 'называем три события');
         $this->assertSame(6, $out['total']);
         $this->assertStringContainsString('Спектакли недели', $out['caption']);
-        $this->assertStringContainsString('6 спектаклей', $out['caption'], 'число склоняется');
-        $this->assertStringContainsString('Вся афиша спектаклей', $out['caption']);
+        $this->assertStringContainsString('Вся афиша спектаклей', $out['caption'],
+            'подвал зовёт на лендинг и числа не обещает: недельного фильтра у лендинга нет');
+        $this->assertStringNotContainsString('в разных местах', $out['caption'],
+            'правило отбора — наша кухня, в тексте ему не место');
     }
 
     /** Гейт: меньше пяти событий — это не подборка, а слабая лента. */
@@ -157,12 +159,13 @@ class BroadcastDigestComposerTest extends TestCase
     }
 
     /**
-     * Подпись считает названных, а не обещает «Три».
+     * Подпись не обещает числа названных вовсе.
      *
      * Гейт темы — пять событий, но отсечки «одна площадка, один день» могут
-     * оставить меньше трёх. Текст при этом обещал три и отправлялся молча.
+     * оставить меньше трёх, и текст обещал три, отправляясь молча. Теперь
+     * счёта названных в тексте нет: он был пересказом внутреннего правила.
      */
-    public function test_caption_counts_the_named_instead_of_promising_three(): void
+    public function test_caption_never_promises_how_many_are_named(): void
     {
         $broadcast = $this->makeChannel();
         // Пять событий, но все в один день: отсечка по дню оставит одно.
@@ -177,8 +180,9 @@ class BroadcastDigestComposerTest extends TestCase
 
         $this->assertNotNull($out);
         $this->assertCount(1, $out['event_ids']);
-        $this->assertStringContainsString('Одно —', $out['caption']);
-        $this->assertStringNotContainsString('Три —', $out['caption']);
+        $this->assertStringNotContainsString('Одно', $out['caption']);
+        $this->assertStringNotContainsString('Три', $out['caption']);
+        $this->assertStringContainsString('Вся афиша спектаклей', $out['caption'], 'остальные — по ссылке');
     }
 
     /**
@@ -329,15 +333,19 @@ class BroadcastDigestComposerTest extends TestCase
             $this->themedEvent("Спектакль {$n}", $n, withImage: true);
         }
 
-        $digest = new TelegramChatBroadcastItem;
-        $digest->broadcast_id = $broadcast->id;
-        $digest->kind = TelegramChatBroadcastItem::KIND_DIGEST;
-        $digest->status = TelegramChatBroadcastItem::STATUS_PENDING;
-        $digest->publish_at = Carbon::now()->subMinute();
+        $digest = $this->digestItem($broadcast, Carbon::now()->subMinute());
+
+        $service = app(\App\Services\Telegram\TelegramChatBroadcastService::class);
+
+        // Первый тик выбирает состав и придерживает пост на время генерации —
+        // задачи боту на нём ещё нет. Придержку снимает парсер; здесь снимаем
+        // руками, чтобы проверить именно доставку картинок.
+        $service->collectDueSingleRuns(Carbon::now());
+        $digest->refresh();
+        $digest->planned_at = Carbon::now()->subSecond();
         $digest->save();
 
-        $tasks = app(\App\Services\Telegram\TelegramChatBroadcastService::class)
-            ->collectDueSingleRuns(Carbon::now());
+        $tasks = $service->collectDueSingleRuns(Carbon::now());
 
         $task = collect($tasks)->firstWhere('item_id', $digest->id);
 
@@ -345,6 +353,292 @@ class BroadcastDigestComposerTest extends TestCase
         $this->assertSame('digest', $task['kind']);
         $this->assertNotEmpty($task['photo_urls'], 'обложки названных событий обязаны доехать до бота');
         $this->assertNotNull($task['photo_url'], 'и обложка тоже');
+    }
+
+    /**
+     * Повторная сборка той же записи выбирает ТОТ ЖЕ состав.
+     *
+     * `rejectAlreadyShown` вычитает всё, что канал вот-вот покажет, — а
+     * показывает он ровно эту тройку. Без оговорки «кроме самой записи» второй
+     * проход гарантированно выбирал другие события: кнопка «Собрать» была
+     * неидемпотентной, а текст, написанный под первый состав, доставался не
+     * тем событиям.
+     */
+    public function test_recomposing_the_same_item_keeps_its_own_events(): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $digest = $this->digestItem($broadcast, Carbon::now()->addDay());
+
+        $first = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now(), $digest);
+        $this->assertNotNull($first);
+        app(\App\Services\Telegram\TelegramChatBroadcastService::class)->applyDigestDraft($digest, $first);
+
+        $second = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now(), $digest->fresh());
+
+        $this->assertNotNull($second, 'своя же тройка не должна обваливать гейт темы');
+        $this->assertSame($first['event_ids'], $second['event_ids']);
+    }
+
+    /**
+     * Пересборка по сохранённому составу: события те же, текст модели на месте.
+     *
+     * Именно этим собирается подпись после того, как модель написала текст.
+     * Переизбирать состав здесь нельзя — оплаченные строки достались бы чужим
+     * событиям.
+     */
+    public function test_recompose_uses_the_saved_roster_and_the_written_text(): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $digest = $this->digestItem($broadcast, Carbon::now()->addDay());
+        $draft = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now(), $digest);
+        app(\App\Services\Telegram\TelegramChatBroadcastService::class)->applyDigestDraft($digest, $draft);
+
+        $digest->refresh();
+        $meta = (array) $digest->digest_meta;
+        $meta['intro'] = 'Три вечера подряд сцена не пустует.';
+        $meta['hooks'] = [(string) $draft['event_ids'][0] => 'Студенты играют без страховки.'];
+        $meta['roster'] = $draft['event_ids'];
+        $digest->digest_meta = $meta;
+        $digest->save();
+
+        $out = app(BroadcastDigestComposer::class)->recompose($digest, $broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $this->assertSame($draft['event_ids'], $out['event_ids'], 'состав переизбирать нельзя');
+        $this->assertStringContainsString('Три вечера подряд сцена не пустует.', $out['caption']);
+        $this->assertStringContainsString('Студенты играют без страховки.', $out['caption']);
+    }
+
+    /**
+     * Строка модели сильнее нашего прежнего анонса.
+     *
+     * Анонс написан под ОТДЕЛЬНЫЙ пост, где под него отведён абзац; строка
+     * модели написана под эту строку и знает соседей по посту.
+     */
+    public function test_written_line_wins_over_the_event_announce(): void
+    {
+        $broadcast = $this->makeChannel();
+        $ids = [];
+        foreach (range(1, 6) as $n) {
+            $ids[] = $this->themedEvent("Спектакль {$n}", $n);
+        }
+        DB::table('events')->whereIn('id', $ids)->update([
+            'tg_description' => 'Прежний анонс события, написанный под отдельный пост.',
+        ]);
+
+        $digest = $this->digestItem($broadcast, Carbon::now()->addDay());
+        $draft = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now(), $digest);
+        app(\App\Services\Telegram\TelegramChatBroadcastService::class)->applyDigestDraft($digest, $draft);
+
+        $digest->refresh();
+        $meta = (array) $digest->digest_meta;
+        $meta['hooks'] = [];
+        foreach ($draft['event_ids'] as $id) {
+            $meta['hooks'][(string) $id] = 'Строка ведущего про событие '.$id.'.';
+        }
+        $meta['roster'] = $draft['event_ids'];
+        $digest->digest_meta = $meta;
+        $digest->save();
+
+        $out = app(BroadcastDigestComposer::class)->recompose($digest, $broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $this->assertStringContainsString('Строка ведущего про событие', $out['caption']);
+        $this->assertStringNotContainsString('Прежний анонс события', $out['caption']);
+    }
+
+    /**
+     * Пресс-релизный зачин в пост не идёт.
+     *
+     * «Приглашаем вас на спектакль…» — это перепечатка, и читается она именно
+     * так: по ней владелец и сказал, что текст «видно искусственный». Берём
+     * следующее предложение, а нет живого — строки не будет вовсе.
+     */
+    public function test_press_release_opening_is_never_quoted(): void
+    {
+        $broadcast = $this->makeChannel();
+        $ids = [];
+        foreach (range(1, 6) as $n) {
+            $ids[] = $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        // У всех шести одинаковое описание: какие бы три ни выбрал отбор,
+        // проверка смотрит на одно и то же. С правкой одного события тест
+        // проходил бы и на сломанном фильтре — если бы это событие не назвали.
+        DB::table('events')->whereIn('id', $ids)->update([
+            'description' => 'Приглашаем вас на спектакль, который пройдёт в нашем театре. '
+                .'Декорации собраны из мебели, которую принесли сами зрители, и это видно со второго ряда. '
+                .'Вход по билетам.',
+        ]);
+
+        $out = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $this->assertStringNotContainsString('Приглашаем вас', $out['caption']);
+        $this->assertStringContainsString('Декорации собраны из мебели', $out['caption'],
+            'живое предложение из описания взять можно и нужно');
+    }
+
+    /**
+     * В момент слота подборка не уходит, а просит текст и придерживается.
+     *
+     * Это тот же путь, что у события: сначала известно, про что пишем, потом
+     * модель пишет, и только потом пост уходит. Раньше подборка собиралась и
+     * уезжала в ту же секунду — писать ей было некогда.
+     */
+    public function test_digest_asks_for_text_and_holds_instead_of_sending(): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $digest = $this->digestItem($broadcast, Carbon::now()->subMinute());
+
+        $tasks = app(\App\Services\Telegram\TelegramChatBroadcastService::class)
+            ->collectDueSingleRuns(Carbon::now());
+
+        $this->assertNull(collect($tasks)->firstWhere('item_id', $digest->id),
+            'пост не должен уйти, пока ему пишут текст');
+
+        $digest->refresh();
+        $this->assertNotNull($digest->text_requested_at, 'заявка на текст поставлена');
+        $this->assertTrue($digest->planned_at?->isFuture(), 'и придержка тоже');
+        $this->assertNull($digest->caption, 'пустая подпись — сигнал собрать заново');
+        $this->assertSame('spektakli', $digest->digestTheme(), 'тема сохранена для пересборки');
+        $this->assertSame(3, DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $digest->id)->count(), 'состав выбран — есть про что писать');
+    }
+
+    /**
+     * Придержка кончилась, текст написан — пост уходит уже с ним.
+     */
+    public function test_digest_goes_out_with_the_written_text_after_the_hold(): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $digest = $this->digestItem($broadcast, Carbon::now()->subMinute());
+        app(\App\Services\Telegram\TelegramChatBroadcastService::class)->collectDueSingleRuns(Carbon::now());
+
+        // Ровно то, что делает парсер: пишет текст и снимает придержку.
+        $digest->refresh();
+        $roster = DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $digest->id)->orderBy('position')->pluck('event_id')
+            ->map(fn ($v) => (int) $v)->all();
+        $meta = (array) $digest->digest_meta;
+        $meta['intro'] = 'Неделя, в которую сцена не пустует ни вечера.';
+        $meta['hooks'] = [(string) $roster[0] => 'Декорации собирали всем залом.'];
+        $meta['roster'] = $roster;
+        $digest->digest_meta = $meta;
+        $digest->planned_at = Carbon::now()->subSecond();
+        $digest->save();
+
+        $tasks = app(\App\Services\Telegram\TelegramChatBroadcastService::class)
+            ->collectDueSingleRuns(Carbon::now());
+
+        $task = collect($tasks)->firstWhere('item_id', $digest->id);
+
+        $this->assertNotNull($task, 'придержка снята — пост уходит');
+        $this->assertStringContainsString('Неделя, в которую сцена не пустует', $task['caption']);
+        $this->assertStringContainsString('Декорации собирали всем залом.', $task['caption']);
+        $this->assertSame($roster, DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $digest->id)->orderBy('position')->pluck('event_id')
+            ->map(fn ($v) => (int) $v)->all(), 'состав не переизбран');
+    }
+
+    /**
+     * Канал, отказавшийся от текстов ИИ, подборку не придерживает.
+     *
+     * Ждать нечего: текста не будет, а шесть минут простоя пост потерял бы зря.
+     */
+    public function test_channel_without_ai_text_sends_the_digest_at_once(): void
+    {
+        $broadcast = $this->makeChannel();
+        $broadcast->settings = array_merge((array) $broadcast->settings, ['ai_text' => false]);
+        $broadcast->save();
+
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $digest = $this->digestItem($broadcast, Carbon::now()->subMinute());
+
+        $tasks = app(\App\Services\Telegram\TelegramChatBroadcastService::class)
+            ->collectDueSingleRuns(Carbon::now());
+
+        $this->assertNotNull(collect($tasks)->firstWhere('item_id', $digest->id));
+        $this->assertNull($digest->fresh()->text_requested_at, 'заявку такому каналу не ставим');
+    }
+
+    /**
+     * Сменился состав — подводка снимается.
+     *
+     * Она написана про конкретную тройку («а в субботу…»), и с другим составом
+     * ссылается на то, чего в посте уже нет. Строки про события смену
+     * переживают: они привязаны к id.
+     */
+    public function test_intro_is_dropped_when_the_roster_changes(): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $digest = $this->digestItem($broadcast, Carbon::now()->addDay());
+        $service = app(\App\Services\Telegram\TelegramChatBroadcastService::class);
+        $draft = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now(), $digest);
+        $service->applyDigestDraft($digest, $draft);
+
+        $digest->refresh();
+        $meta = (array) $digest->digest_meta;
+        $meta['intro'] = 'Подводка про прежнюю тройку.';
+        $meta['hooks'] = [(string) $draft['event_ids'][0] => 'Строка про своё событие.'];
+        $meta['roster'] = $draft['event_ids'];
+        $digest->digest_meta = $meta;
+        $digest->save();
+
+        // Состав сменился: одно событие уехало, другое пришло.
+        $other = array_values(array_diff(
+            DB::table('events')->pluck('id')->map(fn ($v) => (int) $v)->all(),
+            $draft['event_ids'],
+        ));
+        $changed = $draft['event_ids'];
+        $changed[0] = $other[0];
+
+        $service->applyDigestDraft($digest, [
+            'caption' => 'x',
+            'event_ids' => $changed,
+            'theme' => $draft['theme'],
+            'theme_slug' => $draft['theme_slug'],
+        ]);
+
+        $digest->refresh();
+        $this->assertNull($digest->digestIntro(), 'подводка про другую тройку снимается');
+        $this->assertSame('Строка про своё событие.', $digest->digestHook($draft['event_ids'][1] === $changed[1] ? $draft['event_ids'][0] : $draft['event_ids'][0]),
+            'строки про события остаются: они привязаны к id');
+    }
+
+    private function digestItem(TelegramChatBroadcast $broadcast, Carbon $at): TelegramChatBroadcastItem
+    {
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $broadcast->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = $at;
+        $item->save();
+
+        return $item;
     }
 
     private function themedEvent(string $title, int $n, bool $withImage = false): int

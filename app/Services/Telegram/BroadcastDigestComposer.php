@@ -44,8 +44,11 @@ final class BroadcastDigestComposer
      * @return array{theme: array<string, string>, caption: string, event_ids: list<int>, total: int, venues: int}|null
      *                                                                                                                 null — ни одна тема не набрала состава; решать, что делать дальше, вызывающему
      */
-    public function compose(TelegramChatBroadcast $broadcast, Carbon $publishAt): ?array
-    {
+    public function compose(
+        TelegramChatBroadcast $broadcast,
+        Carbon $publishAt,
+        ?TelegramChatBroadcastItem $forItem = null,
+    ): ?array {
         $cityId = $broadcast->chat?->city_id;
         if (! $cityId) {
             return null;
@@ -54,7 +57,7 @@ final class BroadcastDigestComposer
         $best = null;
 
         foreach ((array) config('broadcast_digest.themes', []) as $theme) {
-            $picked = $this->pickForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt);
+            $picked = $this->pickForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $forItem?->id);
             if ($picked === null) {
                 continue;
             }
@@ -72,11 +75,122 @@ final class BroadcastDigestComposer
 
         return [
             'theme' => $best['theme'],
-            'caption' => $this->buildCaption($broadcast, $best, $publishAt),
+            'theme_slug' => (string) $best['theme']['slug'],
+            'caption' => $this->buildCaption($broadcast, $best, $publishAt, $forItem),
             'event_ids' => array_map(fn ($e) => (int) $e->id, $best['named']),
             'total' => $best['total'],
             'venues' => $best['venues'],
         ];
+    }
+
+    /**
+     * Пересобрать подпись по УЖЕ ВЫБРАННОМУ составу.
+     *
+     * ЗАЧЕМ ОТДЕЛЬНО ОТ compose(). Между выбором состава и отправкой проходит
+     * окно, в которое модель пишет текст, а человек может перетащить пост на
+     * другой день. Полная пересборка в этот момент выбрала бы ДРУГУЮ тройку —
+     * `rejectAlreadyShown` вычитает всё, что канал вот-вот покажет, а покажет
+     * он ровно эти три, — и оплаченный текст достался бы не тем событиям.
+     * Здесь состав берётся из связи «пост → события» и не переизбирается.
+     *
+     * Что всё-таки пересчитывается: факты событий (цена, время, площадка) и
+     * счётчики пула. Они читаются заново, потому что подпись собирается под
+     * МОМЕНТ отправки: пост 210 ушёл 15-го с шапкой «С 16 по 23 сентября»
+     * именно потому, что текст собрали под один день, а отправили в другой.
+     *
+     * @return array{theme: array<string, string>, theme_slug: string, caption: string, event_ids: list<int>, total: int, venues: int}|null
+     *                                                                                                                                     null — состав рассыпался (события удалены или прошли) либо темы больше нет: решать вызывающему
+     */
+    public function recompose(
+        TelegramChatBroadcastItem $item,
+        TelegramChatBroadcast $broadcast,
+        Carbon $publishAt,
+    ): ?array {
+        $slug = $item->digestTheme();
+        $cityId = $broadcast->chat?->city_id;
+        if ($slug === null || ! $cityId) {
+            return null;
+        }
+
+        $theme = collect((array) config('broadcast_digest.themes', []))
+            ->first(fn ($t) => (string) ($t['slug'] ?? '') === $slug);
+        if ($theme === null) {
+            return null;
+        }
+
+        $named = $this->namedFromLinks($item, $publishAt);
+        if ($named === []) {
+            return null;
+        }
+
+        // Счётчики пула — заново на момент отправки. Разойтись с замороженным
+        // составом они не могут: состав входит в пул, а «20 концертов» — это
+        // сколько их всего, а не сколько выбрано.
+        $pool = $this->poolForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $item->id);
+        $rows = $pool['rows'] ?? collect();
+
+        $picked = [
+            'theme' => (array) $theme,
+            'named' => $named,
+            'total' => max($rows->count(), count($named)),
+            'venues' => max($rows->pluck('venue_id')->filter()->unique()->count(), 1),
+        ];
+
+        return [
+            'theme' => $picked['theme'],
+            'theme_slug' => $slug,
+            'caption' => $this->buildCaption($broadcast, $picked, $publishAt, $item),
+            'event_ids' => array_map(fn ($e) => (int) $e->id, $named),
+            'total' => $picked['total'],
+            'venues' => $picked['venues'],
+        ];
+    }
+
+    /**
+     * Названные события — из связи «пост → события», свежими фактами.
+     *
+     * События, которые успели удалить или которые уже начались, выпадают:
+     * ссылка на удалённое событие ведёт в 404, а «сегодня в 19:00» про то, что
+     * началось час назад, — вранью в канале.
+     *
+     * @return list<object>
+     */
+    private function namedFromLinks(TelegramChatBroadcastItem $item, Carbon $publishAt): array
+    {
+        $ids = DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)
+            ->orderBy('position')
+            ->pluck('event_id')
+            ->map(fn ($v) => (int) $v)
+            ->all();
+
+        if ($ids === []) {
+            return [];
+        }
+
+        $rows = DB::table('events as e')
+            ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
+            ->whereIn('e.id', $ids)
+            ->whereNull('e.deleted_at')
+            ->where('e.status', 'active')
+            ->where('e.start_time', '>=', $publishAt)
+            ->get([
+                'e.id', 'e.title', 'e.start_time', 'e.event_group_id', 'e.venue_id',
+                'e.description', 'e.tg_description', 'e.price_min', 'e.price_max', 'e.price_status',
+                'v.name as venue_name',
+            ])
+            ->keyBy(fn ($r) => (int) $r->id);
+
+        $named = [];
+        foreach ($ids as $id) {
+            if ($rows->has($id)) {
+                $named[] = $rows->get($id);
+            }
+        }
+
+        usort($named, fn ($a, $b) => strcmp((string) $a->start_time, (string) $b->start_time));
+
+        return $named;
     }
 
     /**
@@ -85,8 +199,50 @@ final class BroadcastDigestComposer
      * @param  array<string, string>  $theme
      * @return array{theme: array<string, string>, named: list<object>, total: int, venues: int}|null
      */
-    private function pickForTheme(TelegramChatBroadcast $broadcast, int $cityId, array $theme, Carbon $publishAt): ?array
-    {
+    private function pickForTheme(
+        TelegramChatBroadcast $broadcast,
+        int $cityId,
+        array $theme,
+        Carbon $publishAt,
+        ?int $exceptItemId = null,
+    ): ?array {
+        $pool = $this->poolForTheme($broadcast, $cityId, $theme, $publishAt, $exceptItemId);
+        if ($pool === null) {
+            return null;
+        }
+
+        $rows = $pool['rows'];
+        $total = $rows->count();
+        $venues = $rows->pluck('venue_id')->filter()->unique()->count();
+
+        if ($total < (int) config('broadcast_digest.min_events', 5)
+            || $venues < (int) config('broadcast_digest.min_venues', 3)) {
+            return null;
+        }
+
+        return [
+            'theme' => $theme,
+            'named' => $this->pickNamed($rows),
+            'total' => $total,
+            'venues' => $venues,
+        ];
+    }
+
+    /**
+     * Пул темы после всех отсечек — то, из чего выбирается тройка и что
+     * считается в «20 концертов на 10 площадках».
+     *
+     * @param  array<string, string>  $theme
+     * @param  int|null  $exceptItemId  чью связь не считать чужой: собственный
+     *                                  состав записи не должен вычитать сам себя
+     */
+    private function poolForTheme(
+        TelegramChatBroadcast $broadcast,
+        int $cityId,
+        array $theme,
+        Carbon $publishAt,
+        ?int $exceptItemId = null,
+    ): ?array {
         $ids = $this->interestTree((string) $theme['interest']);
         if ($ids === []) {
             return null;
@@ -124,23 +280,9 @@ final class BroadcastDigestComposer
         $rows = $this->rejectStopList($rows);
         $rows = $this->rejectForeignGenre($rows, (string) $theme['slug']);
         $rows = $this->rejectForeignSourceRubric($rows, (string) $theme['slug']);
-        $rows = $this->rejectAlreadyShown($broadcast, $rows);
-        $rows = $this->collapseRepeats($rows);
+        $rows = $this->rejectAlreadyShown($broadcast, $rows, $exceptItemId);
 
-        $total = $rows->count();
-        $venues = $rows->pluck('venue_id')->filter()->unique()->count();
-
-        if ($total < (int) config('broadcast_digest.min_events', 5)
-            || $venues < (int) config('broadcast_digest.min_venues', 3)) {
-            return null;
-        }
-
-        return [
-            'theme' => $theme,
-            'named' => $this->pickNamed($rows),
-            'total' => $total,
-            'venues' => $venues,
-        ];
+        return ['rows' => $this->collapseRepeats($rows)];
     }
 
     /** Дерево интересов темы — тем же рекурсивным обходом, что и лендинг. */
@@ -255,12 +397,19 @@ final class BroadcastDigestComposer
      * заголовок. Одного мало — то же событие приезжает из разных источников
      * разными строками, и подборка стала бы оглавлением уже прочитанного.
      */
-    private function rejectAlreadyShown(TelegramChatBroadcast $broadcast, \Illuminate\Support\Collection $rows): \Illuminate\Support\Collection
-    {
+    private function rejectAlreadyShown(
+        TelegramChatBroadcast $broadcast,
+        \Illuminate\Support\Collection $rows,
+        ?int $exceptItemId = null,
+    ): \Illuminate\Support\Collection {
         $shown = DB::table('telegram.chat_broadcast_item_events as l')
             ->join('telegram.chat_broadcast_items as i', 'i.id', '=', 'l.item_id')
             ->join('events as e', 'e.id', '=', 'l.event_id')
             ->where('i.broadcast_id', $broadcast->id)
+            // Собственный состав записи — не «уже показанное». Без этого
+            // повторная сборка той же подборки НИКОГДА не выбирает ту же
+            // тройку: она только что сама её и закрыла.
+            ->when($exceptItemId !== null, fn ($q) => $q->where('i.id', '<>', $exceptItemId))
             ->where(function ($q) {
                 $q->whereIn('i.status', [
                     TelegramChatBroadcastItem::STATUS_PENDING,
@@ -396,39 +545,37 @@ final class BroadcastDigestComposer
         return $named;
     }
 
-    /** @param array{theme: array<string, string>, named: list<object>, total: int, venues: int} $picked */
-    private function buildCaption(TelegramChatBroadcast $broadcast, array $picked, Carbon $publishAt): string
-    {
+    /**
+     * @param  array{theme: array<string, string>, named: list<object>, total: int, venues: int}  $picked
+     * @param  TelegramChatBroadcastItem|null  $item  запись, если у неё уже есть текст модели
+     */
+    private function buildCaption(
+        TelegramChatBroadcast $broadcast,
+        array $picked,
+        Carbon $publishAt,
+        ?TelegramChatBroadcastItem $item = null,
+    ): string {
         $theme = $picked['theme'];
-        $city = $broadcast->chat?->city?->name ?? '';
         $from = $publishAt->copy()->setTimezone(self::TZ);
         $to = $from->copy()->addDays((int) config('broadcast_digest.window_days', 7));
-
-        $head = trim(($theme['emoji'] ?? '').' <b>'.$this->escape((string) $theme['title']).' недели</b>');
-
-        // «С 21 по 28 сентября», а не «с 21 сентября по 28 сентября»: месяц
-        // повторяется только когда он действительно другой.
-        $range = $from->month === $to->month
-            ? sprintf('С %d по %d %s', $from->day, $to->day, self::MONTHS[$to->month])
-            : sprintf('С %d %s по %d %s', $from->day, self::MONTHS[$from->month], $to->day, self::MONTHS[$to->month]);
-
         $forms = (array) ($theme['forms'] ?? []);
 
-        $named = count($picked['named']);
-        $lead = match ($named) {
-            1 => 'Одно',
-            2 => 'Два',
-            default => 'Три',
-        };
+        // Шапка одной строкой: тема и период. Город не пишем — канал
+        // городской, а площадки в строках фактов и так его называют.
+        // «15–22 сентября»: месяц повторяется, только когда он другой.
+        $range = $from->month === $to->month
+            ? sprintf('%d–%d %s', $from->day, $to->day, self::MONTHS[$to->month])
+            : sprintf('%d %s – %d %s', $from->day, self::MONTHS[$from->month], $to->day, self::MONTHS[$to->month]);
 
-        $period = sprintf(
-            '%s%s %s на %s. '.$lead.' — в разных местах и в разные дни:',
-            $range,
-            $city !== '' ? ' в '.$this->escape($this->cityInflected($city)) : '',
-            $this->plural($picked['total'], $forms[0] ?? '', $forms[1] ?? null, $forms[2] ?? null),
-            // Предложный падеж: «на 6 площадкАХ», а не «на 6 площадок».
-            $this->plural($picked['venues'], 'площадке', 'площадках', 'площадках'),
-        );
+        $head = trim(($theme['emoji'] ?? '').' <b>'.$this->escape((string) $theme['title']).' недели</b>')
+            .' · '.$this->escape($range);
+
+        // Подводка ведущего — про эту неделю и эту тройку. Её место занимала
+        // строка счёта («20 концертов на 10 площадках. Три — в разных местах и
+        // в разные дни»), и та говорила две вещи, которых читатель не просил:
+        // хвасталась охватом и пересказывала внутреннее правило отбора. Счёт
+        // переехал в подвал, где он работает поводом нажать.
+        $lead = $item?->digestIntro();
 
         $lines = [];
         $rich = [];
@@ -436,41 +583,48 @@ final class BroadcastDigestComposer
             $at = Carbon::parse($row->start_time)->setTimezone(self::TZ);
             $meta = array_values(array_filter([
                 self::WEEKDAYS[(int) $at->isoWeekday()].' '.$at->day.' '.self::MONTHS[$at->month].', '.$at->format('H:i'),
-                trim((string) ($row->venue_name ?? '')),
+                $this->venueLabel($row),
                 $this->priceLabel($row),
             ]));
 
             // НЕ $head: этим именем выше назван заголовок поста, и повторное
             // использование затирало его названием последнего события.
-            $titleLink = $this->link($this->eventUrl((int) $row->id), (string) $row->title);
-            $facts = $this->escape(implode(' · ', $meta));
-            $hook = $this->hook($row);
+            $titleLink = '<b>'.$this->link($this->eventUrl((int) $row->id), (string) $row->title).'</b>';
+            $facts = '<i>'.$this->escape(implode(' · ', $meta)).'</i>';
+            $hook = $this->hook($row, $item);
 
+            // Имя, под ним ведомость фактов, и только потом живая строка: блок
+            // заканчивается человеческой фразой, а не ценой. Тот же приём, что
+            // промпт канала называет «панч отдельной строкой», но в вёрстке.
             $lines[] = $titleLink."\n".$facts;
             $rich[] = $hook === ''
                 ? $titleLink."\n".$facts
-                : $titleLink."\n".$this->escape($hook)."\n".$facts;
+                : $titleLink."\n".$facts."\n".$this->escape($hook);
         }
 
-        // Город в подвале не склоняем и не повторяем: он уже назван строкой
-        // выше, а «афиша спектаклей Воронеже» — ровно та мелочь, из-за которой
-        // пост читается машинным.
+        // Подвал БЕЗ числа — решение владельца, записанное в NEXT.md: у
+        // категорийного лендинга нет недельного фильтра, он рисует всю будущую
+        // афишу. Обещать «ещё 36 на этой неделе» и привести на страницу, где
+        // события другие, — обмануть в мелочи, которую читатель проверит первым
+        // же нажатием.
         $footer = $this->link(
             $this->landingUrl($broadcast, (string) $theme['slug']),
             'Вся афиша '.($forms[2] ?? mb_strtolower((string) $theme['title'])),
         );
 
+        $top = array_values(array_filter([$head, $lead !== null ? $this->escape($lead) : null]));
+
         // С изюмом, если он влезает. Подпись к альбому Telegram режет на 1024
         // символах, и обрезанная на полуслове строка хуже её отсутствия —
         // поэтому снимаем изюм целиком, а не подрезаем.
-        $withHooks = implode("\n\n", array_merge([$head, $period], $rich, [$footer]));
+        $withHooks = implode("\n\n", array_merge($top, $rich, [$footer]));
         $soft = (int) config('broadcast_digest.caption_soft_limit', 950);
 
         if (mb_strlen(strip_tags($withHooks)) <= $soft) {
             return $withHooks;
         }
 
-        return implode("\n\n", array_merge([$head, $period], $lines, [$footer]));
+        return implode("\n\n", array_merge($top, $lines, [$footer]));
     }
 
     /**
@@ -480,14 +634,44 @@ final class BroadcastDigestComposer
      * Ничего не сочиняем: подборка и так рискует звучать списком из базы, а
      * выдуманная фраза к этому добавит вранья.
      */
-    private function hook(object $row): string
+    private function hook(object $row, ?TelegramChatBroadcastItem $item = null): string
     {
         $limit = (int) config('broadcast_digest.named_line_chars', 130);
 
-        $text = trim((string) ($row->tg_description ?? ''));
-        if ($text === '') {
-            $text = trim((string) ($row->description ?? ''));
+        // 1. Строка модели написана ПОД ЭТУ СТРОКУ — целиком, а не первой
+        // фразой из анонса. Резать её по первому предложению нельзя: панч у
+        // такой строки обычно во второй половине.
+        $written = $item?->digestHook((int) $row->id);
+        if ($written !== null) {
+            return $this->typography($this->trimToWord((string) preg_replace('/\s+/u', ' ', $written), (int) round($limit * 1.3)));
         }
+
+        // 2. Наш собственный анонс события — он уже в голосе канала. Если у
+        // самого события его нет, берём у близнеца по группе повторов: один и
+        // тот же концерт приезжает из разных источников разными строками, и
+        // анонс, написанный одной из них, годится для всех.
+        $text = trim((string) ($row->tg_description ?? ''));
+        if ($text === '' && $row->event_group_id !== null) {
+            $text = $this->twinAnnounce((int) $row->event_group_id, (int) $row->id);
+        }
+        // Канал говорит на «вы». Анонсы на «ты» остались от прежних прогонов
+        // («Хочешь фото — приходи за два часа»), и в подборке, где рядом стоят
+        // три строки, такой сбой голоса заметнее всего.
+        if ($text !== '' && $this->speaksTy($text)) {
+            $text = '';
+        }
+
+        // 3. Описание источника — но только если в нём есть что сказать.
+        // Допуск тот же, что у строки модели: предложение источника длиннее
+        // ровно потому, что писали его не под эту строку.
+        if ($text === '') {
+            $text = $this->liveSentence(
+                (string) ($row->description ?? ''),
+                (int) round($limit * 1.3),
+                (string) $row->title,
+            );
+        }
+
         if ($text === '') {
             return '';
         }
@@ -495,15 +679,223 @@ final class BroadcastDigestComposer
         $text = (string) preg_replace('/\s+/u', ' ', $text);
 
         // Первое законченное предложение, если оно не слишком длинное.
-        if (preg_match('/^(.{40,'.$limit.'}?[.!?])\s/u', $text, $m)) {
-            return trim($m[1]);
+        // Точка после одной заглавной буквы или сокращения концом не считается:
+        // иначе изюм обрывался на «по пьесе В.» и «Воронежский театр кукол им.»
+        // — так в подборку уходило 5% строк.
+        $sentences = $this->sentences($text);
+        if ($sentences !== [] && mb_strlen($sentences[0]) >= 40 && mb_strlen($sentences[0]) <= $limit) {
+            return $this->typography($sentences[0]);
         }
 
+        return $this->typography($this->trimToWord($text, $limit));
+    }
+
+    /**
+     * Кавычки — одни на весь пост.
+     *
+     * Источники присылают лапки, наши тексты — ёлочки, и в одном посте они
+     * стояли рядом. Мелочь ровно того сорта, по которой видно, что текст
+     * собран машиной из чужих кусков.
+     */
+    private function typography(string $s): string
+    {
+        $s = (string) preg_replace('/"([^"]{1,80})"/u', '«$1»', $s);
+
+        return (string) preg_replace('/\s+([,.!?;:])/u', '$1', $s);
+    }
+
+    /** Анонс близнеца: тот же концерт из другого источника, наш текст уже написан. */
+    private function twinAnnounce(int $groupId, int $exceptEventId): string
+    {
+        return trim((string) DB::table('events')
+            ->where('event_group_id', $groupId)
+            ->where('id', '<>', $exceptEventId)
+            ->whereNull('deleted_at')
+            ->whereNotNull('tg_description')
+            ->where('tg_description', '<>', '')
+            ->orderByDesc('updated_at')
+            ->value('tg_description'));
+    }
+
+    /**
+     * Первое предложение описания, в котором есть ЧТО-ТО КРОМЕ вежливости.
+     *
+     * Пресс-релиз начинается одинаково — «Приглашаем юных слушателей и их
+     * родителей на концерт с участием артистов…», — и такая строка в посте
+     * читается как перепечатка, потому что она ею и является. Пропускаем такие
+     * зачины и берём следующее предложение; не нашлось живого — строки не
+     * будет вовсе. Пустое место честнее чужой вежливости.
+     */
+    private function liveSentence(string $description, int $limit, string $title = ''): string
+    {
+        $text = trim((string) preg_replace('/\s+/u', ' ', $description));
+        if ($text === '') {
+            return '';
+        }
+
+        $dead = (array) config('broadcast_digest.dead_openings', []);
+        $sentences = $this->sentences($text);
+
+        $live = [];
+        foreach (array_slice($sentences, 0, 5) as $sentence) {
+            $sentence = trim((string) $sentence);
+            if (mb_strlen($sentence) < 40) {
+                continue;
+            }
+
+            $low = mb_strtolower($sentence);
+            $isDead = false;
+            foreach ($dead as $word) {
+                if (str_contains($low, (string) $word)) {
+                    $isDead = true;
+
+                    break;
+                }
+            }
+
+            // Цена в строке — дубль строки фактов, которая стоит прямо над ней.
+            if ($isDead || preg_match('/\d+\s*(₽|руб)/u', $sentence)) {
+                continue;
+            }
+
+            if (! $this->retellsTitle($sentence, $title)) {
+                $live[] = $sentence;
+            }
+        }
+
+        if ($live === []) {
+            return '';
+        }
+
+        // Первое живое — оно про само событие. Дальше по тексту предложения
+        // уходят в логистику («билеты возвращаются в кассе»), и взятое оттуда
+        // читается как ответ не на тот вопрос.
+        if (mb_strlen($live[0]) <= $limit) {
+            return $live[0];
+        }
+
+        // Не влезло целиком — обрезаем по границе оборота. Длинное предложение
+        // источника почти всегда составное («…как вынужденная замена: ранее на
+        // этот вечер был запланирован спектакль „Отцы и сыновья“, который не
+        // сможет состояться по техническим причинам»), и первая его половина —
+        // законченная мысль, а не обрубок.
+        $clause = $this->clauseCut($live[0], $limit);
+        if ($clause !== '') {
+            return $clause;
+        }
+
+        // Совсем не режется — ищем среди следующих то, что влезет целиком.
+        foreach (array_slice($live, 1) as $sentence) {
+            if (mb_strlen($sentence) <= $limit) {
+                return $sentence;
+            }
+        }
+
+        return $live[0];
+    }
+
+    /** Обращение на «ты» — чужой голос: канал городской афиши говорит на «вы». */
+    private function speaksTy(string $s): bool
+    {
+        return (bool) preg_match(
+            '/\b(ты|тебе|тебя|тобой|твой|твоя|твои|твоего|приходи|хочешь|успей|загляни|бери|лови)\b/ui',
+            $s,
+        );
+    }
+
+    /**
+     * Строка пересказывает заголовок, который стоит прямо над ней.
+     *
+     * «Приглашаем вас на спектакль „Золушка“, который пройдёт в ТЮЗе» под
+     * названием «Спектакль „Золушка“» — читатель читает одно и то же дважды.
+     * По замеру 2026-09-15 так устроена треть строк, взятых из описаний.
+     */
+    private function retellsTitle(string $sentence, string $title): bool
+    {
+        if (trim($title) === '') {
+            return false;
+        }
+
+        $stems = static function (string $s): array {
+            $words = preg_split('/[^\p{L}\p{N}]+/u', mb_strtolower($s), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+
+            return array_values(array_unique(array_map(
+                static fn ($w) => mb_substr((string) $w, 0, 5),
+                array_filter($words, static fn ($w) => mb_strlen((string) $w) >= 4),
+            )));
+        };
+
+        $own = $stems($sentence);
+        if ($own === []) {
+            return false;
+        }
+
+        $fresh = array_diff($own, $stems($title));
+
+        return count($fresh) * 2 < count($own);
+    }
+
+    /**
+     * Разбить текст на предложения, не спотыкаясь об инициалы и сокращения.
+     *
+     * «Опера С. Прокофьева», «театр кукол им. Вольховского», «по пьесе
+     * В. Розова» — точка там стоит, а предложение не кончилось. Наивное
+     * деление по точке давало в посте обрубки вида «Опера С.» — 5% строк.
+     *
+     * @return list<string>
+     */
+    private function sentences(string $text): array
+    {
+        $text = trim((string) preg_replace('/\s+/u', ' ', $text));
+        if ($text === '') {
+            return [];
+        }
+
+        // Метки вместо точек, которые концом предложения не являются.
+        $guard = (string) preg_replace('/(\b\p{Lu})\.(\s)/u', '$1<DOT>$2', $text);
+        $guard = (string) preg_replace('/\b(им|ул|пр|г|гг|стр|д|корп|т|тт|св|пос|обл|р|c|см|др|проч)\.(\s)/ui', '$1<DOT>$2', $guard);
+
+        $parts = preg_split('/(?<=[.!?])\s+/u', $guard) ?: [];
+
+        $out = [];
+        foreach ($parts as $part) {
+            $part = trim(str_replace('<DOT>', '.', (string) $part));
+            if ($part !== '') {
+                $out[] = $part;
+            }
+        }
+
+        return $out;
+    }
+
+    /** Половина составного предложения — по последней запятой или двоеточию в пределах лимита. */
+    private function clauseCut(string $sentence, int $limit): string
+    {
+        $cut = mb_substr($sentence, 0, $limit);
+
+        $at = 0;
+        foreach ([',', ';', ':', '—', '–'] as $mark) {
+            $pos = mb_strrpos($cut, $mark);
+            if ($pos !== false && $pos > $at) {
+                $at = $pos;
+            }
+        }
+
+        if ($at < 60) {
+            return '';
+        }
+
+        return rtrim(mb_substr($sentence, 0, $at), " ,;:—–-").'.';
+    }
+
+    /** Режем по слову, а не по символу: «спекта…» читается как сбой. */
+    private function trimToWord(string $text, int $limit): string
+    {
+        $text = trim($text);
         if (mb_strlen($text) <= $limit) {
             return $text;
         }
 
-        // Режем по слову, а не по символу: «спекта…» читается как сбой.
         $cut = mb_substr($text, 0, $limit);
         $at = mb_strrpos($cut, ' ');
 
@@ -522,11 +914,39 @@ final class BroadcastDigestComposer
         if ($min === null && $max === null) {
             return '';
         }
-        if ($min !== null && $max !== null && $min !== $max) {
-            return 'от '.$min.' ₽';
+
+        // Неразрывный пробел перед знаком: на узком экране строка фактов
+        // переносится, и «4900» уезжало на одну строку, а «₽» на другую.
+        $amount = (string) ($min ?? $max);
+
+        return $min !== null && $max !== null && $min !== $max
+            ? 'от '.$min."\u{00A0}₽"
+            : $amount."\u{00A0}₽";
+    }
+
+    /**
+     * Имя площадки без мусора источника.
+     *
+     * Афиши складывают в одно поле два названия одного места («Arena Hall /
+     * Aura Night Club») и приклеивают город через трубу («Новый театр |
+     * Воронеж»). В строке фактов, которую подборка ставит под каждым именем,
+     * это самое заметное место поста.
+     */
+    private function venueLabel(object $row): string
+    {
+        $name = trim((string) ($row->venue_name ?? ''));
+        if ($name === '') {
+            return '';
         }
 
-        return (string) ($min ?? $max).' ₽';
+        foreach ([' | ', ' / ', ' — филиал'] as $mark) {
+            $at = mb_strpos($name, $mark);
+            if ($at !== false && $at >= 3) {
+                $name = trim(mb_substr($name, 0, $at));
+            }
+        }
+
+        return $name;
     }
 
     private function landingUrl(TelegramChatBroadcast $broadcast, string $slug): string
@@ -566,17 +986,6 @@ final class BroadcastDigestComposer
         $norm = (string) preg_replace('/[^\p{L}\p{N}]+/u', ' ', $norm);
 
         return trim((string) preg_replace('/\s+/u', ' ', $norm));
-    }
-
-    /** «в Воронеже» — предложный падеж для города. */
-    private function cityInflected(string $city): string
-    {
-        return match (true) {
-            str_ends_with($city, 'ж'), str_ends_with($city, 'к'), str_ends_with($city, 'г') => $city.'е',
-            str_ends_with($city, 'а') => mb_substr($city, 0, -1).'е',
-            str_ends_with($city, 'ь') => mb_substr($city, 0, -1).'и',
-            default => $city.'е',
-        };
     }
 
     private function plural(int $n, string $one, ?string $few = null, ?string $many = null): string

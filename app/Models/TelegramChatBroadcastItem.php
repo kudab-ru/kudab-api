@@ -48,6 +48,7 @@ class TelegramChatBroadcastItem extends Model
         'text_hint',
         'edited_at',
         'edited_fields',
+        'digest_meta',
     ];
 
     protected $casts = [
@@ -60,6 +61,8 @@ class TelegramChatBroadcastItem extends Model
         'text_requested_at' => 'datetime',
         'edited_at' => 'datetime',
         'edited_fields' => 'array',
+        // Подборка: тема состава и текст модели (intro + hooks по event_id).
+        'digest_meta' => 'array',
         'is_pinned' => 'bool',
         // NULL = собрать автоматически; массив = ровно эти картинки.
         'photo_urls' => 'array',
@@ -147,6 +150,48 @@ class TelegramChatBroadcastItem extends Model
     public function hasReadyCaption(): bool
     {
         return in_array($this->kind, self::readyCaptionKinds(), true);
+    }
+
+    /**
+     * Тема, под которую собран состав подборки («koncerty»).
+     *
+     * Хранится, потому что вывести её из названных событий нельзя: у части
+     * событий первичных интересов несколько, и три названных дали бы три
+     * разные темы. А без темы не собрать ни заголовок, ни склонения, ни подвал.
+     */
+    public function digestTheme(): ?string
+    {
+        $v = trim((string) (($this->digest_meta['theme'] ?? '')));
+
+        return $v === '' ? null : $v;
+    }
+
+    /** Подводка про эту неделю, написанная моделью вместо шаблонной. */
+    public function digestIntro(): ?string
+    {
+        $v = trim((string) (($this->digest_meta['intro'] ?? '')));
+
+        return $v === '' ? null : $v;
+    }
+
+    /**
+     * Строка модели про названное событие.
+     *
+     * Ключ — id события, а не позиция: между заказом текста и отправкой состав
+     * может сдвинуться, и строка обязана уехать вместе со своим событием.
+     */
+    public function digestHook(int $eventId): ?string
+    {
+        $v = trim((string) (($this->digest_meta['hooks'][(string) $eventId] ?? '')));
+
+        return $v === '' ? null : $v;
+    }
+
+    /** Текст подборки уже написан — есть подводка или хотя бы одна строка. */
+    public function hasDigestText(): bool
+    {
+        return $this->digestIntro() !== null
+            || array_filter((array) ($this->digest_meta['hooks'] ?? [])) !== [];
     }
 
     /**

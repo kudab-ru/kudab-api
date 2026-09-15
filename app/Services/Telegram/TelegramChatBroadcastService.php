@@ -696,7 +696,7 @@ class TelegramChatBroadcastService
                 // брони событий следующей недели вчетверо меньше, чем будет.
                 if ($item->kind === TelegramChatBroadcastItem::KIND_DIGEST
                     && trim((string) $item->caption) === '') {
-                    if (! $this->composeDigest($item, $broadcast, $now)) {
+                    if (! $this->prepareDigest($item, $broadcast, $now)) {
                         continue;
                     }
                 }
@@ -1040,12 +1040,116 @@ class TelegramChatBroadcastService
      * положит задачу без текста в bad_task и не пометит её никак, а защита
      * «одна запись в полёте» задержит из-за неё весь канал.
      */
+    /**
+     * Довести подборку до отправляемого вида — в момент слота.
+     *
+     * ДВА ШАГА, И МЕЖДУ НИМИ ПРИДЕРЖКА. Так же, как у обычного поста: сначала
+     * известно, про ЧТО пишем, потом модель пишет, и только потом пост уходит.
+     *
+     *  1. Состава ещё нет — выбираем его (это и есть «про что») и, если канал
+     *     пишет тексты, придерживаем пост на несколько минут и ставим заявку.
+     *     Подпись при этом снимаем: пустая подпись — сигнал «собрать заново».
+     *  2. Состав уже выбран — собираем подпись ПО НЕМУ, с текстом модели, если
+     *     он успел появиться. Переизбирать состав на этом шаге нельзя: заново
+     *     выбранная тройка была бы другой (см. recompose), и оплаченный текст
+     *     достался бы не тем событиям.
+     *
+     * Парсер не успел или упал — второй шаг просто соберёт подпись из фактов и
+     * первых фраз описаний: деградация пассивная, ровно как у событий.
+     *
+     * @return bool false — на этом тике отправлять нечего: запись снята или ждёт текста
+     */
+    private function prepareDigest(
+        TelegramChatBroadcastItem $item,
+        TelegramChatBroadcast $broadcast,
+        Carbon $now,
+    ): bool {
+        if ($this->digestRosterSize($item) === 0 || $item->digestTheme() === null) {
+            if (! $this->composeDigest($item, $broadcast, $now)) {
+                return false;
+            }
+
+            if ($this->digestWantsText($item, $broadcast)) {
+                $this->requestDigestText($item, $now);
+
+                return false;
+            }
+
+            return true;
+        }
+
+        $draft = $this->digestComposer->recompose($item, $broadcast, $now);
+
+        if ($draft === null) {
+            // Состав рассыпался (события удалили или они уже начались) — это
+            // не повод молчать: собираем заново, как в первый раз.
+            return $this->composeDigest($item, $broadcast, $now);
+        }
+
+        $this->applyDigestDraft($item, $draft);
+
+        Log::info('broadcast.digest.recomposed', [
+            'item_id' => $item->id,
+            'theme' => $draft['theme_slug'],
+            'named' => count($draft['event_ids']),
+            'with_text' => $item->hasDigestText(),
+        ]);
+
+        return true;
+    }
+
+    /** Сколько событий уже названо в связи «пост → события». */
+    private function digestRosterSize(TelegramChatBroadcastItem $item): int
+    {
+        return DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)
+            ->count();
+    }
+
+    /**
+     * Стоит ли дать модели написать текст подборки.
+     *
+     * Тот же выключатель, что у событий (`settings.ai_text`): канал, который
+     * отказался от текстов ИИ, получает подборку из фактов и первых фраз
+     * описаний — и не платит за модель.
+     */
+    private function digestWantsText(TelegramChatBroadcastItem $item, TelegramChatBroadcast $broadcast): bool
+    {
+        return $broadcast->ai_text
+            && $item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL
+            && ! $item->hasDigestText();
+    }
+
+    /**
+     * Придержать подборку и попросить текст.
+     *
+     * Подпись снимаем намеренно: пустая подпись — единственный сигнал, по
+     * которому доставка вернётся к сборке. Шаблонная подпись, оставленная на
+     * это время, уехала бы в канал первой же попыткой отправки.
+     */
+    private function requestDigestText(TelegramChatBroadcastItem $item, Carbon $now): void
+    {
+        $grace = max(1, (int) config('services.bot.broadcast_text_grace_minutes', 6));
+
+        $item->caption = null;
+        $item->caption_source = null;
+        $item->text_requested_at = $now;
+        $item->planned_at = $now->copy()->addMinutes($grace);
+        $item->save();
+
+        Log::info('broadcast.digest.text_requested', [
+            'item_id' => $item->id,
+            'theme' => $item->digestTheme(),
+            'hold_minutes' => $grace,
+        ]);
+    }
+
     private function composeDigest(
         TelegramChatBroadcastItem $item,
         TelegramChatBroadcast $broadcast,
         Carbon $now,
     ): bool {
-        $draft = $this->digestComposer->compose($broadcast, $now);
+        $draft = $this->digestComposer->compose($broadcast, $now, $item);
 
         if ($draft === null) {
             // Не набралось темы — честно снимаем и освобождаем слот.
@@ -1082,8 +1186,31 @@ class TelegramChatBroadcastService
      */
     public function applyDigestDraft(TelegramChatBroadcastItem $item, array $draft): void
     {
+        $theme = (string) ($draft['theme_slug'] ?? ($draft['theme']['slug'] ?? ''));
+        $meta = (array) ($item->digest_meta ?? []);
+
+        // Подводка написана про КОНКРЕТНУЮ тройку и тему: «в субботу», «эта же
+        // сцена» — всё это про соседей по посту. Сменились тема или состав —
+        // подводка врёт, и её надо снять. Строки про события смену переживают:
+        // они привязаны к id и уезжают вместе со своим событием.
+        $roster = array_values(array_map('intval', (array) ($draft['event_ids'] ?? [])));
+        $writtenFor = array_values(array_map('intval', (array) ($meta['roster'] ?? [])));
+        sort($roster);
+        sort($writtenFor);
+
+        if (($theme !== '' && ($meta['theme'] ?? null) !== $theme) || $writtenFor !== $roster) {
+            unset($meta['intro']);
+        }
+        if ($theme !== '') {
+            $meta['theme'] = $theme;
+            // Человеческое имя темы — для того, кто пишет текст: реестр тем
+            // живёт здесь, и гонять парсер за ним в чужой конфиг незачем.
+            $meta['theme_title'] = (string) ($draft['theme']['title'] ?? $theme);
+        }
+
         $item->caption = $draft['caption'];
         $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
+        $item->digest_meta = $meta === [] ? null : $meta;
         $item->save();
 
         $this->syncDigestEvents($item, $draft['event_ids']);
