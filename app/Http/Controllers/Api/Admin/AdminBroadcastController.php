@@ -482,6 +482,14 @@ class AdminBroadcastController extends Controller
                 ], 409);
             }
 
+            // И ДРУГИМ постом — например подборкой, которая его назвала. Своей
+            // строки очереди у такого события нет, поэтому проверка выше его
+            // не видит.
+            $taken = $this->eventTakenByAnotherPost((int) $broadcast->id, (int) $event->id, $item?->id);
+            if ($taken) {
+                return response()->json(['ok' => false, 'error' => $this->takenMessage($taken)], 409);
+            }
+
             // Снятое и отклонённое оживляем — как при обычной постановке: на
             // (broadcast_id, event_id) стоит UNIQUE, второй записи не создать.
             $item ??= new TelegramChatBroadcastItem;
@@ -674,6 +682,12 @@ class AdminBroadcastController extends Controller
                     'ok' => false,
                     'error' => 'Это событие уже стоит в ленте канала.',
                 ], 409);
+            }
+
+            // И ДРУГИМ постом — см. eventTakenByAnotherPost.
+            $taken = $this->eventTakenByAnotherPost((int) $broadcast->id, (int) $event->id, $existing?->id);
+            if ($taken) {
+                return response()->json(['ok' => false, 'error' => $this->takenMessage($taken)], 409);
             }
 
             // Снятое или отклонённое оживляем: человек прямо сейчас сказал, что
@@ -1012,6 +1026,59 @@ class AdminBroadcastController extends Controller
         $item->save();
 
         return response()->json(['ok' => true]);
+    }
+
+    /**
+     * Не занято ли событие ДРУГИМ постом канала.
+     *
+     * Гард дверей постановки. Раньше его роль играло UNIQUE(broadcast_id,
+     * event_id) — то есть строка очереди под то же событие. Но пост-подборка
+     * называет несколько событий, своей строки под каждое не заводит, и UNIQUE
+     * про них ничего не знает: событие из понедельничной подборки можно было бы
+     * поставить отдельным постом на среду, и подписчик увидел бы его дважды.
+     *
+     * Спрашиваем связь и исключаем саму оживляемую запись: она не «другой пост».
+     */
+    private function eventTakenByAnotherPost(int $broadcastId, int $eventId, ?int $exceptItemId): ?TelegramChatBroadcastItem
+    {
+        return TelegramChatBroadcastItem::query()
+            ->from('telegram.chat_broadcast_items as i')
+            ->select('i.*')
+            ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
+            ->where('i.broadcast_id', $broadcastId)
+            ->where('l.event_id', $eventId)
+            ->when($exceptItemId !== null, fn ($q) => $q->where('i.id', '<>', $exceptItemId))
+            ->where(function ($q) {
+                $q->whereNotNull('i.posted_at')
+                    ->orWhereIn('i.status', $this->openStatuses());
+            })
+            // Полными именами: created_at есть и у записи, и у строки связи —
+            // короткое имя даёт «column reference is ambiguous». Ровно та
+            // ловушка, о которой предупреждает докблок Event::broadcastPosts().
+            ->orderByRaw('COALESCE(i.posted_at, i.publish_at, i.created_at) DESC')
+            ->first();
+    }
+
+    /** Отказ обязан называть, ЧТО именно заняло событие и когда. */
+    private function takenMessage(TelegramChatBroadcastItem $taken): string
+    {
+        $what = $taken->kind === TelegramChatBroadcastItem::KIND_EVENT
+            ? 'пост'
+            : 'подборка';
+        $at = $taken->posted_at ?? $taken->publish_at;
+        $when = $at
+            ? Carbon::parse($at)->setTimezone('Europe/Moscow')->translatedFormat('j F')
+            : null;
+
+        if ($taken->posted_at !== null) {
+            return $when
+                ? "Это событие уже называл {$what}, вышедший {$when}."
+                : "Это событие уже публиковалось в канале.";
+        }
+
+        return $when
+            ? "Это событие уже называет {$what} на {$when} — в канале оно выйдет дважды."
+            : "Это событие уже стоит в ленте канала.";
     }
 
     /**

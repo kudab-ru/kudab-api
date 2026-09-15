@@ -203,6 +203,19 @@ class TelegramChatBroadcastService
             throw new RuntimeException('Это событие относится к другому городу.');
         }
 
+        // Третья дверь постановки, и до сих пор у неё не было гарда вовсе:
+        // дубль не проходил только потому, что упирался в UNIQUE, то есть по
+        // случайности. Для события, названного подборкой, строки очереди нет —
+        // enqueue() создал бы новую запись, и пост вышел бы вторым.
+        // Исключением, а не кодом ответа: это путь из бота, и текст отказа
+        // человек увидит только как сообщение.
+        $taken = $this->eventTakenByAnotherPost((int) $broadcast->id, $eventId);
+        if ($taken) {
+            throw new RuntimeException($taken->posted_at !== null
+                ? 'Это событие уже публиковалось в канале.'
+                : 'Это событие уже стоит в ленте канала — в другом посте.');
+        }
+
         $item = $this->broadcastItemRepository->enqueue(
             $broadcast->id,
             $eventId,
@@ -914,6 +927,32 @@ class TelegramChatBroadcastService
         }
 
         return $summary;
+    }
+
+    /**
+     * Занято ли событие другим постом канала — тем же вопросом, что в дверях
+     * админки. Спрашиваем связь: пост-подборка называет несколько событий и
+     * своей строки под каждое не заводит.
+     */
+    private function eventTakenByAnotherPost(int $broadcastId, int $eventId): ?TelegramChatBroadcastItem
+    {
+        return TelegramChatBroadcastItem::query()
+            ->from('telegram.chat_broadcast_items as i')
+            ->select('i.*')
+            ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
+            ->where('i.broadcast_id', $broadcastId)
+            ->where('l.event_id', $eventId)
+            ->where(function ($q) {
+                $q->whereNotNull('i.posted_at')
+                    ->orWhereIn('i.status', [
+                        TelegramChatBroadcastItem::STATUS_PENDING,
+                        TelegramChatBroadcastItem::STATUS_PLANNED,
+                        TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                        TelegramChatBroadcastItem::STATUS_APPROVED,
+                        TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+                    ]);
+            })
+            ->first();
     }
 
     /** Сколько минут держим айтем, пока парсер пишет ТГ-текст. */

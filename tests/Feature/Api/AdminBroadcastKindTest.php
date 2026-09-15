@@ -80,6 +80,66 @@ class AdminBroadcastKindTest extends TestCase
         );
     }
 
+    /**
+     * Событие, названное постом-подборкой, нельзя поставить вторым постом.
+     *
+     * Ради этого и заводилась связь «пост → события». Своей строки очереди у
+     * такого события нет, поэтому ни UNIQUE, ни прежние проверки по колонке
+     * записи его не видят: до связи оно осталось бы кандидатом ленты и вышло
+     * бы в канал дважды.
+     */
+    public function test_event_named_by_a_digest_cannot_be_queued_again(): void
+    {
+        $broadcast = $this->makeChannel();
+        $event = $this->freeEvent();
+
+        // Так его положит композитор подборки: запись без ведущего события,
+        // состав — строками связи.
+        $digest = $this->makeItem($broadcast->id, self::FUTURE_KIND);
+        $digest->publish_at = now()->addDays(2)->setTime(19, 0);
+        $digest->save();
+        DB::table('telegram.chat_broadcast_item_events')->insert([
+            'item_id' => $digest->id,
+            'event_id' => $event->id,
+            'position' => 1,
+            'created_at' => now(),
+        ]);
+
+        $res = $this->postJson("/api/admin/broadcast/channels/{$broadcast->id}/enqueue", [
+            'event_id' => $event->id,
+        ]);
+
+        $res->assertStatus(409);
+        $this->assertStringContainsString(
+            'подборка',
+            (string) $res->json('error'),
+            'отказ обязан называть, что именно заняло событие',
+        );
+    }
+
+    /** И в предложениях его тоже нет: пул спрашивает ту же связь. */
+    public function test_event_named_by_a_digest_is_not_suggested(): void
+    {
+        $broadcast = $this->makeChannel();
+        $event = $this->freeEvent();
+        $digest = $this->makeItem($broadcast->id, self::FUTURE_KIND);
+        DB::table('telegram.chat_broadcast_item_events')->insert([
+            'item_id' => $digest->id,
+            'event_id' => $event->id,
+            'position' => 1,
+            'created_at' => now(),
+        ]);
+
+        $res = $this->getJson("/api/admin/broadcast/channels/{$broadcast->id}/suggestions");
+
+        $res->assertOk();
+        $this->assertNotContains(
+            $event->id,
+            collect($res->json('data'))->pluck('event_id')->all(),
+            'событие уже в подборке — предлагать его снова незачем',
+        );
+    }
+
     /** Событие, которое ещё не стоит в очереди — корм для пересборки. */
     private function freeEvent(): \App\Models\Event
     {
