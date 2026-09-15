@@ -9,6 +9,8 @@ use App\Contracts\Telegram\TelegramChatRepositoryInterface;
 use App\Contracts\Telegram\TelegramMessageTemplateRepositoryInterface;
 use App\Contracts\Telegram\TelegramUserRepositoryInterface;
 use App\Models\TelegramChatBroadcast;
+use App\Models\TelegramChatBroadcastItem;
+use App\Observers\TelegramChatBroadcastItemObserver;
 use App\Repositories\Telegram\TelegramChatBroadcastItemRepository;
 use App\Repositories\Telegram\TelegramChatBroadcastRepository;
 use App\Repositories\Telegram\TelegramChatRepository;
@@ -50,6 +52,11 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->guardDestructiveDatabaseCommands();
+
+        // Связь «пост → события» ведёт один писатель — иначе фикстуры тестов
+        // и будущие пути постановки останутся без строк, а читатели анти-дублей
+        // начнут молча проходить на пустоте.
+        TelegramChatBroadcastItem::observe(TelegramChatBroadcastItemObserver::class);
 
         RateLimiter::for('web', function (Request $request) {
             // Вне прода лимита нет вовсе — он только мешает разработке.

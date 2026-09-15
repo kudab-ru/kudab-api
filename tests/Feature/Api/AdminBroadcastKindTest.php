@@ -140,18 +140,22 @@ class AdminBroadcastKindTest extends TestCase
         ]);
     }
 
+    /**
+     * Через модель, а не через DB::table: на сохранении записи висит обсервер,
+     * который держит связь «пост → события». Вставка мимо модели обсервер не
+     * зовёт, и фикстура молча осталась бы без строки связи — а этот файл
+     * копируют как образец.
+     */
     private function makeItem(int $broadcastId, string $kind): TelegramChatBroadcastItem
     {
-        $id = DB::table('telegram.chat_broadcast_items')->insertGetId([
-            'broadcast_id' => $broadcastId,
-            'kind' => $kind,
-            'status' => TelegramChatBroadcastItem::STATUS_PENDING,
-            'caption' => 'текст',
-            'publish_at' => now()->addDay()->setTime(10, 0),
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $broadcastId;
+        $item->kind = $kind;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->caption = 'текст';
+        $item->publish_at = now()->addDay()->setTime(10, 0);
+        $item->save();
 
-        return TelegramChatBroadcastItem::query()->findOrFail($id);
+        return $item;
     }
 }

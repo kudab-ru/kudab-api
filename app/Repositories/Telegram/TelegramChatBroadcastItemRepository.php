@@ -7,6 +7,7 @@ use App\Models\TelegramChatBroadcastItem;
 use Carbon\Carbon;
 use DateTimeInterface;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRepositoryInterface
@@ -50,20 +51,26 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
             return $existing;
         }
 
-        $item = new TelegramChatBroadcastItem;
-        $item->broadcast_id = $broadcastId;
-        $item->event_id = $eventId;
+        // В транзакции: на сохранении висит обсервер, пишущий связь
+        // «пост → события». Без неё запись и её связь могли бы разъехаться,
+        // если между ними что-то упадёт, — а недостающую строку связи не видно
+        // ничем, кроме broadcast:links:backfill --check.
+        return DB::transaction(function () use ($broadcastId, $eventId, $plannedAt) {
+            $item = new TelegramChatBroadcastItem;
+            $item->broadcast_id = $broadcastId;
+            $item->event_id = $eventId;
 
-        if ($plannedAt) {
-            $item->status = TelegramChatBroadcastItem::STATUS_PLANNED;
-            $item->planned_at = $plannedAt;
-        } else {
-            $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
-        }
+            if ($plannedAt) {
+                $item->status = TelegramChatBroadcastItem::STATUS_PLANNED;
+                $item->planned_at = $plannedAt;
+            } else {
+                $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+            }
 
-        $item->save();
+            $item->save();
 
-        return $item->refresh();
+            return $item->refresh();
+        });
     }
 
     /**
