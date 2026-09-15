@@ -59,12 +59,11 @@ class AdminBroadcastController extends Controller
     /**
      * Сколько дней отклонённое событие не предлагается заново.
      *
-     * Держать равным TelegramChatBroadcastService::REJECTED_COOLDOWN_DAYS: там
-     * по нему прячут событие от автоподбора, здесь — показывают отказ ровно
-     * столько, сколько он действует. Разойдутся — в ленте окажутся отказы,
-     * которые уже не действуют, или наоборот исчезнут действующие.
+     * Источник один — сервис: там по этому сроку прячут событие от
+     * автоподбора, здесь по нему же показывают отказ. Разойдутся — в ленте
+     * окажутся отказы, которые уже не действуют, или исчезнут действующие.
      */
-    private const REJECTED_COOLDOWN_DAYS = 30;
+    private const REJECTED_COOLDOWN_DAYS = TelegramChatBroadcastService::REJECTED_COOLDOWN_DAYS;
 
     public function __construct(
         private readonly TelegramChatBroadcastService $broadcasts,
@@ -717,7 +716,7 @@ class AdminBroadcastController extends Controller
                 $occupant = $this->dayOccupant(
                     (int) $broadcast->id,
                     $publishAt,
-                    exceptEventId: (int) $event->id,
+                    exceptItemId: $existing?->id,
                     bySlot: $broadcast->slots !== [],
                 );
 
@@ -1029,6 +1028,45 @@ class AdminBroadcastController extends Controller
     }
 
     /**
+     * Ключи сетей площадок для каждой записи очереди.
+     *
+     * У обычного поста ключ один, у подборки — по одному на каждую названную
+     * площадку, и повторы внутри поста схлопнуты: подборка про пять спектаклей
+     * одного театра даёт этому театру одну отметку, а не пять.
+     *
+     * @param  list<int>  $itemIds
+     * @return array<int, list<string>>
+     */
+    private function chainsByItem(array $itemIds): array
+    {
+        if ($itemIds === []) {
+            return [];
+        }
+
+        $rows = DB::table('telegram.chat_broadcast_item_events as l')
+            ->join('events as e', 'e.id', '=', 'l.event_id')
+            ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
+            ->whereIn('l.item_id', $itemIds)
+            ->distinct()
+            ->get(['l.item_id', 'v.name as venue_name']);
+
+        $out = [];
+        foreach ($rows as $row) {
+            $key = $this->chainKey((string) ($row->venue_name ?? ''));
+            if ($key === '') {
+                continue;
+            }
+            $id = (int) $row->item_id;
+            $out[$id] ??= [];
+            if (! in_array($key, $out[$id], true)) {
+                $out[$id][] = $key;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * Не занято ли событие ДРУГИМ постом канала.
      *
      * Гард дверей постановки. Раньше его роль играло UNIQUE(broadcast_id,
@@ -1184,35 +1222,40 @@ class AdminBroadcastController extends Controller
         // над лентой — «одна сеть занимает несколько дней». Снятие записи из
         // очереди ожидания ни одного дня не освобождает, значит и заполнять
         // потом нечего: кнопка отработала бы вхолостую и откатилась.
+        // ВСЕ записи с днём, включая рубрики: сети, названные подборкой, тоже
+        // занимают неделю в глазах подписчика. А снимаем ниже только событийные
+        // — у рубрики свой каденс и свой слот, «Разбавить» ей не указ.
         $items = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
             ->whereIn('status', $this->openStatuses())
             ->whereNull('posted_at')
             ->whereNotNull('publish_at')
-            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
             ->orderBy('publish_at')
             ->get();
 
-        $events = Event::query()
-            ->with('venue:id,name')
-            ->whereIn('id', $items->pluck('event_id')->filter()->all())
-            ->get()
-            ->keyBy('id');
+        // Сети записи — через связь: у подборки событий несколько, значит и
+        // площадок несколько. Решение владельца: одна отметка на площадку с
+        // поста, сколько бы его событий на ней ни было (distinct по паре).
+        $chainsByItem = $this->chainsByItem($items->pluck('id')->all());
 
         $seen = [];
         $dropIds = [];
         foreach ($items as $item) {
-            $name = (string) ($events->get($item->event_id)?->venue?->name ?? '');
-            $key = $this->chainKey($name);
-            if ($key === '') {
+            $keys = $chainsByItem[$item->id] ?? [];
+            if ($keys === []) {
                 continue;
             }
-            if (! isset($seen[$key])) {
-                $seen[$key] = true;
 
+            $fresh = array_values(array_filter($keys, fn (string $k) => ! isset($seen[$k])));
+            foreach ($keys as $k) {
+                $seen[$k] = true;
+            }
+
+            // Хоть одна новая сеть — пост остаётся: он приносит разнообразие.
+            if ($fresh !== []) {
                 continue;
             }
-            if ($item->is_pinned) {
+            if ($item->is_pinned || $item->kind !== TelegramChatBroadcastItem::KIND_EVENT) {
                 continue;
             }
             $dropIds[] = $item->id;
@@ -2099,7 +2142,6 @@ class AdminBroadcastController extends Controller
     private function dayOccupant(
         int $broadcastId,
         Carbon $publishAt,
-        ?int $exceptEventId = null,
         ?int $exceptItemId = null,
         bool $bySlot = false,
     ): ?TelegramChatBroadcastItem {
@@ -2111,11 +2153,12 @@ class AdminBroadcastController extends Controller
 
         return TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcastId)
-            // event_id <> ? в SQL молча выбрасывает строки с NULL, а это
-            // портреты площадок: занятый ими день выглядел свободным.
-            ->when($exceptEventId !== null, fn ($q) => $q->where(function ($w) use ($exceptEventId) {
-                $w->whereNull('event_id')->orWhere('event_id', '<>', $exceptEventId);
-            }))
+            // Исключаем ЗАПИСЬ, а не событие. Раньше был и второй параметр —
+            // «кроме этого события», и он требовал NULL-safe сравнения, потому
+            // что `event_id <> ?` молча выбрасывает строки портретов. Для
+            // подборки такое исключение не работает вовсе: своего события у неё
+            // нет, и при переносе на собственный день она получала бы отказ
+            // «день занят» сама от себя. Запись знает про себя всегда.
             ->when($exceptItemId !== null, fn ($q) => $q->where('id', '<>', $exceptItemId))
             // Пост со статусом «ошибка» день занимает: в сетке он виден, и
             // класть поверх него второй — значит показать два поста на одном дне.

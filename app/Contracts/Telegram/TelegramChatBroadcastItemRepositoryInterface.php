@@ -22,14 +22,6 @@ interface TelegramChatBroadcastItemRepositoryInterface
         int $eventId,
     ): ?TelegramChatBroadcastItem;
 
-    /**
-     * Проверить, есть ли уже элемент очереди для (broadcast_id, event_id)
-     * в любом статусе (pending/planned/posted/…).
-     */
-    public function existsForBroadcastAndEvent(
-        int $broadcastId,
-        int $eventId,
-    ): bool;
 
     /**
      * Поставить событие в очередь для данного broadcast'а.
@@ -112,11 +104,6 @@ interface TelegramChatBroadcastItemRepositoryInterface
         string $errorMessage,
     ): TelegramChatBroadcastItem;
 
-    /**
-     * Вернуть id последнего успешно опубликованного события для данного broadcast'а,
-     * если такой есть (status = posted, по posted_at).
-     */
-    public function getLastPostedEventIdForBroadcast(int $broadcastId): ?int;
 
     /**
      * Список элементов очереди для одного broadcast'а

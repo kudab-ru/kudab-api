@@ -16,6 +16,7 @@ use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Support\BroadcastSafety;
 use Carbon\Carbon;
 use DateTimeInterface;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
@@ -49,7 +50,8 @@ class TelegramChatBroadcastService
      * достаточно, чтобы отказ не выглядел проигнорированным, и мало, чтобы
      * событие не пропало навсегда.
      */
-    private const REJECTED_COOLDOWN_DAYS = 30;
+    /** Публичная: тот же срок показывает отказы в админке (AdminBroadcastController). */
+    public const REJECTED_COOLDOWN_DAYS = 30;
 
     /** Окно cross-time анти-дубля: не повторять тот же заголовок в канале N дней. */
     private const CROSS_TIME_WINDOW_DAYS = 14;
@@ -955,6 +957,24 @@ class TelegramChatBroadcastService
             ->first();
     }
 
+    /**
+     * События, о которых рассказывает запись очереди.
+     *
+     * У обычного поста одно, у подборки — все названные. Нужен там, где мы
+     * помним «это уже разложено в этом прогоне»: иначе одна пересборка
+     * разложила бы события уже собранной подборки по отдельным дням.
+     *
+     * @return list<int>
+     */
+    private function linkedEventIds(int $itemId): array
+    {
+        return DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $itemId)
+            ->pluck('event_id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+    }
+
     /** Сколько минут держим айтем, пока парсер пишет ТГ-текст. */
     private function textGraceMinutes(): int
     {
@@ -1245,7 +1265,15 @@ class TelegramChatBroadcastService
     {
         $rows = TelegramChatBroadcastItem::query()
             ->from('telegram.chat_broadcast_items as i')
-            ->join('events as e', 'e.id', '=', 'i.event_id')
+            // Через связь — иначе площадки, названные подборкой, не считаются
+            // занятыми вовсе. И СРАЗУ distinct по паре «пост + площадка»:
+            // решение владельца 2026-09-15 — подборка даёт площадке ОДНУ
+            // отметку, сколько бы её событий ни назвала. Иначе подборка из
+            // пяти событий одного театра съедала бы недельную квоту этого
+            // театра целиком, а обычный пост про него на неделе — один.
+            ->distinct()
+            ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
+            ->join('events as e', 'e.id', '=', 'l.event_id')
             ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
             ->where('i.broadcast_id', $broadcastId)
             ->where(function ($q) {
@@ -1260,7 +1288,10 @@ class TelegramChatBroadcastService
                         ->where('i.posted_at', '>=', now()->subDays(7));
                 });
             })
-            ->get(['e.venue_id as venue_id', 'v.name as venue_name']);
+            // i.id в выборке обязателен: без него distinct схлопнул бы две
+            // РАЗНЫЕ записи с одной площадкой в одну строку, и квота перестала
+            // бы считаться вовсе.
+            ->get(['i.id as item_id', 'e.venue_id as venue_id', 'v.name as venue_name']);
 
         $ids = [];
         $chains = [];
@@ -1709,7 +1740,9 @@ class TelegramChatBroadcastService
                         }
                     } else {
                         $this->ensureEventCaption($fromWaiting, $broadcast);
-                        $exclude[] = (int) $fromWaiting->event_id;
+                        // Через связь: у рубрики событий несколько, и литеральный
+                        // ноль от пустой колонки в списке исключений бесполезен.
+                        $exclude = array_merge($exclude, $this->linkedEventIds((int) $fromWaiting->id));
                     }
 
                     $summary['filled']++;

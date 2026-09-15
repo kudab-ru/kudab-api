@@ -22,21 +22,14 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         return TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcastId)
             ->where('event_id', $eventId)
+            // Только событийные: это вопрос «какую строку оживить», а НЕ
+            // «показывал ли канал событие» — на второй отвечает связь
+            // «пост → события». Без фильтра enqueue() мог бы вернуть запись
+            // рубрики и оживить подборку как обычный пост.
+            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
             ->first();
     }
 
-    /**
-     * {@inheritdoc}
-     */
-    public function existsForBroadcastAndEvent(
-        int $broadcastId,
-        int $eventId,
-    ): bool {
-        return TelegramChatBroadcastItem::query()
-            ->where('broadcast_id', $broadcastId)
-            ->where('event_id', $eventId)
-            ->exists();
-    }
 
     /**
      * {@inheritdoc}
@@ -231,20 +224,6 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         return $item->refresh();
     }
 
-    /**
-     * {@inheritdoc}
-     */
-    public function getLastPostedEventIdForBroadcast(int $broadcastId): ?int
-    {
-        $item = TelegramChatBroadcastItem::query()
-            ->where('broadcast_id', $broadcastId)
-            ->where('status', TelegramChatBroadcastItem::STATUS_POSTED)
-            ->orderByDesc('posted_at')
-            ->orderByDesc('id')
-            ->first();
-
-        return $item?->event_id;
-    }
 
     /**
      * {@inheritdoc}
