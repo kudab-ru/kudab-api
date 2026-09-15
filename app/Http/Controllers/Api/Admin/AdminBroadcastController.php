@@ -68,6 +68,7 @@ class AdminBroadcastController extends Controller
     public function __construct(
         private readonly TelegramChatBroadcastService $broadcasts,
         private readonly EventCaptionBuilder $captions,
+        private readonly \App\Services\Telegram\BroadcastDigestComposer $digestComposer,
         // Репозитории — только для привязки канала: она пишет в telegram.chats
         // и заводит строку рассылки, а сервис таких методов не имеет.
         private readonly TelegramChatRepositoryInterface $chats,
@@ -174,8 +175,12 @@ class AdminBroadcastController extends Controller
             ], true)) {
                 return false;
             }
-            if ($i->kind === TelegramChatBroadcastItem::KIND_VENUE) {
-                return false; // портрет площадки не протухает
+            if ($i->hasReadyCaption()) {
+                // Портрет и подборка не протухают: у них нет своего события, по
+                // которому можно было бы судить. Снятая подборка обязана
+                // остаться видимой — иначе она исчезает из недельной сетки без
+                // причины и без следа, а причина у неё говорящая.
+                return false;
             }
             if (! $i->event_id) {
                 return true; // ни события, ни площадки — возвращать нечего
@@ -1041,6 +1046,46 @@ class AdminBroadcastController extends Controller
         $item->save();
 
         return response()->json(['ok' => true]);
+    }
+
+    /**
+     * Что попадёт в подборку, если бы она уходила сейчас.
+     *
+     * GET /api/admin/broadcast/channels/{id}/digest-preview?at=ISO
+     *
+     * Ничего не сохраняет. Подборка собирается перед самой отправкой, и до
+     * этого момента запись в ленте пуста: человек видит бронь, но не знает,
+     * что в ней окажется. Превью отвечает на этот вопрос, не фиксируя состав —
+     * фиксировать его заранее нельзя, в том и смысл поздней сборки.
+     */
+    public function digestPreview(Request $request, int $broadcastId): JsonResponse
+    {
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($broadcastId);
+
+        $at = $request->query('at')
+            ? Carbon::parse((string) $request->query('at'))
+            : Carbon::now();
+
+        $draft = $this->digestComposer->compose($broadcast, $at);
+
+        if ($draft === null) {
+            return response()->json(['data' => null, 'meta' => [
+                'reason' => 'Ни одна тема не набрала состава: нужно минимум '
+                    .(int) config('broadcast_digest.min_events', 5).' событий на '
+                    .(int) config('broadcast_digest.min_venues', 3).' площадках.',
+            ]]);
+        }
+
+        return response()->json(['data' => [
+            'theme' => $draft['theme']['title'] ?? null,
+            'caption' => $draft['caption'],
+            'total' => $draft['total'],
+            'venues' => $draft['venues'],
+            'event_ids' => $draft['event_ids'],
+            // Состав на момент показа, а не на момент отправки: за неделю он
+            // изменится, и обещать обратное было бы враньём.
+            'at' => $at->toIso8601String(),
+        ]]);
     }
 
     /** Сколько версий поста храним: история нужна для отмены, а не для архива. */
@@ -2537,7 +2582,11 @@ class AdminBroadcastController extends Controller
             'kind' => $i->kind ?? 'event',
             'status' => $i->status,
             'event_id' => $i->event_id ? (int) $i->event_id : null,
-            'title' => $event?->title ?? ($venue ? 'Портрет: '.$venue->name : null),
+            'title' => $event?->title ?? match ($i->kind) {
+                TelegramChatBroadcastItem::KIND_VENUE => $venue ? 'Портрет: '.$venue->name : null,
+                TelegramChatBroadcastItem::KIND_DIGEST => 'Подборка недели',
+                default => null,
+            },
             'venue' => $event?->venue?->name ?? $venue?->name,
             // Сеть площадок. Без неё лента не отличала «Матрёшку» от
             // «Матрёшки на Кольцовской»: предупреждение об однообразии считало

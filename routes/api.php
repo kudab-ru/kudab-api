@@ -87,6 +87,7 @@ Route::prefix('admin')
         Route::post('/broadcast/channels/link', [AdminBroadcastController::class, 'linkChannel']);
         Route::get('/broadcast/channels/{id}/feed', [AdminBroadcastController::class, 'feed']);
         Route::get('/broadcast/channels/{id}/suggestions', [AdminBroadcastController::class, 'suggestions']);
+        Route::get('/broadcast/channels/{id}/digest-preview', [AdminBroadcastController::class, 'digestPreview']);
         Route::patch('/broadcast/channels/{id}', [AdminBroadcastController::class, 'updateChannel']);
         Route::post('/broadcast/channels/{id}/enqueue', [AdminBroadcastController::class, 'enqueue']);
         Route::post('/broadcast/channels/{id}/enqueue-venue', [AdminBroadcastController::class, 'enqueueVenue']);

@@ -140,6 +140,29 @@ class AdminBroadcastKindTest extends TestCase
         );
     }
 
+    /**
+     * Снятая подборка остаётся видимой в ленте.
+     *
+     * Своего события у неё нет, и прежний отсев выбрасывал из ленты всё, у
+     * чего событие не найдено: рубрика исчезала из недельной сетки без причины
+     * и без следа — при том что причина у неё говорящая.
+     */
+    public function test_skipped_digest_stays_visible_in_the_feed(): void
+    {
+        $broadcast = $this->makeChannel();
+        $digest = $this->makeItem($broadcast->id, self::FUTURE_KIND);
+        $digest->status = TelegramChatBroadcastItem::STATUS_SKIPPED;
+        $digest->error_message = 'подборка: на этой неделе не набралось темы';
+        $digest->save();
+
+        $res = $this->getJson("/api/admin/broadcast/channels/{$broadcast->id}/feed");
+
+        $res->assertOk();
+        $row = collect($res->json('data.items'))->firstWhere('id', $digest->id);
+        $this->assertNotNull($row, 'снятая рубрика обязана оставить след');
+        $this->assertStringContainsString('не набралось темы', (string) $row['error_message']);
+    }
+
     /** Событие, которое ещё не стоит в очереди — корм для пересборки. */
     private function freeEvent(): \App\Models\Event
     {
