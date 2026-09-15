@@ -1475,7 +1475,9 @@ class AdminBroadcastController extends Controller
             ['name' => '{start_time|human}', 'about' => '«сегодня, 19:00», «12 сен» — от дня публикации'],
             ['name' => '{price_label}', 'about' => '«Бесплатно», «от 500 ₽», «800 ₽–1500 ₽»'],
             ['name' => '{description|slice:0..400|escape_html}', 'about' => 'описание, обрезка по числу символов'],
-            ['name' => '{url}', 'about' => 'ссылка на событие на сайте'],
+            ['name' => '{url}', 'about' => 'адрес события на сайте (только адрес, без тега)'],
+            ['name' => '{more_link}', 'about' => 'готовая ссылка «Подробнее на kudab.ru →»'],
+            ['name' => '{original_link}', 'about' => 'готовая ссылка «Открыть оригинал →»; у события без источника строка исчезает'],
             ['name' => '{tags|prepend:"🏷 "}', 'about' => 'сейчас всегда пусто — строка не печатается'],
         ];
     }
