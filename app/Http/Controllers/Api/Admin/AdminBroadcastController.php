@@ -2734,7 +2734,7 @@ class AdminBroadcastController extends Controller
                 // сильнее автоподбора.
                 TelegramChatBroadcastItem::KIND_DIGEST => is_array($i->photo_urls)
                     ? array_values(array_filter($i->photo_urls, 'is_string'))
-                    : $this->digestPhotos($i),
+                    : $this->broadcasts->digestPhotoUrls((int) $i->id, self::PHOTO_CANDIDATES),
                 default => $this->effectivePhotos($i, $event),
             },
             // Всё, из чего можно собрать альбом. У портрета это картинки
@@ -2743,7 +2743,7 @@ class AdminBroadcastController extends Controller
             'photo_candidates' => match (true) {
                 $i->kind === TelegramChatBroadcastItem::KIND_VENUE && $i->venue_id !== null
                     => $this->venuePortraits->venuePhotoUrls((int) $i->venue_id, self::PHOTO_CANDIDATES),
-                $i->kind === TelegramChatBroadcastItem::KIND_DIGEST => $this->digestPhotos($i),
+                $i->kind === TelegramChatBroadcastItem::KIND_DIGEST => $this->broadcasts->digestPhotoUrls((int) $i->id, self::PHOTO_CANDIDATES),
                 $i->event_id !== null => $this->candidatePhotos($i, $event),
                 default => [],
             },
@@ -2755,43 +2755,6 @@ class AdminBroadcastController extends Controller
             // Состав выбран руками — пересборка ленты его не тронет.
             'photos_manual' => is_array($i->photo_urls),
         ];
-    }
-
-    /**
-     * Обложки событий, названных подборкой, — по одной на событие и в порядке
-     * появления в тексте.
-     *
-     * @return list<string>
-     */
-    private function digestPhotos(TelegramChatBroadcastItem $i): array
-    {
-        $ids = DB::table('telegram.chat_broadcast_item_events')
-            ->where('item_id', $i->id)
-            ->orderBy('position')
-            ->pluck('event_id')
-            ->map(fn ($v) => (int) $v)
-            ->all();
-
-        if ($ids === []) {
-            return [];
-        }
-
-        $events = Event::query()->whereIn('id', $ids)->get();
-        $this->events->hydrateImagesFor($events->keyBy('id'));
-
-        $out = [];
-        foreach ($ids as $id) {
-            $event = $events->firstWhere('id', $id);
-            if (! $event) {
-                continue;
-            }
-            $cover = $this->broadcasts->eventPhotos((int) $event->id, 1);
-            if ($cover !== []) {
-                $out[] = $cover[0];
-            }
-        }
-
-        return array_values(array_unique($out));
     }
 
     /**

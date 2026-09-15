@@ -678,15 +678,20 @@ class TelegramChatBroadcastService
                 if ($manualPhotos) {
                     $photoUrls = array_values(array_filter($item->photo_urls, 'is_string'));
                 } else {
-                    // У подборки своей площадки нет: автоподбирать ей нечего,
-                    // картинки кладёт композитор (или их нет вовсе — текстовый
-                    // пост это нормальный вид подборки).
-                    $photoUrls = $item->venue_id
-                        ? $this->venuePortraitService->venuePhotoUrls(
-                            (int) $item->venue_id,
-                            TelegramVenuePortraitService::ALBUM_LIMIT,
-                        )
-                        : [];
+                    // У подборки своей площадки нет — её картинки это обложки
+                    // названных событий. Без этой ветки первая живая подборка
+                    // ушла в канал голым текстом: в админке обложки были
+                    // видны, а сюда не доезжали.
+                    $photoUrls = match (true) {
+                        $item->kind === TelegramChatBroadcastItem::KIND_DIGEST
+                            => $this->digestPhotoUrls((int) $item->id, TelegramVenuePortraitService::ALBUM_LIMIT),
+                        $item->venue_id !== null
+                            => $this->venuePortraitService->venuePhotoUrls(
+                                (int) $item->venue_id,
+                                TelegramVenuePortraitService::ALBUM_LIMIT,
+                            ),
+                        default => [],
+                    };
                     if ($photoUrls === [] && $item->photo_url) {
                         $photoUrls = [(string) $item->photo_url];
                     }
@@ -1076,6 +1081,39 @@ class TelegramChatBroadcastService
         if ($rows !== []) {
             DB::table('telegram.chat_broadcast_item_events')->insertOrIgnore($rows);
         }
+    }
+
+    /**
+     * Обложки событий, названных подборкой: по одной на событие, в порядке
+     * появления в тексте.
+     *
+     * ЗДЕСЬ, а не только в админке. Первая живая подборка ушла без картинок
+     * ровно поэтому: выдача ленты собирала обложки для показа человеку, а путь
+     * доставки о них не знал и слал пустой список. Один источник на оба пути.
+     *
+     * @return list<string>
+     */
+    public function digestPhotoUrls(int $itemId, int $limit = 4): array
+    {
+        $ids = DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $itemId)
+            ->orderBy('position')
+            ->pluck('event_id')
+            ->map(fn ($v) => (int) $v)
+            ->all();
+
+        $out = [];
+        foreach ($ids as $eventId) {
+            $cover = $this->eventPhotos($eventId, 1);
+            if ($cover !== [] && ! in_array($cover[0], $out, true)) {
+                $out[] = $cover[0];
+            }
+            if (count($out) >= $limit) {
+                break;
+            }
+        }
+
+        return $out;
     }
 
     /**

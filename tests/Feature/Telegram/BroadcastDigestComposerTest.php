@@ -154,7 +154,39 @@ class BroadcastDigestComposerTest extends TestCase
             'позиция 0 занята ведущим событием обычного поста — у подборки её нет');
     }
 
-    private function themedEvent(string $title, int $n): int
+    /**
+     * Подборка уходит в канал С КАРТИНКАМИ.
+     *
+     * Первая живая подборка ушла голым текстом: обложки названных событий
+     * собирались только для показа в админке, а путь доставки о них не знал и
+     * слал пустой список. Тест сторожит именно этот разрыв.
+     */
+    public function test_digest_goes_out_with_covers_of_named_events(): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n, withImage: true);
+        }
+
+        $digest = new TelegramChatBroadcastItem;
+        $digest->broadcast_id = $broadcast->id;
+        $digest->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $digest->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $digest->publish_at = Carbon::now()->subMinute();
+        $digest->save();
+
+        $tasks = app(\App\Services\Telegram\TelegramChatBroadcastService::class)
+            ->collectDueSingleRuns(Carbon::now());
+
+        $task = collect($tasks)->firstWhere('item_id', $digest->id);
+
+        $this->assertNotNull($task, 'подборка должна уйти в выдачу боту');
+        $this->assertSame('digest', $task['kind']);
+        $this->assertNotEmpty($task['photo_urls'], 'обложки названных событий обязаны доехать до бота');
+        $this->assertNotNull($task['photo_url'], 'и обложка тоже');
+    }
+
+    private function themedEvent(string $title, int $n, bool $withImage = false): int
     {
         $community = \App\Models\Community::create([
             'name' => 'Организатор '.uniqid(),
@@ -183,6 +215,20 @@ class BroadcastDigestComposerTest extends TestCase
         $event->price_min = 500 * $n;
         $event->save();
 
+        if ($withImage) {
+            // Картинки события лежат в event_sources.images — оттуда их берёт
+            // и админка, и выдача задачи боту.
+            DB::table('event_sources')->insert([
+                'event_id' => $event->id,
+                'social_link_id' => $this->socialLink($community->id),
+                'source' => 'vk',
+                'post_external_id' => 'post-'.uniqid(),
+                'images' => json_encode(['https://example.test/cover-'.$n.'.jpg']),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
         DB::table('event_interest')->insert([
             'event_id' => $event->id,
             'interest_id' => $this->interestId,
@@ -192,6 +238,23 @@ class BroadcastDigestComposerTest extends TestCase
         ]);
 
         return (int) $event->id;
+    }
+
+    /** Источник постов сообщества — обязательная ссылка у event_sources. */
+    private function socialLink(int $communityId): int
+    {
+        $networkId = DB::table('social_networks')->value('id')
+            ?? DB::table('social_networks')->insertGetId([
+                'name' => 'VK', 'slug' => 'vk', 'created_at' => now(), 'updated_at' => now(),
+            ]);
+
+        return (int) DB::table('community_social_links')->insertGetId([
+            'community_id' => $communityId,
+            'social_network_id' => $networkId,
+            'url' => 'https://vk.com/'.uniqid(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     private function makeChannel(): TelegramChatBroadcast
