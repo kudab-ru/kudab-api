@@ -181,6 +181,66 @@ class BroadcastDigestComposerTest extends TestCase
         $this->assertStringNotContainsString('Три —', $out['caption']);
     }
 
+    /**
+     * У каждого названного события есть строка «чем цепляет».
+     *
+     * Без неё подборка — список фактов из базы: название, дата, место, цена.
+     * Берём готовый ТГ-анонс, если он есть, иначе первое предложение описания;
+     * ничего не сочиняем.
+     */
+    public function test_named_events_get_a_hook_line(): void
+    {
+        $broadcast = $this->makeChannel();
+        $ids = [];
+        foreach (range(1, 6) as $n) {
+            $ids[] = $this->themedEvent("Спектакль {$n}", $n);
+        }
+        DB::table('events')->whereIn('id', $ids)->update([
+            'tg_description' => 'Трогательная история о семье и о том, как важно оставаться собой.',
+        ]);
+
+        $out = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $this->assertStringContainsString('как важно оставаться собой', $out['caption']);
+    }
+
+    /**
+     * Изюм снимается целиком, если пост перестаёт влезать в подпись альбома.
+     *
+     * Telegram режет подпись к картинкам на 1024 символах, и обрезанная на
+     * полуслове строка хуже её отсутствия.
+     */
+    public function test_hooks_are_dropped_when_the_caption_grows_too_long(): void
+    {
+        $broadcast = $this->makeChannel();
+        $ids = [];
+        foreach (range(1, 6) as $n) {
+            // Длинные названия и площадки: сам по себе изюм в 130 символов
+            // подпись не переполняет, переполняет всё вместе. С короткими
+            // фикстурами тест проходил бы и на сломанной проверке.
+            $ids[] = $this->themedEvent(
+                "Большой драматический спектакль в двух действиях с антрактом номер {$n}",
+                $n,
+            );
+        }
+        DB::table('events')->whereIn('id', $ids)->update([
+            'tg_description' => str_repeat('очень длинный анонс события без единой точки ', 12),
+        ]);
+        DB::table('venues')->whereIn('id', function ($q) use ($ids) {
+            $q->select('venue_id')->from('events')->whereIn('id', $ids);
+        })->update(['name' => 'Воронежский государственный академический театр драмы имени Кольцова']);
+
+        $out = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $this->assertLessThanOrEqual(
+            1024,
+            mb_strlen(strip_tags($out['caption'])),
+            'подпись обязана влезать в лимит альбома',
+        );
+    }
+
     /** Названные события идут по датам — подборка про «что впереди». */
     public function test_named_events_are_ordered_by_date(): void
     {

@@ -117,7 +117,7 @@ final class BroadcastDigestComposer
             ->orderBy('e.start_time')
             ->get([
                 'e.id', 'e.title', 'e.start_time', 'e.event_group_id', 'e.venue_id',
-                'e.description', 'e.price_min', 'e.price_max', 'e.price_status',
+                'e.description', 'e.tg_description', 'e.price_min', 'e.price_max', 'e.price_status',
                 'v.name as venue_name',
             ]);
 
@@ -431,6 +431,7 @@ final class BroadcastDigestComposer
         );
 
         $lines = [];
+        $rich = [];
         foreach ($picked['named'] as $row) {
             $at = Carbon::parse($row->start_time)->setTimezone(self::TZ);
             $meta = array_values(array_filter([
@@ -439,8 +440,16 @@ final class BroadcastDigestComposer
                 $this->priceLabel($row),
             ]));
 
-            $lines[] = $this->link($this->eventUrl((int) $row->id), (string) $row->title)
-                ."\n".$this->escape(implode(' · ', $meta));
+            // НЕ $head: этим именем выше назван заголовок поста, и повторное
+            // использование затирало его названием последнего события.
+            $titleLink = $this->link($this->eventUrl((int) $row->id), (string) $row->title);
+            $facts = $this->escape(implode(' · ', $meta));
+            $hook = $this->hook($row);
+
+            $lines[] = $titleLink."\n".$facts;
+            $rich[] = $hook === ''
+                ? $titleLink."\n".$facts
+                : $titleLink."\n".$this->escape($hook)."\n".$facts;
         }
 
         // Город в подвале не склоняем и не повторяем: он уже назван строкой
@@ -451,7 +460,54 @@ final class BroadcastDigestComposer
             'Вся афиша '.($forms[2] ?? mb_strtolower((string) $theme['title'])),
         );
 
+        // С изюмом, если он влезает. Подпись к альбому Telegram режет на 1024
+        // символах, и обрезанная на полуслове строка хуже её отсутствия —
+        // поэтому снимаем изюм целиком, а не подрезаем.
+        $withHooks = implode("\n\n", array_merge([$head, $period], $rich, [$footer]));
+        $soft = (int) config('broadcast_digest.caption_soft_limit', 950);
+
+        if (mb_strlen(strip_tags($withHooks)) <= $soft) {
+            return $withHooks;
+        }
+
         return implode("\n\n", array_merge([$head, $period], $lines, [$footer]));
+    }
+
+    /**
+     * Строка-изюм про событие: чем оно цепляет.
+     *
+     * Берём готовый ТГ-анонс, если он есть, иначе первое предложение описания.
+     * Ничего не сочиняем: подборка и так рискует звучать списком из базы, а
+     * выдуманная фраза к этому добавит вранья.
+     */
+    private function hook(object $row): string
+    {
+        $limit = (int) config('broadcast_digest.named_line_chars', 130);
+
+        $text = trim((string) ($row->tg_description ?? ''));
+        if ($text === '') {
+            $text = trim((string) ($row->description ?? ''));
+        }
+        if ($text === '') {
+            return '';
+        }
+
+        $text = (string) preg_replace('/\s+/u', ' ', $text);
+
+        // Первое законченное предложение, если оно не слишком длинное.
+        if (preg_match('/^(.{40,'.$limit.'}?[.!?])\s/u', $text, $m)) {
+            return trim($m[1]);
+        }
+
+        if (mb_strlen($text) <= $limit) {
+            return $text;
+        }
+
+        // Режем по слову, а не по символу: «спекта…» читается как сбой.
+        $cut = mb_substr($text, 0, $limit);
+        $at = mb_strrpos($cut, ' ');
+
+        return rtrim($at === false ? $cut : mb_substr($cut, 0, $at), " ,;:—-").'…';
     }
 
     private function priceLabel(object $row): string
