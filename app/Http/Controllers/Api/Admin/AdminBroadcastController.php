@@ -69,6 +69,7 @@ class AdminBroadcastController extends Controller
         private readonly TelegramChatBroadcastService $broadcasts,
         private readonly EventCaptionBuilder $captions,
         private readonly \App\Services\Telegram\BroadcastDigestComposer $digestComposer,
+        private readonly \App\Services\Telegram\BroadcastDigestBooking $digestBooking,
         // Репозитории — только для привязки канала: она пишет в telegram.chats
         // и заводит строку рассылки, а сервис таких методов не имеет.
         private readonly TelegramChatRepositoryInterface $chats,
@@ -2174,6 +2175,7 @@ class AdminBroadcastController extends Controller
         if ($request->has('text_lead_minutes')) {
             $broadcast->text_lead_minutes = (int) $data['text_lead_minutes'];
         }
+        $digestWas = $broadcast->digest_weekday;
         if ($request->has('digest_weekday')) {
             $broadcast->digest_weekday = $data['digest_weekday'] === null
                 ? null
@@ -2204,7 +2206,46 @@ class AdminBroadcastController extends Controller
 
         $broadcast->save();
 
+        // Рубрика включается ЗДЕСЬ И СЕЙЧАС, а не через час.
+        //
+        // Бронь слота ставит почасовая команда, и после сохранения настроек в
+        // ленте до часа не появлялось ничего: человек включил подборку и не
+        // видит её — первое, что он подумает, это что настройка не сохранилась.
+        // Выключение симметрично убирает неотправленную бронь: оставить её
+        // значило бы выпустить рубрику, от которой только что отказались.
+        if ($digestWas !== $broadcast->digest_weekday) {
+            $this->syncDigestBooking($broadcast, $digestWas);
+        }
+
         return response()->json(['data' => $this->channelPayload($broadcast->fresh('chat'))]);
+    }
+
+    /**
+     * Привести бронь подборки в соответствие с настройкой канала.
+     *
+     * День сменили — старую бронь снимаем и ставим новую: двигать её на месте
+     * нельзя, у нового дня может быть занят слот, и тогда бронь уедет на
+     * неделю вперёд — это решает сам сервис брони.
+     */
+    private function syncDigestBooking(TelegramChatBroadcast $broadcast, ?int $was): void
+    {
+        if ($was !== null) {
+            TelegramChatBroadcastItem::query()
+                ->where('broadcast_id', $broadcast->id)
+                ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+                ->whereNull('posted_at')
+                ->whereIn('status', $this->openStatuses())
+                ->update([
+                    'status' => TelegramChatBroadcastItem::STATUS_SKIPPED,
+                    'error_message' => 'подборка: настройку рубрики изменили',
+                    'publish_at' => null,
+                    'updated_at' => now(),
+                ]);
+        }
+
+        if ($broadcast->digest_weekday !== null) {
+            $this->digestBooking->bookDue(Carbon::now());
+        }
     }
 
     // ------------------------------------------------------------------

@@ -109,6 +109,49 @@ class BroadcastDigestBookingTest extends TestCase
         Carbon::setTestNow();
     }
 
+    /**
+     * Включение рубрики в настройках ставит бронь СРАЗУ.
+     *
+     * Бронь ставит почасовая команда, и без этого после сохранения настроек в
+     * ленте до часа не появлялось ничего: человек включил подборку, не увидел
+     * её и решил, что настройка не сохранилась. Ровно так и вышло на первой же
+     * живой проверке.
+     */
+    public function test_enabling_the_rubric_books_a_slot_immediately(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 12:00', 'Europe/Moscow'));
+
+        \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
+        $user = \App\Models\User::factory()->create();
+        $user->assignRole('superadmin');
+        \Laravel\Sanctum\Sanctum::actingAs($user);
+
+        $broadcast = $this->makeChannel();
+
+        $this->patchJson("/api/admin/broadcast/channels/{$broadcast->id}", ['digest_weekday' => 1])
+            ->assertOk();
+
+        $this->assertSame(1, TelegramChatBroadcastItem::query()
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->whereNull('posted_at')
+            ->count(), 'бронь появилась сразу, а не через час');
+
+        // И выключение убирает неотправленную бронь: оставить её значило бы
+        // выпустить рубрику, от которой только что отказались.
+        $this->patchJson("/api/admin/broadcast/channels/{$broadcast->id}", ['digest_weekday' => null])
+            ->assertOk();
+
+        $this->assertSame(0, TelegramChatBroadcastItem::query()
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+            ])
+            ->count());
+
+        Carbon::setTestNow();
+    }
+
     private function booking(): BroadcastDigestBooking
     {
         return app(BroadcastDigestBooking::class);
