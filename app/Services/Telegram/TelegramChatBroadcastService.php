@@ -107,6 +107,7 @@ class TelegramChatBroadcastService
         private readonly EventCaptionBuilder $captionBuilder,
         private readonly \App\Repositories\EventRepository $eventRepository,
         private readonly BroadcastSlotPlanner $slotPlanner,
+        private readonly BroadcastDigestComposer $digestComposer,
     ) {}
 
     // ---------------------------------------------------------------------
@@ -656,6 +657,16 @@ class TelegramChatBroadcastService
                 'telegram_chat_id' => (int) $chat->telegram_chat_id,
             ];
             if ($hasReadyCaption) {
+                // Подборка собирается ЗДЕСЬ, перед самой отправкой. Собранная
+                // при постановке, она показала бы пятую часть недели: на момент
+                // брони событий следующей недели вчетверо меньше, чем будет.
+                if ($item->kind === TelegramChatBroadcastItem::KIND_DIGEST
+                    && trim((string) $item->caption) === '') {
+                    if (! $this->composeDigest($item, $broadcast, $now)) {
+                        continue;
+                    }
+                }
+
                 // Готовый текст + НЕСКОЛЬКО обложек-прокси (альбом).
                 // Портрет площадки: картинки берутся у площадки.
                 // Ручной выбор сильнее автоподбора — как у событий. Без этой
@@ -980,6 +991,76 @@ class TelegramChatBroadcastService
                     ]);
             })
             ->first();
+    }
+
+    /**
+     * Наполнить бронь подборки: тема, состав, текст.
+     *
+     * Возвращает false, если наполнять нечем — тогда запись снята, и цикл
+     * доставки должен идти дальше. Пустую подборку отправлять нельзя: бот
+     * положит задачу без текста в bad_task и не пометит её никак, а защита
+     * «одна запись в полёте» задержит из-за неё весь канал.
+     */
+    private function composeDigest(
+        TelegramChatBroadcastItem $item,
+        TelegramChatBroadcast $broadcast,
+        Carbon $now,
+    ): bool {
+        $draft = $this->digestComposer->compose($broadcast, $now);
+
+        if ($draft === null) {
+            // Не набралось темы — честно снимаем и освобождаем слот.
+            // Следующую бронь поставит broadcast:enqueue-digests.
+            $this->broadcastItemRepository->markSkipped(
+                $item,
+                'подборка: на этой неделе не набралось темы с достаточным составом',
+            );
+
+            return false;
+        }
+
+        $item->caption = $draft['caption'];
+        $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
+        $item->save();
+
+        $this->syncDigestEvents($item, $draft['event_ids']);
+
+        Log::info('broadcast.digest.composed', [
+            'item_id' => $item->id,
+            'theme' => $draft['theme']['slug'] ?? null,
+            'named' => count($draft['event_ids']),
+            'total' => $draft['total'],
+        ]);
+
+        return true;
+    }
+
+    /**
+     * Записать состав подборки в связь «пост → события».
+     *
+     * Позиции с ЕДИНИЦЫ: ноль занят ведущим событием обычного поста, и на него
+     * стоит частичный уникальный индекс. Именно эти строки закрывают названные
+     * события для собственных постов — ради них связь и заводилась.
+     *
+     * @param  list<int>  $eventIds
+     */
+    private function syncDigestEvents(TelegramChatBroadcastItem $item, array $eventIds): void
+    {
+        DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->delete();
+
+        $rows = [];
+        foreach (array_values(array_unique($eventIds)) as $i => $eventId) {
+            $rows[] = [
+                'item_id' => $item->id,
+                'event_id' => $eventId,
+                'position' => $i + 1,
+                'created_at' => now(),
+            ];
+        }
+
+        if ($rows !== []) {
+            DB::table('telegram.chat_broadcast_item_events')->insertOrIgnore($rows);
+        }
     }
 
     /**
