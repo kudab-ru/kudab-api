@@ -2085,6 +2085,8 @@ class AdminBroadcastController extends Controller
             'min_gap_minutes' => ['sometimes', 'integer', 'min:0', 'max:1440'],
             'ai_text' => ['sometimes', 'boolean'],
             'text_lead_minutes' => ['sometimes', 'integer', 'min:1', 'max:1440'],
+            // null — рубрика выключена; 1..7 — день недели, когда она выходит
+            'digest_weekday' => ['sometimes', 'nullable', 'integer', 'min:1', 'max:7'],
         ]);
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
@@ -2126,6 +2128,11 @@ class AdminBroadcastController extends Controller
         }
         if ($request->has('text_lead_minutes')) {
             $broadcast->text_lead_minutes = (int) $data['text_lead_minutes'];
+        }
+        if ($request->has('digest_weekday')) {
+            $broadcast->digest_weekday = $data['digest_weekday'] === null
+                ? null
+                : (int) $data['digest_weekday'];
         }
         if ($request->has('min_gap_minutes')) {
             $broadcast->min_gap_minutes = (int) $data['min_gap_minutes'];
@@ -2366,6 +2373,10 @@ class AdminBroadcastController extends Controller
             // за сколько минут до слота появится анонс — чтобы лента показывала
             // человеку время, а не абстрактное «перед публикацией»
             'text_lead_minutes' => $b->text_lead_minutes,
+            // Подборка недели: день выхода или null, если рубрика выключена.
+            // Час не отдаём — он всегда вечерний слот канала.
+            'digest_weekday' => $b->digest_weekday,
+            'digest_hour' => $b->digest_hour,
             // Когда канал снова сможет постить. Без этого пост, ждущий
             // зазора, выглядел как «ничего не происходит»: в ленте он стоит
             // со временем в прошлом и молчит.

@@ -26,3 +26,13 @@ Schedule::command('broadcast:approve-timeouts')
 Schedule::command('broadcast:enqueue-venue-portraits')
     ->hourly()
     ->withoutOverlapping();
+
+// Бронь слота под подборку недели. Рядом с портретами и по той же причине:
+// слот держит только существующая запись, иначе вечер понедельника разберут
+// под обычные посты. Запись встаёт ПУСТОЙ — состав и текст ей соберут перед
+// самой отправкой. Раз в час: чаще незачем, реже — риск проспать слот, если
+// прошлая подборка ушла только что.
+Schedule::command('broadcast:enqueue-digests')
+    ->hourly()
+    ->onOneServer()
+    ->withoutOverlapping(10);

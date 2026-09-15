@@ -210,6 +210,55 @@ class TelegramChatBroadcast extends Model
     }
 
     /**
+     * День недели для подборки: 1 — понедельник, 7 — воскресенье. NULL — рубрика
+     * выключена.
+     *
+     * Умолчание — ВЫКЛЮЧЕНО, и это принципиально: новая рубрика не должна
+     * появиться в боевом канале сама, от одной выкатки. Включает человек в
+     * настройках канала, там же выбирая день.
+     *
+     * Час берётся из последнего слота канала — по принятой раскладке недели
+     * рубрики живут в вечернем слоте, а утренний всегда событие.
+     */
+    public function getDigestWeekdayAttribute(): ?int
+    {
+        $raw = ($this->settings ?? [])['digest_weekday'] ?? null;
+
+        if (! is_numeric($raw)) {
+            return null;
+        }
+
+        $day = (int) $raw;
+
+        return $day >= 1 && $day <= 7 ? $day : null;
+    }
+
+    public function setDigestWeekdayAttribute(?int $weekday): void
+    {
+        $settings = $this->settings ?? [];
+        $settings['digest_weekday'] = $weekday !== null && $weekday >= 1 && $weekday <= 7
+            ? $weekday
+            : null;
+        $this->settings = $settings;
+    }
+
+    /** Час подборки: вечерний слот канала. Без слотов — час расписания. */
+    public function getDigestHourAttribute(): int
+    {
+        $slots = $this->slots;
+
+        if ($slots !== []) {
+            return (int) max($slots);
+        }
+
+        if (preg_match('/_(\d{1,2})$/', (string) $this->period, $m)) {
+            return max(0, min(23, (int) $m[1]));
+        }
+
+        return 19;
+    }
+
+    /**
      * За сколько минут до слота парсер пишет анонс посту ленты.
      *
      * Настройка канала, а не общая: у канала с двумя слотами в день час
