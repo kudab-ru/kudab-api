@@ -1102,7 +1102,11 @@ class TelegramChatBroadcastService
                     ->orWhereNotExists(function ($sub) use ($broadcastId, $usedStatuses) {
                         $sub->selectRaw('1')
                             ->from('telegram.chat_broadcast_items as i')
-                            ->join('events as e2', 'e2.id', '=', 'i.event_id')
+                            // Через связь: пост-подборка называет несколько
+                            // событий, и по колонке записи ни одна их группа
+                            // не считалась бы занятой.
+                            ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
+                            ->join('events as e2', 'e2.id', '=', 'l.event_id')
                             ->where('i.broadcast_id', $broadcastId)
                             ->whereIn('i.status', $usedStatuses)
                             ->whereColumn('e2.event_group_id', 'events.event_group_id');
@@ -1293,7 +1297,10 @@ class TelegramChatBroadcastService
     {
         $titles = TelegramChatBroadcastItem::query()
             ->from('telegram.chat_broadcast_items as i')
-            ->join('events as e', 'e.id', '=', 'i.event_id')
+            // Через связь — см. слой 2. На выходе уникальные нормализованные
+            // заголовки, поэтому рост числа строк здесь безвреден.
+            ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
+            ->join('events as e', 'e.id', '=', 'l.event_id')
             ->where('i.broadcast_id', $broadcastId)
             ->where(function ($q) use ($since) {
                 $q->where(function ($w) use ($since) {

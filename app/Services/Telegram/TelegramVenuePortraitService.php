@@ -278,9 +278,16 @@ class TelegramVenuePortraitService
         // площадки мог выйти в тот же день, что и анонс её события.
         $recentEventVenues = TelegramChatBroadcastItem::query()
             ->from('telegram.chat_broadcast_items as i')
-            ->join('events as e', 'e.id', '=', 'i.event_id')
+            // Через связь — и БЕЗ фильтра по типу записи. Фильтр был не
+            // страховкой, а причиной будущей ошибки: строка связи сама и есть
+            // утверждение «этот пост нёс это событие», а какого он вида —
+            // к вопросу «площадка уже звучала в канале» отношения не имеет.
+            // По принятой раскладке недели портрет площадки выходит в четверг,
+            // а подборка — в понедельник: с фильтром портрет не знал бы, что
+            // его площадку назвали три дня назад.
+            ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
+            ->join('events as e', 'e.id', '=', 'l.event_id')
             ->where('i.broadcast_id', $broadcastId)
-            ->where('i.kind', TelegramChatBroadcastItem::KIND_EVENT)
             ->where(function ($q) use ($now) {
                 $q->where(function ($w) use ($now) {
                     $w->where('i.status', TelegramChatBroadcastItem::STATUS_POSTED)
