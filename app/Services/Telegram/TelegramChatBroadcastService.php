@@ -1019,11 +1019,7 @@ class TelegramChatBroadcastService
             return false;
         }
 
-        $item->caption = $draft['caption'];
-        $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
-        $item->save();
-
-        $this->syncDigestEvents($item, $draft['event_ids']);
+        $this->applyDigestDraft($item, $draft);
 
         Log::info('broadcast.digest.composed', [
             'item_id' => $item->id,
@@ -1033,6 +1029,25 @@ class TelegramChatBroadcastService
         ]);
 
         return true;
+    }
+
+    /**
+     * Записать в запись то, что собрал композитор: текст и состав.
+     *
+     * Публичный, потому что собрать подборку можно двумя путями: сама перед
+     * отправкой и руками из админки, когда человек хочет увидеть и поправить
+     * текст заранее. Второй путь — осознанный выбор: собранный заранее состав
+     * к выходу устареет, зато его можно править.
+     *
+     * @param  array{caption: string, event_ids: list<int>}  $draft
+     */
+    public function applyDigestDraft(TelegramChatBroadcastItem $item, array $draft): void
+    {
+        $item->caption = $draft['caption'];
+        $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
+        $item->save();
+
+        $this->syncDigestEvents($item, $draft['event_ids']);
     }
 
     /**

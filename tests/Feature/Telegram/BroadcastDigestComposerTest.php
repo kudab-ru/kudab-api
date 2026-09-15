@@ -118,6 +118,42 @@ class BroadcastDigestComposerTest extends TestCase
         $this->assertSame(5, $out['total']);
     }
 
+    /**
+     * «Собрать и править»: текст и состав записываются в саму запись, и
+     * названные события сразу закрываются для обычных постов.
+     */
+    public function test_compose_now_fills_the_item_and_links_events(): void
+    {
+        \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
+        $user = \App\Models\User::factory()->create();
+        $user->assignRole('superadmin');
+        \Laravel\Sanctum\Sanctum::actingAs($user);
+
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $digest = new TelegramChatBroadcastItem;
+        $digest->broadcast_id = $broadcast->id;
+        $digest->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $digest->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $digest->publish_at = Carbon::now()->addDay();
+        $digest->save();
+
+        $res = $this->postJson("/api/admin/broadcast/items/{$digest->id}/compose");
+
+        $res->assertOk();
+        $this->assertStringContainsString('Спектакли недели', (string) $res->json('data.caption'));
+        $this->assertCount(3, $res->json('data.linked_events'), 'состав виден в форме');
+
+        $this->assertSame(3, DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $digest->id)->count(), 'события закрыты для лент');
+        $this->assertSame(0, DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $digest->id)->where('position', 0)->count(),
+            'позиция 0 занята ведущим событием обычного поста — у подборки её нет');
+    }
+
     private function themedEvent(string $title, int $n): int
     {
         $community = \App\Models\Community::create([

@@ -98,6 +98,7 @@ Route::prefix('admin')
         Route::post('/broadcast/items/{id}/publish-now', [AdminBroadcastController::class, 'publishNow']);
         Route::post('/broadcast/items/{id}/retry', [AdminBroadcastController::class, 'retry']);
         Route::post('/broadcast/items/{id}/describe', [AdminBroadcastController::class, 'describe']);
+        Route::post('/broadcast/items/{id}/compose', [AdminBroadcastController::class, 'composeDigest']);
         Route::post('/broadcast/items/{id}/restore', [AdminBroadcastController::class, 'restore']);
         Route::post('/broadcast/items/{id}/unreject', [AdminBroadcastController::class, 'unreject']);
         Route::get('/broadcast/items/{id}/revisions', [AdminBroadcastController::class, 'revisions']);

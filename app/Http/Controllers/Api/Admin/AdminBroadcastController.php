@@ -1089,6 +1089,40 @@ class AdminBroadcastController extends Controller
         ]]);
     }
 
+    /**
+     * Собрать подборку сейчас: записать текст и состав в саму запись.
+     *
+     * POST /api/admin/broadcast/items/{id}/compose
+     *
+     * Обычно подборка собирается перед отправкой — так в неё попадает вся
+     * неделя. Эта ручка нужна, когда человек хочет увидеть и ПОПРАВИТЬ текст
+     * заранее: после неё запись перестаёт быть пустой, и перед отправкой
+     * пересобираться не будет. Состав тоже фиксируется — названные события
+     * закрываются для собственных постов сразу.
+     */
+    public function composeDigest(int $itemId): JsonResponse
+    {
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+
+        if ($item->kind !== TelegramChatBroadcastItem::KIND_DIGEST) {
+            return response()->json(['ok' => false, 'error' => 'Собрать можно только подборку.'], 422);
+        }
+        if ($item->posted_at !== null) {
+            return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
+        }
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($item->broadcast_id);
+        $draft = $this->digestComposer->compose($broadcast, $item->publish_at ?? Carbon::now());
+
+        if ($draft === null) {
+            return response()->json(['ok' => false, 'error' => 'Ни одна тема не набрала состава — собирать нечего.'], 422);
+        }
+
+        $this->broadcasts->applyDigestDraft($item, $draft);
+
+        return response()->json(['data' => $this->itemPayload($item->fresh(), null, null)]);
+    }
+
     /** Сколько версий поста храним: история нужна для отмены, а не для архива. */
     private const REVISIONS_KEPT = 20;
 
@@ -2693,21 +2727,95 @@ class AdminBroadcastController extends Controller
             // Ровно те картинки и в том порядке, что уйдут в канал: у события
             // — через тот же eventPhotos, которым собирается задача боту;
             // у портрета площадки картинка лежит на самой записи.
-            'photos' => $i->kind === TelegramChatBroadcastItem::KIND_VENUE
-                ? $this->venuePhotos($i)
-                : $this->effectivePhotos($i, $event),
+            'photos' => match ($i->kind) {
+                TelegramChatBroadcastItem::KIND_VENUE => $this->venuePhotos($i),
+                // У подборки своего события нет: картинки — это обложки тех
+                // событий, которые она назвала. Ручной выбор, как везде,
+                // сильнее автоподбора.
+                TelegramChatBroadcastItem::KIND_DIGEST => is_array($i->photo_urls)
+                    ? array_values(array_filter($i->photo_urls, 'is_string'))
+                    : $this->digestPhotos($i),
+                default => $this->effectivePhotos($i, $event),
+            },
             // Всё, из чего можно собрать альбом. У портрета это картинки
             // площадки: раньше здесь был пустой список, и любой выбор состава
             // упирался в 422 — белый список был пуст по определению.
             'photo_candidates' => match (true) {
                 $i->kind === TelegramChatBroadcastItem::KIND_VENUE && $i->venue_id !== null
                     => $this->venuePortraits->venuePhotoUrls((int) $i->venue_id, self::PHOTO_CANDIDATES),
+                $i->kind === TelegramChatBroadcastItem::KIND_DIGEST => $this->digestPhotos($i),
                 $i->event_id !== null => $this->candidatePhotos($i, $event),
                 default => [],
             },
+            // Состав подборки: что именно она называет. Без этого в карточке
+            // виден текст, но не видно, какие события он закрыл для ленты.
+            'linked_events' => $i->kind === TelegramChatBroadcastItem::KIND_DIGEST
+                ? $this->linkedEvents($i)
+                : [],
             // Состав выбран руками — пересборка ленты его не тронет.
             'photos_manual' => is_array($i->photo_urls),
         ];
+    }
+
+    /**
+     * Обложки событий, названных подборкой, — по одной на событие и в порядке
+     * появления в тексте.
+     *
+     * @return list<string>
+     */
+    private function digestPhotos(TelegramChatBroadcastItem $i): array
+    {
+        $ids = DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $i->id)
+            ->orderBy('position')
+            ->pluck('event_id')
+            ->map(fn ($v) => (int) $v)
+            ->all();
+
+        if ($ids === []) {
+            return [];
+        }
+
+        $events = Event::query()->whereIn('id', $ids)->get();
+        $this->events->hydrateImagesFor($events->keyBy('id'));
+
+        $out = [];
+        foreach ($ids as $id) {
+            $event = $events->firstWhere('id', $id);
+            if (! $event) {
+                continue;
+            }
+            $cover = $this->broadcasts->eventPhotos((int) $event->id, 1);
+            if ($cover !== []) {
+                $out[] = $cover[0];
+            }
+        }
+
+        return array_values(array_unique($out));
+    }
+
+    /**
+     * События, названные записью: id, заголовок, день — чтобы человек видел
+     * состав, а не только текст.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function linkedEvents(TelegramChatBroadcastItem $i): array
+    {
+        $rows = DB::table('telegram.chat_broadcast_item_events as l')
+            ->join('events as e', 'e.id', '=', 'l.event_id')
+            ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
+            ->where('l.item_id', $i->id)
+            ->orderBy('l.position')
+            ->get(['e.id', 'e.title', 'e.start_time', 'v.name as venue_name']);
+
+        return $rows->map(fn ($r) => [
+            'id' => (int) $r->id,
+            'title' => (string) $r->title,
+            'venue' => $r->venue_name,
+            'start_time' => $r->start_time ? Carbon::parse($r->start_time)->toIso8601String() : null,
+            'url' => $this->siteUrl().'/events/'.$r->id,
+        ])->values()->all();
     }
 
     /**
