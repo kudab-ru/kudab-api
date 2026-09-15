@@ -432,7 +432,12 @@ class AdminBroadcastController extends Controller
                         ? 'ни разу не показывали'
                         : 'не показывали '.$portrait['weeks_since'].' нед.',
                 ],
-                'event_url' => null,
+                // Ссылка на страницу площадки: без неё портрет был единственной
+                // карточкой пула, которую нельзя посмотреть перед тем, как
+                // ставить, — а решение принимают именно глядя.
+                'event_url' => isset($portrait['venue_id'])
+                    ? $this->siteUrl().'/venues/'.$portrait['venue_id']
+                    : null,
                 'original_url' => null,
                 'cover' => $portrait['cover'],
                 'end_time' => null,

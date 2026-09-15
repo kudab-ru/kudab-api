@@ -282,7 +282,41 @@ class TelegramChatBroadcastService
      */
     public function markItemSentForChat(int $itemId, string $claimToken, ?DateTimeInterface $moment = null): bool
     {
-        return $this->broadcastItemRepository->markPostedIfClaimed($itemId, $claimToken, $moment);
+        $ok = $this->broadcastItemRepository->markPostedIfClaimed($itemId, $claimToken, $moment);
+
+        if ($ok) {
+            $this->bookNextDigestAfter($itemId);
+        }
+
+        return $ok;
+    }
+
+    /**
+     * Ушла подборка — ставим бронь на следующую сразу.
+     *
+     * Бронь ставит почасовая команда, и без этого рубрика пропадала из плана
+     * недели до её ближайшего прогона: пост ушёл, слот освободился, а в ленте
+     * нет ни подборки, ни следа того, что она будет. Человек видит пустоту и
+     * решает, что рубрика сломалась.
+     *
+     * Молча и без исключений: доставка уже состоялась, и падать из-за брони на
+     * следующую неделю нельзя — её всё равно поставит почасовая команда.
+     */
+    private function bookNextDigestAfter(int $itemId): void
+    {
+        try {
+            $item = $this->broadcastItemRepository->findById($itemId);
+            if (! $item || $item->kind !== TelegramChatBroadcastItem::KIND_DIGEST) {
+                return;
+            }
+
+            app(BroadcastDigestBooking::class)->bookDue(Carbon::now());
+        } catch (\Throwable $e) {
+            Log::warning('broadcast.digest.rebook_failed', [
+                'item_id' => $itemId,
+                'err' => mb_substr($e->getMessage(), 0, 200),
+            ]);
+        }
     }
 
     /**
