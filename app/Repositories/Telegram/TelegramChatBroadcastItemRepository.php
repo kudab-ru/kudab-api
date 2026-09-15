@@ -287,10 +287,12 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         if ($kind === TelegramChatBroadcastItem::KIND_VENUE) {
             $q->where('kind', TelegramChatBroadcastItem::KIND_VENUE);
         } elseif ($kind === 'event') {
-            // У событийных записей kind исторически бывает NULL.
-            $q->where(function ($w) {
-                $w->whereNull('kind')->orWhere('kind', '<>', TelegramChatBroadcastItem::KIND_VENUE);
-            });
+            // Явный тип, а не «всё, что не портрет площадки». Отрицание молча
+            // зачисляет в события ЛЮБУЮ новую рубрику: подборка недели съела бы
+            // ячейку feed_limit, и автонаполнение перестало бы докладывать
+            // события на день раньше срока. Про исторический NULL — колонка
+            // NOT NULL DEFAULT 'event', такой записи в базе быть не может.
+            $q->where('kind', TelegramChatBroadcastItem::KIND_EVENT);
         }
 
         return (int) $q->count();

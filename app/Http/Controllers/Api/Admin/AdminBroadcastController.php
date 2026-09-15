@@ -979,9 +979,12 @@ class AdminBroadcastController extends Controller
             ->whereNull('posted_at')
             ->whereNull('publish_at')
             ->whereNull('edited_at')
-            ->where(function ($q) {
-                $q->whereNull('kind')->orWhere('kind', '<>', TelegramChatBroadcastItem::KIND_VENUE);
-            })
+            // Явный тип, а не «всё, что не портрет площадки». Отрицание
+            // молча зачисляет в события ЛЮБУЮ новую рубрику: подборка недели
+            // съела бы ячейку событийной ленты, попала под «Разбавить» и была
+            // бы снесена кнопкой «Пересобрать». Проверка на NULL тут и вовсе
+            // мертва — колонка NOT NULL DEFAULT 'event'.
+            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
             ->count();
 
         $dropped = TelegramChatBroadcastItem::query()
@@ -998,9 +1001,7 @@ class AdminBroadcastController extends Controller
             // каденс и свой слот в неделе, они не конкурируют с событиями за
             // место. Снести портрет заодно с лентой значило бы сбросить его
             // ротацию ни за что.
-            ->where(function ($q) {
-                $q->whereNull('kind')->orWhere('kind', '<>', TelegramChatBroadcastItem::KIND_VENUE);
-            })
+            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
             ->update([
                 'status' => TelegramChatBroadcastItem::STATUS_SKIPPED,
                 'error_message' => 'снято при пересборке ленты',
@@ -1057,9 +1058,7 @@ class AdminBroadcastController extends Controller
             ->whereIn('status', $this->openStatuses())
             ->whereNull('posted_at')
             ->whereNotNull('publish_at')
-            ->where(function ($q) {
-                $q->whereNull('kind')->orWhere('kind', '<>', TelegramChatBroadcastItem::KIND_VENUE);
-            })
+            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
             ->orderBy('publish_at')
             ->get();
 
@@ -2017,9 +2016,7 @@ class AdminBroadcastController extends Controller
         $openEventsQuery = fn () => TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $b->id)
             ->whereIn('status', $this->openStatuses())
-            ->where(function ($q) {
-                $q->whereNull('kind')->orWhere('kind', '<>', TelegramChatBroadcastItem::KIND_VENUE);
-            });
+            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT);
 
         $openEvents = $openEventsQuery()->whereNotNull('publish_at')->count();
         $waitingEvents = $openEventsQuery()->whereNull('publish_at')->count();
