@@ -162,11 +162,15 @@ final class EventCaptionBuilder
         ];
     }
 
-    /** Ссылка с неразрывными пробелами и стрелкой — как в готовых постах канала. */
+    /**
+     * Ссылка с неразрывными пробелами: подпись не должна разрываться переносом.
+     *
+     * Без стрелки: Telegram и так подчёркивает ссылку, а «→» в конце добавляла
+     * шума и тянула строку.
+     */
     private function link(string $href, string $label): string
     {
-        $nb = "\u{00A0}";
-        $text = str_replace(' ', $nb, $label).$nb."\u{2192}";
+        $text = str_replace(' ', "\u{00A0}", $label);
 
         return '<a href="'.htmlspecialchars($href, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'">'.$text.'</a>';
     }
@@ -472,7 +476,7 @@ final class EventCaptionBuilder
     }
 
     /**
-     * Строка «Подробнее на kudab.ru → · Открыть оригинал →».
+     * Строка «Подробнее на kudab.ru   ·   Открыть оригинал».
      *
      * Пробелы внутри подписей НЕРАЗРЫВНЫЕ (U+00A0), между ссылками — ровно
      * десять обычных. Так в боте, и это видно в реальных постах канала.
@@ -493,10 +497,10 @@ final class EventCaptionBuilder
         $parts = [];
         if ($ctx['url'] !== '') {
             $parts[] = '<a href="'.htmlspecialchars($ctx['url'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'">'
-                ."Подробнее{$nb}на{$nb}kudab.ru{$nb}\u{2192}</a>";
+                ."Подробнее{$nb}на{$nb}kudab.ru</a>";
         }
         $parts[] = '<a href="'.htmlspecialchars($ctx['canonical_url'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'">'
-            ."Открыть{$nb}оригинал{$nb}\u{2192}</a>";
+            ."Открыть{$nb}оригинал</a>";
 
         $line = trim(implode(str_repeat(' ', 10), $parts));
         if ($line === '') {

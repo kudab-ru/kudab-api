@@ -377,9 +377,9 @@ class TelegramVenuePortraitService
             $lines[] = '🎟 <b>Ближайшее:</b> <a href="'.self::SITE.'/events/'.$next->id.'">'.$this->esc((string) $next->title).'</a>';
             $lines[] = '🗓 '.$this->ruDate($next->start_time);
             $lines[] = '';
-            $lines[] = '📅 <a href="'.self::SITE.'/venues/'.$venue->id.'">Все события площадки →</a>';
+            $lines[] = '📅 <a href="'.self::SITE.'/venues/'.$venue->id.'">Все события площадки</a>';
         } else {
-            $lines[] = '📅 <a href="'.self::SITE.'/venues/'.$venue->id.'">Афиша площадки →</a>';
+            $lines[] = '📅 <a href="'.self::SITE.'/venues/'.$venue->id.'">Афиша площадки</a>';
         }
 
         return implode("\n", $lines);
