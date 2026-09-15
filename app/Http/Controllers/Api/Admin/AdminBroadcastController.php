@@ -56,6 +56,16 @@ class AdminBroadcastController extends Controller
      */
     public const CAPTION_LIMIT = 1024;
 
+    /**
+     * Сколько дней отклонённое событие не предлагается заново.
+     *
+     * Держать равным TelegramChatBroadcastService::REJECTED_COOLDOWN_DAYS: там
+     * по нему прячут событие от автоподбора, здесь — показывают отказ ровно
+     * столько, сколько он действует. Разойдутся — в ленте окажутся отказы,
+     * которые уже не действуют, или наоборот исчезнут действующие.
+     */
+    private const REJECTED_COOLDOWN_DAYS = 30;
+
     public function __construct(
         private readonly TelegramChatBroadcastService $broadcasts,
         private readonly EventCaptionBuilder $captions,
@@ -129,6 +139,15 @@ class AdminBroadcastController extends Controller
                         $w->where('status', TelegramChatBroadcastItem::STATUS_SKIPPED)
                             ->where('updated_at', '>=', now()->subDays(7));
                     })
+                    // Отклонённые — за всё время остывания. Отказ прячет
+                    // событие от подбора на 30 дней, и до сих пор отменить его
+                    // было нечем: запись не показывалась нигде, а событие
+                    // просто пропадало из предложений. Случайное нажатие
+                    // стоило месяца.
+                    ->orWhere(function ($w) {
+                        $w->where('status', TelegramChatBroadcastItem::STATUS_REJECTED)
+                            ->where('updated_at', '>=', now()->subDays(self::REJECTED_COOLDOWN_DAYS));
+                    })
                     ->orWhere(function ($w) {
                         $w->where('status', TelegramChatBroadcastItem::STATUS_POSTED)
                             ->where('posted_at', '>=', now()->subDays(7));
@@ -150,7 +169,10 @@ class AdminBroadcastController extends Controller
         // честно отклонял («Вернул 0, не вышло 12»).
         $now = Carbon::now();
         $items = $items->reject(function (TelegramChatBroadcastItem $i) use ($events, $now) {
-            if ($i->status !== TelegramChatBroadcastItem::STATUS_SKIPPED) {
+            if (! in_array($i->status, [
+                TelegramChatBroadcastItem::STATUS_SKIPPED,
+                TelegramChatBroadcastItem::STATUS_REJECTED,
+            ], true)) {
                 return false;
             }
             if ($i->kind === TelegramChatBroadcastItem::KIND_VENUE) {
@@ -948,6 +970,37 @@ class AdminBroadcastController extends Controller
         $item->save();
 
         return response()->json(['ok' => true, 'data' => ['rejected' => $reject]]);
+    }
+
+    /**
+     * Отменить отказ — вернуть событие в пул предложений.
+     *
+     * «Больше не предлагать» прячет событие от подбора на 30 дней
+     * (REJECTED_COOLDOWN_DAYS), и до сих пор это было необратимо из интерфейса:
+     * запись со статусом rejected не показывалась нигде, а событие просто
+     * пропадало из предложений. Случайное нажатие стоило месяца.
+     *
+     * Возвращаем в skipped, а не удаляем строку: skipped означает «снято из
+     * ленты» и подбору не мешает, а история отказа остаётся. Плюс на
+     * (broadcast_id, event_id) стоит UNIQUE — второй строки всё равно не
+     * создать, и удалять существующую значило бы терять след.
+     */
+    public function unreject(int $itemId): JsonResponse
+    {
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+
+        if ($item->status !== TelegramChatBroadcastItem::STATUS_REJECTED) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Это событие не отклоняли — возвращать нечего.',
+            ], 409);
+        }
+
+        $item->status = TelegramChatBroadcastItem::STATUS_SKIPPED;
+        $item->error_message = 'отказ отменён — событие снова в пуле';
+        $item->save();
+
+        return response()->json(['ok' => true]);
     }
 
     /**
@@ -2262,12 +2315,15 @@ class AdminBroadcastController extends Controller
             // Причина — и для ошибки, и для автоматического снятия: markSkipped
             // пишет её в то же поле, а человеку нужно понимать, почему поста
             // больше нет в ленте.
-            'skip_reason' => $i->status === TelegramChatBroadcastItem::STATUS_SKIPPED
-                ? $this->skipReason((string) $i->error_message)
-                : null,
+            'skip_reason' => match ($i->status) {
+                TelegramChatBroadcastItem::STATUS_SKIPPED => $this->skipReason((string) $i->error_message),
+                TelegramChatBroadcastItem::STATUS_REJECTED => 'rejected',
+                default => null,
+            },
             'error_message' => in_array($i->status, [
                 TelegramChatBroadcastItem::STATUS_ERROR,
                 TelegramChatBroadcastItem::STATUS_SKIPPED,
+                TelegramChatBroadcastItem::STATUS_REJECTED,
             ], true) ? $i->error_message : null,
             // Ровно те картинки и в том порядке, что уйдут в канал: у события
             // — через тот же eventPhotos, которым собирается задача боту;

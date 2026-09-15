@@ -318,6 +318,48 @@ class AdminBroadcastSkippedTest extends TestCase
         return \App\Models\City::query()->where('slug', 'voronezh-test')->firstOrFail();
     }
 
+    /**
+     * Отказ обратим: отклонённое видно в ленте, и его можно вернуть в пул.
+     *
+     * «Больше не предлагать» прячет событие от подбора на 30 дней. До сих пор
+     * это было необратимо из интерфейса: запись со статусом rejected не
+     * показывалась нигде, а событие просто пропадало из предложений — случайное
+     * нажатие стоило месяца.
+     */
+    public function test_rejected_item_is_visible_and_can_return_to_the_pool(): void
+    {
+        $broadcast = $this->makeChannel();
+        $item = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_REJECTED);
+        $item->error_message = 'отклонено в админке';
+        $item->event_id = $this->futureEvent()->id;
+        $item->save();
+
+        $res = $this->getJson("/api/admin/broadcast/channels/{$broadcast->id}/feed");
+        $res->assertOk();
+        $row = collect($res->json('data.items'))->firstWhere('id', $item->id);
+        $this->assertNotNull($row, 'отклонённое должно быть видно — иначе его нечем вернуть');
+        $this->assertSame('rejected', $row['skip_reason']);
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/unreject")->assertOk();
+
+        $this->assertSame(
+            TelegramChatBroadcastItem::STATUS_SKIPPED,
+            $item->fresh()->status,
+            'отказ снят: событие снова можно предлагать',
+        );
+    }
+
+    /** Возвращать в пул нечего, если не отклоняли. */
+    public function test_unreject_refuses_a_plain_skipped_item(): void
+    {
+        $broadcast = $this->makeChannel();
+        $item = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
+        $item->event_id = $this->futureEvent()->id;
+        $item->save();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/unreject")->assertStatus(409);
+    }
+
     private function makeChannel(): TelegramChatBroadcast
     {
         $owner = TelegramUser::create(['telegram_id' => 8307201745]);
