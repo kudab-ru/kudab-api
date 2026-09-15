@@ -70,6 +70,10 @@ return [
         // отдаёт pending/planned с будущим planned_at. Если парсер лёг, придержка
         // истекает сама и пост уходит со старым description: деградация пассивная.
         'broadcast_text_grace_minutes' => (int) env('BROADCAST_TEXT_GRACE_MINUTES', 6),
+        // За сколько минут до слота парсер пишет анонс посту недельной ленты.
+        // ДЕРЖАТЬ РАВНЫМ llm_text.tg_lead_minutes в kudab-parser: там по нему
+        // выбирают записи, здесь — показывают человеку время в админке.
+        'broadcast_text_lead_minutes' => (int) env('BROADCAST_TEXT_LEAD_MINUTES', 60),
     ],
 
     'vk' => [

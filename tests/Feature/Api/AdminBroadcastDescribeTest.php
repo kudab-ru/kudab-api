@@ -138,6 +138,42 @@ class AdminBroadcastDescribeTest extends TestCase
         $this->assertSame('template', $row['caption_source']);
     }
 
+    /**
+     * Выключатель анонсов ИИ: по умолчанию включено, выключается настройкой.
+     *
+     * Умолчание важно: до появления настройки анонсы писались всем каналам, и
+     * выкатка не должна молча выключить их там, где на них рассчитывают.
+     */
+    public function test_ai_text_is_on_by_default_and_can_be_turned_off(): void
+    {
+        $broadcast = $this->makeChannel();
+
+        $res = $this->getJson('/api/admin/broadcast/channels');
+        $res->assertOk();
+        $row = collect($res->json('data'))->firstWhere('id', $broadcast->id);
+        $this->assertTrue($row['ai_text'], 'по умолчанию анонсы пишутся');
+        $this->assertGreaterThan(0, $row['text_lead_minutes'], 'лента показывает, за сколько до слота');
+
+        $this->patchJson("/api/admin/broadcast/channels/{$broadcast->id}", ['ai_text' => false])
+            ->assertOk();
+
+        $this->assertFalse($broadcast->fresh()->ai_text);
+    }
+
+    /** Заявку из админки выключатель не отменяет: её подаёт человек. */
+    public function test_manual_request_works_even_with_ai_text_off(): void
+    {
+        $broadcast = $this->makeChannel();
+        $broadcast->ai_text = false;
+        $broadcast->save();
+
+        $item = $this->makeItem($broadcast->id);
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/describe")->assertOk();
+
+        $this->assertNotNull($item->fresh()->text_requested_at);
+    }
+
     /** @return array<string, mixed> */
     private function feedRow(int $broadcastId, int $itemId): array
     {

@@ -209,6 +209,29 @@ class TelegramChatBroadcast extends Model
         $this->settings = $settings;
     }
 
+    /**
+     * Писать ли анонсы ИИ автоматически перед публикацией.
+     *
+     * Выключатель канала, а не поста: выключенный канал постит то, что пришло из
+     * парсера, и денег на модель не тратит вовсе. Заявку из админки («написать
+     * текст») выключатель НЕ отменяет — её подаёт человек осознанно.
+     *
+     * По умолчанию включено: так работали все каналы до появления настройки.
+     */
+    public function getAiTextAttribute(): bool
+    {
+        $raw = ($this->settings ?? [])['ai_text'] ?? null;
+
+        return $raw === null ? true : (bool) $raw;
+    }
+
+    public function setAiTextAttribute(bool $on): void
+    {
+        $settings = $this->settings ?? [];
+        $settings['ai_text'] = $on;
+        $this->settings = $settings;
+    }
+
     public function getPeriodAttribute(): string
     {
         $settings = $this->settings ?? [];

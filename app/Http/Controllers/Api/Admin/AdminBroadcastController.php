@@ -184,15 +184,22 @@ class AdminBroadcastController extends Controller
         // одного.
         $this->events->hydrateImagesFor($events);
 
-        // Подпись, которой нет, собираем здесь же. Пустой она остаётся после
-        // того, как парсер написал событию свежий ТГ-анонс: снять устаревший
-        // текст он умеет, а собрать новый — нет, шаблоны постов живут в api.
-        // Сборка бесплатная, это подстановка в шаблон.
+        // Подпись пересобираем на чтении — ту же, что уйдёт в канал.
+        //
+        // Пост стоит в очереди днями, и за это время текст меняется под ним:
+        // парсер пишет событию ТГ-анонс, чистка правит описание, у события
+        // двигается время. Показывать в админке то, что собрали при постановке,
+        // значит врать в превью — а превью для того и сделано, чтобы человек
+        // видел настоящий пост. Отправка пересобирает подпись ровно так же.
+        //
+        // Сборка бесплатная (подстановка в шаблон), запись идёт только если
+        // текст действительно изменился. Свой текст не трогаем: его писал
+        // человек.
         foreach ($items as $i) {
             if ($i->kind !== TelegramChatBroadcastItem::KIND_EVENT || ! $i->event_id) {
                 continue;
             }
-            if (trim((string) $i->caption) !== '' || $i->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            if ($i->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
                 continue;
             }
             if (! in_array($i->status, $this->openStatuses(), true)) {
@@ -1693,6 +1700,7 @@ class AdminBroadcastController extends Controller
             'horizon_days' => ['sometimes', 'integer', 'min:1', 'max:31'],
             'portrait_every_days' => ['sometimes', 'integer', 'min:1', 'max:90'],
             'min_gap_minutes' => ['sometimes', 'integer', 'min:0', 'max:1440'],
+            'ai_text' => ['sometimes', 'boolean'],
         ]);
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
@@ -1728,6 +1736,9 @@ class AdminBroadcastController extends Controller
         }
         if ($request->has('portrait_every_days')) {
             $broadcast->portrait_every_days = (int) $data['portrait_every_days'];
+        }
+        if ($request->has('ai_text')) {
+            $broadcast->ai_text = (bool) $data['ai_text'];
         }
         if ($request->has('min_gap_minutes')) {
             $broadcast->min_gap_minutes = (int) $data['min_gap_minutes'];
@@ -1966,6 +1977,10 @@ class AdminBroadcastController extends Controller
             // пул ÷ (кулдаун ÷ 7), то есть пул ÷ 12,86.
             'portrait_every_days' => $b->portrait_every_days,
             'min_gap_minutes' => $b->min_gap_minutes,
+            'ai_text' => $b->ai_text,
+            // за сколько минут до слота появится анонс — чтобы лента показывала
+            // человеку время, а не абстрактное «перед публикацией»
+            'text_lead_minutes' => max(1, (int) config('services.bot.broadcast_text_lead_minutes', 60)),
             // Когда канал снова сможет постить. Без этого пост, ждущий
             // зазора, выглядел как «ничего не происходит»: в ленте он стоит
             // со временем в прошлом и молчит.
@@ -2239,7 +2254,7 @@ class AdminBroadcastController extends Controller
     private function fillCaption(TelegramChatBroadcastItem $item, TelegramChatBroadcast $broadcast, Event $event): void
     {
         try {
-            $item->caption = $this->captions->build(
+            $fresh = $this->captions->build(
                 $event,
                 (string) $broadcast->template_code,
                 // «Сегодня»/«завтра» — от дня публикации, а не от дня сборки.
@@ -2247,6 +2262,15 @@ class AdminBroadcastController extends Controller
                     ? \Carbon\CarbonImmutable::parse($item->publish_at)->setTimezone('Europe/Moscow')
                     : null,
             );
+
+            // Ничего не изменилось — не трогаем строку: лента читается часто,
+            // и лишний UPDATE на каждый показ не нужен никому.
+            if ($fresh === (string) $item->caption
+                && $item->caption_source === TelegramChatBroadcastItem::CAPTION_TEMPLATE) {
+                return;
+            }
+
+            $item->caption = $fresh;
             $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
             $item->save();
         } catch (\Throwable $e) {

@@ -894,11 +894,13 @@ class TelegramChatBroadcastService
                 }
             } elseif (! $dryRun) {
                 // придержка на время генерации ТГ-текста; снимает её парсер, а если
-                // не успел — она истекает сама и пост уходит со старым description
+                // не успел — она истекает сама и пост уходит со старым description.
+                // Канал, отказавшийся от анонсов ИИ, ждать незачем: писать текст
+                // всё равно никто не будет, а пост простоял бы эти минуты зря.
                 $item = $this->broadcastItemRepository->enqueue(
                     $broadcast->id,
                     $eventId,
-                    $now->copy()->addMinutes($this->textGraceMinutes()),
+                    $broadcast->ai_text ? $now->copy()->addMinutes($this->textGraceMinutes()) : null,
                 );
 
                 // Текст собираем СРАЗУ, а не перед отправкой: пост появляется
