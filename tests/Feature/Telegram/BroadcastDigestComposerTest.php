@@ -129,6 +129,58 @@ class BroadcastDigestComposerTest extends TestCase
         $this->assertSame(5, $out['total'], 'и в счётчике его тоже нет');
     }
 
+    /**
+     * Событие без площадки поимённо не называем.
+     *
+     * Такая строка не блокировалась правилом «одна площадка — одна строка» и
+     * сама площадку не занимала: три события без места прошли бы все отсечки и
+     * встали рядом. А читателю «название · дата» без места говорит половину.
+     */
+    public function test_event_without_a_venue_is_never_named(): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 5) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        // Самое длинное описание — то есть первый кандидат по нынешнему отбору.
+        $homeless = $this->themedEvent('Спектакль без места', 6);
+        DB::table('events')->where('id', $homeless)->update([
+            'venue_id' => null,
+            'description' => str_repeat('очень длинное описание события. ', 20),
+        ]);
+
+        $out = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $this->assertNotContains($homeless, $out['event_ids']);
+    }
+
+    /**
+     * Подпись считает названных, а не обещает «Три».
+     *
+     * Гейт темы — пять событий, но отсечки «одна площадка, один день» могут
+     * оставить меньше трёх. Текст при этом обещал три и отправлялся молча.
+     */
+    public function test_caption_counts_the_named_instead_of_promising_three(): void
+    {
+        $broadcast = $this->makeChannel();
+        // Пять событий, но все в один день: отсечка по дню оставит одно.
+        foreach (range(1, 5) as $n) {
+            $id = $this->themedEvent("Спектакль {$n}", $n);
+            DB::table('events')->where('id', $id)->update([
+                'start_time' => Carbon::now()->addDays(2)->setTime(19, 0),
+            ]);
+        }
+
+        $out = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $this->assertCount(1, $out['event_ids']);
+        $this->assertStringContainsString('Одно —', $out['caption']);
+        $this->assertStringNotContainsString('Три —', $out['caption']);
+    }
+
     /** Названные события идут по датам — подборка про «что впереди». */
     public function test_named_events_are_ordered_by_date(): void
     {

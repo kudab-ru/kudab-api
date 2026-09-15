@@ -123,6 +123,7 @@ final class BroadcastDigestComposer
 
         $rows = $this->rejectStopList($rows);
         $rows = $this->rejectForeignGenre($rows, (string) $theme['slug']);
+        $rows = $this->rejectForeignSourceRubric($rows, (string) $theme['slug']);
         $rows = $this->rejectAlreadyShown($broadcast, $rows);
         $rows = $this->collapseRepeats($rows);
 
@@ -209,6 +210,45 @@ final class BroadcastDigestComposer
     }
 
     /**
+     * Событие, чью категорию НАЗВАЛ САМ ИСТОЧНИК, и она спорит с темой.
+     *
+     * Яндекс.Афиша кладёт рубрику в разметку страницы, и она точнее нашего
+     * тегера: по рубрике `quest` первичный интерес «музыка» проставлен 829
+     * раз. Именно так квест-комната «Припять 36» попала в подборку концертов.
+     * Проверка описания ловит только тех, кто называет жанр в первой строке, —
+     * это меньше трети случаев; источник знает про все.
+     */
+    private function rejectForeignSourceRubric(\Illuminate\Support\Collection $rows, string $themeSlug): \Illuminate\Support\Collection
+    {
+        if ($rows->isEmpty()) {
+            return $rows;
+        }
+
+        $map = (array) config('broadcast_digest.source_rubrics', []);
+        if ($map === []) {
+            return $rows;
+        }
+
+        $rubrics = DB::table('event_sources as es')
+            ->join('context_posts as cp', 'cp.id', '=', 'es.context_post_id')
+            ->whereIn('es.event_id', $rows->pluck('id')->all())
+            ->whereNotNull(DB::raw("cp.structured_meta->'json_ld'->>'url'"))
+            ->selectRaw("es.event_id, split_part(cp.structured_meta->'json_ld'->>'url', '/', 5) as rubric")
+            ->get()
+            ->groupBy('event_id')
+            ->map(fn ($g) => (string) $g->first()->rubric);
+
+        return $rows->reject(function ($row) use ($rubrics, $map, $themeSlug) {
+            $rubric = $rubrics[(int) $row->id] ?? null;
+            if ($rubric === null || ! isset($map[$rubric])) {
+                return false; // источник промолчал — судим по нашему тегу
+            }
+
+            return $map[$rubric] !== $themeSlug;
+        })->values();
+    }
+
+    /**
      * Вычесть то, что канал уже показал или вот-вот покажет.
      *
      * По ТРЁМ ключам: сам идентификатор, группа повторов и нормализованный
@@ -276,10 +316,26 @@ final class BroadcastDigestComposer
      * Три события, которые назовём поимённо.
      *
      * Одна строка на площадку и одна на день: подборка о разнообразии недели, и
-     * три спектакля одного театра подряд — это афиша театра. Внутри — по
-     * полноте карточки, а не по скореру ленты: скорер меряет заполненность и
-     * на живой выборке раздаёт всем одинаковые баллы, а его штраф за близость
-     * даты систематически топит выходные.
+     * три спектакля одного театра подряд — это афиша театра.
+     *
+     * Внутри — по длине описания. Честно: это мера ПОЛНОТЫ карточки, а не
+     * качества события, и вдобавок мера источника — у импорта Яндекс.Афиши
+     * описания в разы длиннее (684 символа против 46 у Никитинки), поэтому
+     * длинные строки систематически приводят его.
+     *
+     * Скорер ленты вместо неё НЕ берём, но не потому, что он «раздаёт всем
+     * одинаковые баллы» — это было неверно и переоткрывало вопрос. Замер
+     * 2026-09-15: на очищенном пуле он даёт 7 разных баллов в концертах
+     * (70..115) и 8 в спектаклях (65..120), то есть разделяет. Не берём
+     * потому, ЧТО он складывает: фото, ФИАС, площадку, цену — ту же полноту
+     * карточки, — и в его топе оказываются вечеринки и квест-комнаты. Плюс
+     * штраф за близость даты топит выходные: 59% кандидатов недели приходятся
+     * на пт-вс и получают минус пять.
+     *
+     * Поведенческого сигнала в базе нет ВООБЩЕ: event_attendees, interest_user
+     * и context_interactions пусты, просмотров и лайков схема не хранит.
+     * Значит «лучшее» тут измерить нечем, и притворяться, что умеем
+     * ранжировать качество, не надо.
      *
      * @return list<object>
      */
@@ -306,7 +362,15 @@ final class BroadcastDigestComposer
             $venue = $row->venue_id !== null ? (int) $row->venue_id : null;
             $day = Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
 
-            if ($venue !== null && isset($venues[$venue])) {
+            // Без площадки не называем вовсе. Такая строка никогда не
+            // блокировалась правилом «одна площадка — одна строка» и никогда
+            // не занимала площадку: три события без места прошли бы все три
+            // отсечки и встали рядом. А читателю строка «название · дата» без
+            // места говорит ровно половину нужного.
+            if ($venue === null) {
+                continue;
+            }
+            if (isset($venues[$venue])) {
                 continue;
             }
             if (isset($days[$day])) {
@@ -350,8 +414,15 @@ final class BroadcastDigestComposer
 
         $forms = (array) ($theme['forms'] ?? []);
 
+        $named = count($picked['named']);
+        $lead = match ($named) {
+            1 => 'Одно',
+            2 => 'Два',
+            default => 'Три',
+        };
+
         $period = sprintf(
-            '%s%s %s на %s. Три — в разных местах и в разные дни:',
+            '%s%s %s на %s. '.$lead.' — в разных местах и в разные дни:',
             $range,
             $city !== '' ? ' в '.$this->escape($this->cityInflected($city)) : '',
             $this->plural($picked['total'], $forms[0] ?? '', $forms[1] ?? null, $forms[2] ?? null),
