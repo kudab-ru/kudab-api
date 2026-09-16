@@ -673,6 +673,53 @@ class BroadcastDigestComposerTest extends TestCase
             ->where('item_id', $digest->id)->count(), 'прежний состав снят');
     }
 
+    /**
+     * Длина подписи считается по ВИДИМОМУ тексту, а не по разметке.
+     *
+     * Telegram меряет готовый текст: адрес ссылки в длину не входит вовсе. У
+     * подборки с четырьмя ссылками разметка тянет вдвое больше видимого, и
+     * правка живого поста отбивалась ошибкой «длиннее 1024» — то есть править
+     * подборку было нельзя в принципе.
+     */
+    public function test_caption_length_counts_text_not_markup(): void
+    {
+        $html = '<b><a href="https://kudab.ru/events/428735?utm_source=tg&amp;utm_medium=digest&amp;utm_content=i162">Честный</a></b>';
+
+        $this->assertSame(7, \App\Support\Telegram\CaptionLength::visible($html),
+            'семь букв «Честный», а не сто десять символов разметки');
+    }
+
+    /** Эмодзи вне базовой плоскости Telegram считает за две единицы. */
+    public function test_caption_length_counts_emoji_as_telegram_does(): void
+    {
+        $this->assertSame(2, \App\Support\Telegram\CaptionLength::visible('🎵'));
+    }
+
+    /**
+     * Строка не обрывается на висящем союзе.
+     *
+     * «…„Разлетайтесь мыши" и…» — реальная строка из живого поста: союз перед
+     * многоточием читается как обрыв связи, а не как продолжение.
+     */
+    public function test_hook_does_not_end_on_a_hanging_conjunction(): void
+    {
+        $broadcast = $this->makeChannel();
+        $ids = [];
+        foreach (range(1, 6) as $n) {
+            $ids[] = $this->themedEvent("Спектакль {$n}", $n);
+        }
+        DB::table('events')->whereIn('id', $ids)->update([
+            'tg_description' => 'Максимум энергии, яркие эмоции, все хиты и новые песни — «Лепесточек», '
+                .'«Желаю», «Майами», «Прости мама», «Разлетайтесь мыши» и ещё десяток любимых вещей подряд.',
+        ]);
+
+        $out = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $this->assertStringNotContainsString(' и…', $out['caption'],
+            'союз перед многоточием — обрыв, а не продолжение');
+    }
+
     private function digestItem(TelegramChatBroadcast $broadcast, Carbon $at): TelegramChatBroadcastItem
     {
         $item = new TelegramChatBroadcastItem;

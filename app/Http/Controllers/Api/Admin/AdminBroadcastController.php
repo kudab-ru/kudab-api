@@ -16,6 +16,7 @@ use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\PostTiming;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Support\BroadcastSafety;
+use App\Support\Telegram\CaptionLength;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -55,7 +56,8 @@ class AdminBroadcastController extends Controller
      * Сегодня риск дремлет (самая длинная подпись в базе — 720 символов), но
      * ручная правка ничем не ограничена.
      */
-    public const CAPTION_LIMIT = 1024;
+    /** @deprecated Считать длину подписи — [[CaptionLength]]: там UTF-16 и без разметки. */
+    public const CAPTION_LIMIT = CaptionLength::LIMIT;
 
     /**
      * Сколько дней отклонённое событие не предлагается заново.
@@ -816,10 +818,19 @@ class AdminBroadcastController extends Controller
     public function update(Request $request, int $itemId): JsonResponse
     {
         $data = $request->validate([
-            // 1024 — лимит подписи Telegram, когда к посту идут картинки.
-            // Длиннее пост не падает: альбом молча отбивается, и в канал
-            // уходит голый текст. Отказать здесь честнее.
-            'caption' => ['sometimes', 'nullable', 'string', 'max:'.self::CAPTION_LIMIT],
+            // Предел считаем по ВИДИМОМУ тексту ([[CaptionLength]]): Telegram
+            // меряет готовый текст, адрес ссылки в длину не входит вовсе. На
+            // подборке с четырьмя ссылками разметка тянула на 1121 при 656
+            // видимых — и правка такого поста отбивалась ошибкой «длиннее
+            // 1024», то есть править подборку было нельзя в принципе.
+            //
+            // Верхняя граница на саму строку остаётся: она про размер запроса,
+            // а не про Telegram.
+            'caption' => ['sometimes', 'nullable', 'string', 'max:8192', function ($attribute, $value, $fail) {
+                if ($value !== null && ! CaptionLength::fits((string) $value)) {
+                    $fail('Подпись длиннее '.CaptionLength::LIMIT.' символов — Telegram не примет её к картинкам.');
+                }
+            }],
             'publish_at' => ['sometimes', 'nullable', 'date'],
             'is_pinned' => ['sometimes', 'boolean'],
             // null = вернуть автоподбор; массив = ровно эти картинки

@@ -635,7 +635,7 @@ final class BroadcastDigestComposer
         $withHooks = implode("\n\n", array_merge($top, $rich, [$footer]));
         $soft = (int) config('broadcast_digest.caption_soft_limit', 950);
 
-        if (mb_strlen(strip_tags($withHooks)) <= $soft) {
+        if (\App\Support\Telegram\CaptionLength::visible($withHooks) <= $soft) {
             return $withHooks;
         }
 
@@ -903,7 +903,13 @@ final class BroadcastDigestComposer
         return rtrim(mb_substr($sentence, 0, $at), " ,;:—–-").'.';
     }
 
-    /** Режем по слову, а не по символу: «спекта…» читается как сбой. */
+    /**
+     * Режем по слову, а не по символу: «спекта…» читается как сбой.
+     *
+     * И не по СЛУЖЕБНОМУ слову: «…„Разлетайтесь мыши" и…» — реальная строка из
+     * живого поста. Висящий союз читается как обрыв связи, а не как
+     * продолжение; отбрасываем его вместе с многоточием.
+     */
     private function trimToWord(string $text, int $limit): string
     {
         $text = trim($text);
@@ -913,8 +919,27 @@ final class BroadcastDigestComposer
 
         $cut = mb_substr($text, 0, $limit);
         $at = mb_strrpos($cut, ' ');
+        $cut = trim($at === false ? $cut : mb_substr($cut, 0, $at));
 
-        return rtrim($at === false ? $cut : mb_substr($cut, 0, $at), " ,;:—-").'…';
+        // Хвостовые союзы и предлоги — по одному, пока они там есть: после
+        // «на» может остаться «и», и обрывать на нём так же нехорошо.
+        $tail = ['и', 'а', 'но', 'да', 'или', 'с', 'со', 'в', 'во', 'на', 'от', 'до',
+            'по', 'за', 'из', 'у', 'к', 'о', 'об', 'для', 'при', 'про', 'что', 'как'];
+
+        while (true) {
+            $cut = rtrim($cut, " ,;:—–-");
+            $lastSpace = mb_strrpos($cut, ' ');
+            if ($lastSpace === false) {
+                break;
+            }
+            $lastWord = mb_strtolower(trim(mb_substr($cut, $lastSpace + 1), " ,;:—–-«»\"'"));
+            if (! in_array($lastWord, $tail, true)) {
+                break;
+            }
+            $cut = mb_substr($cut, 0, $lastSpace);
+        }
+
+        return rtrim($cut, " ,;:—–-").'…';
     }
 
     private function priceLabel(object $row): string
