@@ -76,7 +76,12 @@ class FillFeedCommand extends Command
                 continue;
             }
 
-            if (! BroadcastSafety::postingAllowed((int) $chat->telegram_chat_id)) {
+            // Запрет стенда — про ЗАПИСЬ в очередь, а не про «посмотреть».
+            // Пропуская такой канал и в dry-run, команда отвечала на вопрос
+            // «что будет на проде?» словами «не знаю»: именно боевой канал на
+            // стенде и запрещён. Показываем, но метим.
+            $blocked = ! BroadcastSafety::postingAllowed((int) $chat->telegram_chat_id);
+            if ($blocked && ! $dryRun) {
                 $summary['not_allowed']++;
 
                 continue;
@@ -88,8 +93,9 @@ class FillFeedCommand extends Command
 
             if (($filled['filled'] ?? 0) > 0 || ($filled['no_candidate'] ?? 0) > 0) {
                 $this->line(sprintf(
-                    '  канал #%d: %s %d, без кандидата %d, дней в горизонте %d',
+                    '  канал #%d%s: %s %d, без кандидата %d, дней в горизонте %d',
                     $broadcast->id,
+                    $blocked ? ' (стенду постить в него запрещено)' : '',
                     $dryRun ? 'заполнил бы' : 'заполнено',
                     (int) ($filled['filled'] ?? 0),
                     (int) ($filled['no_candidate'] ?? 0),
