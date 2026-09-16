@@ -1984,7 +1984,7 @@ class TelegramChatBroadcastService
     public function fillFeedDays(TelegramChatBroadcast $broadcast, Carbon $now): array
     {
         $chat = $broadcast->chat;
-        $summary = ['filled' => 0, 'days' => 0, 'no_candidate' => 0];
+        $summary = ['filled' => 0, 'days' => 0, 'no_candidate' => 0, 'feed_limit' => 0];
 
         if (! $chat instanceof TelegramChat || ! $chat->city_id) {
             return $summary;
@@ -2069,6 +2069,28 @@ class TelegramChatBroadcastService
                 : (string) optional(Event::query()->find($i->event_id))?->start_time)
             ->values()
             ->all();
+
+        // СКОЛЬКО ЛЕНТА ВМЕЩАЕТ. feed_limit — кап открытых СОБЫТИЙНЫХ записей
+        // канала, и до сих пор его знал только автомат enqueue-due (строка с
+        // countOpenForBroadcast выше). Наполнитель и обе кнопки админки шли
+        // мимо: на канале с feed_limit = 14 открытых записей было 28, а
+        // наполнитель предлагал добрать ещё 15 — втрое выше собственного капа
+        // канала. Настройка, которую можно обойти кнопкой, не настройка.
+        //
+        // Портреты и подборки в счёт не входят намеренно: у них свой каденс и
+        // своя бронь, и общий счётчик закрыл бы их навсегда, стоит ленте
+        // заполниться. Ровно тот же kind, что считает автомат.
+        //
+        // ВАЖНО, ЧЕГО КАП НЕ КАСАЕТСЯ: записей из очереди ожидания. Они уже
+        // открыты и уже посчитаны — слот им только НАЗНАЧАЕТСЯ, число записей
+        // от этого не растёт. Упереться в кап должен лишь ДОБОР из пула, то
+        // есть появление в ленте новой записи. Иначе очередь ожидания на
+        // полной ленте не разобралась бы никогда — та самая болезнь, из-за
+        // которой заводили уборщик.
+        $openEvents = $this->broadcastItemRepository->countOpenForBroadcast(
+            $broadcast->id,
+            TelegramChatBroadcastItem::KIND_EVENT,
+        );
 
         $exclude = [];
         for ($i = 0; $i < $broadcast->horizon_days; $i++) {
@@ -2198,6 +2220,23 @@ class TelegramChatBroadcastService
                     continue;
                 }
 
+                // Лента полна — добирать из пула больше нечего. Слот
+                // остаётся пустым сознательно: это не голодание пула (для него
+                // есть свой счётчик no_candidate), а собственный кап канала.
+                if ($openEvents >= $broadcast->feed_limit) {
+                    if ($summary['feed_limit'] === 0) {
+                        Log::info('broadcast.feed.limit_reached', [
+                            'broadcast_id' => $broadcast->id,
+                            'open_events' => $openEvents,
+                            'feed_limit' => $broadcast->feed_limit,
+                            'why' => 'открытых событийных записей не меньше капа ленты — добор из пула остановлен',
+                        ]);
+                    }
+                    $summary['feed_limit']++;
+
+                    continue;
+                }
+
                 // Событие не должно начаться раньше публикации: день в день
                 // можно, но не «пост в 10:00 про концерт в 08:00».
                 //
@@ -2284,6 +2323,11 @@ class TelegramChatBroadcastService
                 $item->save();
 
                 $this->ensureEventCaption($item, $broadcast);
+                // Запись открылась только что — она и заняла ячейку капа.
+                // Считаем в памяти, а не перезапрашиваем базу на каждый слот:
+                // за прогон это единственный путь, которым число открытых
+                // событийных записей растёт.
+                $openEvents++;
                 $summary['filled']++;
             }
         }

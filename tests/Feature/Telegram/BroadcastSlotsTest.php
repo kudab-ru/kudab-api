@@ -940,6 +940,72 @@ class BroadcastSlotsTest extends TestCase
         \Laravel\Sanctum\Sanctum::actingAs($user);
     }
 
+    /**
+     * Кап ленты действует и на наполнитель, а не только на автомат enqueue-due.
+     *
+     * До этого feed_limit знал один автомат: наполнитель и обе кнопки админки
+     * шли мимо и могли увести ленту втрое выше собственного капа канала.
+     */
+    public function test_filler_stops_at_the_feed_limit(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC')); // 06:00 МСК
+
+        [$broadcast] = $this->channelWithEvents(6);
+        $broadcast->horizon_days = 6;
+        $broadcast->feed_limit = 2;
+        $broadcast->save();
+
+        $summary = $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame(2, $summary['filled'], 'заполнено ровно до капа');
+        $this->assertGreaterThan(0, $summary['feed_limit'], 'остальные слоты не тронуты именно из-за капа');
+        $this->assertSame(0, $summary['no_candidate'], 'пул при этом не пуст — событий шесть');
+
+        $this->assertSame(2, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereNotNull('publish_at')
+            ->count());
+
+        Carbon::setTestNow();
+    }
+
+    /**
+     * Кап не запирает очередь ожидания: запись в ней УЖЕ открыта и уже
+     * посчитана, слот ей только назначается. Если бы кап касался и её, на
+     * полной ленте очередь ожидания не разобралась бы никогда.
+     */
+    public function test_feed_limit_does_not_block_the_waiting_queue(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC')); // 06:00 МСК
+
+        [$broadcast, $events] = $this->channelWithEvents(3);
+        $broadcast->horizon_days = 3;
+        $broadcast->feed_limit = 1;
+        $broadcast->save();
+
+        $waiting = $this->makeItem($broadcast->id, $events[0]->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $summary = $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertNotNull($waiting->fresh()->publish_at, 'ждавшая записи день всё равно получила');
+        $this->assertSame(1, $summary['filled'], 'и это единственное, чем лента пополнилась');
+        $this->assertGreaterThan(0, $summary['feed_limit'], 'добор из пула при этом остановлен капом');
+
+        $this->assertSame(1, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                TelegramChatBroadcastItem::STATUS_APPROVED,
+                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+            ])
+            ->count(), 'число открытых записей не выросло');
+
+        Carbon::setTestNow();
+    }
+
     private function channelWithEvents(int $count): array
     {
         $city = $this->insertCity();

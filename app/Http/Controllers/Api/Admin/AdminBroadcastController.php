@@ -1486,7 +1486,7 @@ class AdminBroadcastController extends Controller
 
             return response()->json([
                 'ok' => false,
-                'error' => 'Пересборка отменена: заменить ленту нечем — пул пуст. Всё осталось на месте.',
+                'error' => $this->emptyFillReason($broadcast, $filled, 'Пересборка отменена'),
             ], 409);
         }
 
@@ -1571,7 +1571,11 @@ class AdminBroadcastController extends Controller
 
             return response()->json([
                 'ok' => false,
-                'error' => 'Разбавить нечем: других площадок в пуле не нашлось. Лента осталась как была.',
+                'error' => $this->emptyFillReason(
+                    $broadcast,
+                    $filled,
+                    'Разбавить нечем: других площадок в пуле не нашлось',
+                ),
             ], 409);
         }
 
@@ -2795,6 +2799,39 @@ class AdminBroadcastController extends Controller
             ->get()
             ->first(fn (TelegramChatBroadcastItem $x) => Carbon::parse($x->publish_at)
                 ->setTimezone('Europe/Moscow')->format($format) === $targetDay);
+    }
+
+    /**
+     * Почему наполнитель вернул ноль — пустой пул или собственный кап ленты.
+     *
+     * Разница видна только по сводке наполнителя, а человеку у кнопки она
+     * важнее всего: «пул пуст» и «лента уже полная» лечатся противоположным.
+     * Пока кап жил в одном автомате, этой развилки не существовало вовсе.
+     */
+    private function emptyFillReason(
+        TelegramChatBroadcast $broadcast,
+        array $filled,
+        string $prefix,
+    ): string {
+        if ((int) ($filled['feed_limit'] ?? 0) > 0) {
+            return sprintf(
+                '%s: лента уже держит предел канала — %d открытых записей при капе %d. '
+                .'Подними «Сколько постов держать» в настройках канала или дождись, пока часть выйдет.',
+                $prefix,
+                // Тот же счёт, что у наполнителя: открытые СОБЫТИЙНЫЕ записи.
+                // Через openStatuses() — список статусов в контроллере уже
+                // есть, и заводить ради одной строки ещё одну зависимость
+                // означало бы завести и второе место, где он может разойтись.
+                TelegramChatBroadcastItem::query()
+                    ->where('broadcast_id', $broadcast->id)
+                    ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
+                    ->whereIn('status', $this->openStatuses())
+                    ->count(),
+                $broadcast->feed_limit,
+            );
+        }
+
+        return $prefix.'. Всё осталось на месте.';
     }
 
     private function openStatuses(): array

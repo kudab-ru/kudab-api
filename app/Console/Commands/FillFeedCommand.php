@@ -91,15 +91,23 @@ class FillFeedCommand extends Command
                 ? $this->wouldFill($service, $broadcast, $now)
                 : $service->fillFeedDays($broadcast, $now);
 
-            if (($filled['filled'] ?? 0) > 0 || ($filled['no_candidate'] ?? 0) > 0) {
+            $capped = (int) ($filled['feed_limit'] ?? 0);
+
+            if (($filled['filled'] ?? 0) > 0 || ($filled['no_candidate'] ?? 0) > 0 || $capped > 0) {
                 $this->line(sprintf(
-                    '  канал #%d%s: %s %d, без кандидата %d, дней в горизонте %d',
+                    '  канал #%d%s: %s %d, без кандидата %d, дней в горизонте %d%s',
                     $broadcast->id,
                     $blocked ? ' (стенду постить в него запрещено)' : '',
                     $dryRun ? 'заполнил бы' : 'заполнено',
                     (int) ($filled['filled'] ?? 0),
                     (int) ($filled['no_candidate'] ?? 0),
                     (int) ($filled['days'] ?? 0),
+                    // Пустые слоты при полной ленте — не голодание пула, а
+                    // собственный кап канала, и молчать об этом нельзя: иначе
+                    // «заполнено 0» читается как «событий в городе нет».
+                    $capped > 0
+                        ? sprintf(', слотов не тронуто из-за капа ленты %d (feed_limit %d)', $capped, $broadcast->feed_limit)
+                        : '',
                 ));
             }
 
@@ -112,6 +120,7 @@ class FillFeedCommand extends Command
                         'broadcast_id' => $broadcast->id,
                         'filled' => $filled['filled'],
                         'no_candidate' => $filled['no_candidate'] ?? 0,
+                        'feed_limit_hits' => $capped,
                     ]);
                 }
             }
