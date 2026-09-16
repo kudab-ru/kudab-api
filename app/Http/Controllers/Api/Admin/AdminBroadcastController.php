@@ -159,7 +159,7 @@ class AdminBroadcastController extends Controller
             ->get();
 
         $events = Event::query()
-            ->with('venue:id,name')
+            ->with(['venue:id,name', 'primaryInterests:id,name'])
             ->whereIn('id', $items->pluck('event_id')->filter()->all())
             ->get()
             ->keyBy('id');
@@ -321,10 +321,22 @@ class AdminBroadcastController extends Controller
 
         $feedVenueIds = Event::query()->whereIn('id', $inFeed)->pluck('venue_id')->filter()->unique()->all();
 
+        // Чем занята неделя: первичные темы всего, что канал уже показывает.
+        // По ним считается и причина «такой темы ещё не было», и колонка в
+        // интерфейсе — считать их дважды в двух местах незачем.
+        $feedThemeIds = DB::table('event_interest')
+            ->whereIn('event_id', $inFeed)
+            ->where('rank', 0)
+            ->pluck('interest_id')
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
         $candidates = Event::query()
             ->active()
             ->upcoming()
-            ->with('venue:id,name')
+            ->with(['venue:id,name', 'primaryInterests:id,name'])
             ->whereHas('community', fn ($q) => $q->where('city_id', $chat->city_id))
             ->whereNotIn('id', $inFeed)
             // Опубликованное не предлагаем. Раньше это объяснялось через
@@ -351,10 +363,15 @@ class AdminBroadcastController extends Controller
                 $publishAt !== null,
                 // Событие ещё не должно начаться к моменту публикации.
                 // Многодневное считаем годным, пока не кончилось.
+                // Правило общее со всеми дверями ([[PostTiming]]): не позже
+                // начала, а у многодневки — не позже закрытия. Своя копия
+                // здесь пускала в предложения уже начавшееся однодневное.
                 fn ($q) => $q->where(function ($w) use ($publishAt) {
                     $w->where('start_time', '>=', $publishAt)
                         ->orWhere(function ($x) use ($publishAt) {
-                            $x->whereNotNull('end_time')->where('end_time', '>=', $publishAt);
+                            $x->whereNotNull('end_time')
+                                ->whereRaw("end_time > start_time + interval '24 hours'")
+                                ->where('end_time', '>=', $publishAt);
                         });
                 }),
             )
@@ -385,7 +402,7 @@ class AdminBroadcastController extends Controller
             }
         }
 
-        $rows = collect($ordered)->map(function (array $pair) use ($feedVenueIds, $chainSizes) {
+        $rows = collect($ordered)->map(function (array $pair) use ($feedVenueIds, $chainSizes, $feedThemeIds) {
                 [$e, $key] = $pair;
 
                 return [
@@ -399,7 +416,8 @@ class AdminBroadcastController extends Controller
                     'chain_size' => $chainSizes[$key] ?? 1,
                     'start_time' => optional($e->start_time)?->toIso8601String(),
                     'price_status' => $e->price_status,
-                    'reasons' => $this->reasons($e, $feedVenueIds),
+                    'theme' => $this->themePayload($e),
+                    'reasons' => $this->reasons($e, $feedVenueIds, $feedThemeIds),
                     'event_url' => $this->siteUrl().'/events/'.$e->id,
                     // Источник, из которого событие пришло: в посте на него
                     // ведёт «Открыть оригинал», а в админке открыть было нечем.
@@ -426,6 +444,9 @@ class AdminBroadcastController extends Controller
                 'venue' => $portrait['name'],
                 'chain' => 'venue:'.$portrait['venue_id'],
                 'chain_size' => 1,
+                // У площадки темы нет: она не событие. Поле обязано быть у
+                // всех карточек пула, иначе фильтр по теме молча потеряет её.
+                'theme' => null,
                 'start_time' => null,
                 'price_status' => null,
                 'reasons' => [
@@ -1636,6 +1657,26 @@ class AdminBroadcastController extends Controller
         }
 
         return response()->json(['ok' => true, 'data' => ['swapped' => $occupant !== null]]);
+    }
+
+    /**
+     * Первичная тема события для выдачи — id и человеческое имя.
+     *
+     * Их у события может быть несколько (у 4.8% — замер 2026-09-15): берём
+     * наименьший id, тот же, что берут наполнитель ленты и подборка. Важна не
+     * «правильная» тема, а одинаковая во всех трёх местах.
+     *
+     * @return array{id: int, name: string}|null
+     */
+    private function themePayload(?Event $event): ?array
+    {
+        $interest = $event?->relationLoaded('primaryInterests')
+            ? $event->primaryInterests->first()
+            : $event?->primaryInterests()->first();
+
+        return $interest === null
+            ? null
+            : ['id' => (int) $interest->id, 'name' => (string) $interest->name];
     }
 
     /**
@@ -2865,6 +2906,9 @@ class AdminBroadcastController extends Controller
             // их наставили двери, у каждой из которых было своё правило, — и
             // без пометки они выглядят обычными, пока доставка молча не снимет
             // их с причиной «событие уже прошло», спалив слот.
+            // Тема поста: по ней интерфейс показывает, чем занята неделя, и
+            // по ней же наполнитель не ставит два одинаковых рядом.
+            'theme' => $this->themePayload($event),
             'late_for_event' => $event !== null
                 && $i->posted_at === null
                 && $i->publish_at !== null
@@ -2980,10 +3024,21 @@ class AdminBroadcastController extends Controller
      * @param  list<int>  $feedVenueIds
      * @return list<string>
      */
-    private function reasons(Event $e, array $feedVenueIds): array
+    /**
+     * @param  list<int>  $feedVenueIds  площадки, уже занятые лентой
+     * @param  list<int>  $feedThemeIds  темы, уже занятые лентой
+     * @return list<string>
+     */
+    private function reasons(Event $e, array $feedVenueIds, array $feedThemeIds = []): array
     {
         $out = [];
 
+        // Тема — первой: она отвечает на вопрос «чем эта неделя будет
+        // отличаться», а площадка — только на «не повторяемся ли мы».
+        $theme = $this->themePayload($e);
+        if ($theme !== null && ! in_array($theme['id'], $feedThemeIds, true)) {
+            $out[] = 'такой темы ещё не было на неделе';
+        }
         if ($e->venue_id === null || ! in_array((int) $e->venue_id, $feedVenueIds, true)) {
             $out[] = 'площадки ещё нет в ленте';
         }

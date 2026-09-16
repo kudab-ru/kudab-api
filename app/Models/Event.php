@@ -68,6 +68,24 @@ class Event extends Model
             ->orderBy('interests.id');
     }
 
+    /**
+     * Первичная тема события — интересы с `rank = 0`.
+     *
+     * Ими меряется всё, что в рассылке называется «темой»: состав подборки
+     * недели, соседство слотов в ленте и колонка «чем занята неделя».
+     * Вторичные теги для этого не годятся: они стоят пачками, и по ним «та же
+     * тема» совпадает почти у всего.
+     *
+     * Отдельной связью, а не фильтром по `interests()`: там rank не выбран в
+     * pivot, и добавлять его туда значило бы менять выдачу всем читателям.
+     */
+    public function primaryInterests(): BelongsToMany
+    {
+        return $this->belongsToMany(Interest::class, 'event_interest')
+            ->wherePivot('rank', 0)
+            ->orderBy('interests.id');
+    }
+
     /** Участники (RSVP) */
     public function attendees(): BelongsToMany
     {
