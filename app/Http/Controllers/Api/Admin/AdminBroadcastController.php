@@ -2322,6 +2322,9 @@ class AdminBroadcastController extends Controller
             'slots' => ['sometimes', 'array', 'max:'.TelegramChatBroadcast::MAX_SLOTS],
             'slots.*' => ['integer', 'between:0,23'],
             'horizon_days' => ['sometimes', 'integer', 'min:1', 'max:31'],
+            // null — «заполнять вместе с первым слотом», то есть как было до
+            // появления ручки.
+            'fill_lead_days' => ['sometimes', 'nullable', 'integer', 'min:1', 'max:31'],
             'portrait_every_days' => ['sometimes', 'integer', 'min:1', 'max:90'],
             'min_gap_minutes' => ['sometimes', 'integer', 'min:0', 'max:1440'],
             'ai_text' => ['sometimes', 'boolean'],
@@ -2357,6 +2360,11 @@ class AdminBroadcastController extends Controller
         }
         if ($request->has('slots')) {
             $broadcast->slots = $data['slots'];
+        }
+        if ($request->has('fill_lead_days')) {
+            $broadcast->fill_lead_days = $data['fill_lead_days'] === null
+                ? null
+                : (int) $data['fill_lead_days'];
         }
         if ($request->has('horizon_days')) {
             $broadcast->horizon_days = (int) $data['horizon_days'];
@@ -2645,6 +2653,7 @@ class AdminBroadcastController extends Controller
             // в день, час берётся из расписания.
             'slots' => $b->slots,
             'horizon_days' => $b->horizon_days,
+            'fill_lead_days' => $b->fill_lead_days,
             // Каденс портретов и пул площадок, из которого он берётся: без
             // второго числа первое не с чем сверить. Потолок частоты —
             // пул ÷ (кулдаун ÷ 7), то есть пул ÷ 12,86.

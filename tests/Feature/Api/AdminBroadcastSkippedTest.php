@@ -7,6 +7,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\TelegramUser;
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
@@ -29,10 +30,22 @@ class AdminBroadcastSkippedTest extends TestCase
     {
         parent::setUp();
 
+        // Часы прибиты на вечер: «свободных слотов нет» проверяется тем, что
+        // единственный слот горизонта (10:00 МСК) уже прошёл. При утреннем
+        // прогоне он был впереди, запись получала день, и тест падал не из-за
+        // кода, а из-за часа, в который его запустили.
+        Carbon::setTestNow(Carbon::parse('2026-09-15 16:00:00', 'UTC'));
+
         Role::findOrCreate('superadmin', 'web');
         $user = User::factory()->create();
         $user->assignRole('superadmin');
         Sanctum::actingAs($user);
+    }
+
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+        parent::tearDown();
     }
 
     public function test_skipped_item_is_visible_in_feed_with_reason(): void

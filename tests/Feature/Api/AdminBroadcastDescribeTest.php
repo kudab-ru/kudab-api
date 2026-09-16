@@ -7,6 +7,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\TelegramUser;
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
@@ -30,10 +31,22 @@ class AdminBroadcastDescribeTest extends TestCase
     {
         parent::setUp();
 
+        // Часы прибиты: фикстуры считают моменты от «сейчас» (событие через два
+        // дня, перенос на 10:00 того же дня), и при утреннем прогоне пост
+        // оказывался ПОЗЖЕ своего события — тест падал не из-за кода, а из-за
+        // часа, в который его запустили.
+        Carbon::setTestNow(Carbon::parse('2026-09-15 16:00:00', 'UTC'));
+
         Role::findOrCreate('superadmin', 'web');
         $user = User::factory()->create();
         $user->assignRole('superadmin');
         Sanctum::actingAs($user);
+    }
+
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+        parent::tearDown();
     }
 
     public function test_describe_registers_request_with_hint(): void

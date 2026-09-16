@@ -2013,12 +2013,23 @@ class TelegramChatBroadcastService
             }
             $summary['days']++;
 
-            foreach ($slots as $hour) {
+            foreach ($slots as $slotIndex => $hour) {
                 $publishAt = $day->copy()->setTime($hour, 0, 0);
 
                 // Слот, который уже прошёл, не заполняем: пост встал бы
                 // просроченным и тут же потерял бы день.
                 if ($publishAt->lt($now)) {
+                    continue;
+                }
+
+                // Поздний слот дня решается не за две недели, а накануне —
+                // если канал так настроен. Смысл в том, что половина афиши
+                // объявляется поздно (медиана форы анонса — трое суток), и
+                // слот, занятый заранее, закрыт для всего, что появится после.
+                // Первый слот дня остаётся плановым: неделю надо видеть.
+                $lead = $broadcast->fill_lead_days;
+                if ($slotIndex > 0 && $lead !== null
+                    && $publishAt->gt($now->copy()->addDays($lead))) {
                     continue;
                 }
                 if (in_array($this->slotKey($publishAt), $taken, true)) {

@@ -407,6 +407,101 @@ class BroadcastSlotsTest extends TestCase
         $this->assertNull($scheduled, 'пост за два часа до начала ленте не нужен');
     }
 
+    /**
+     * Поздний слот держится свободным до своей границы.
+     *
+     * Половина афиши объявляется поздно (медиана форы анонса — трое суток), и
+     * слот, занятый за две недели, закрыт для всего, что появится потом.
+     * Первый слот дня при этом остаётся плановым: неделю надо видеть заранее.
+     */
+    public function test_late_slot_waits_for_its_own_lead(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC')); // 06:00 МСК
+
+        [$broadcast] = $this->channelWithEvents(12);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10, 19],
+            'horizon_days' => 5,
+            'fill_lead_days' => 1,
+        ]);
+        $broadcast->save();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $byDay = [];
+        foreach (TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereNotNull('publish_at')
+            ->pluck('publish_at') as $at) {
+            $msk = Carbon::parse($at)->setTimezone('Europe/Moscow');
+            $byDay[$msk->toDateString()][] = (int) $msk->format('H');
+        }
+        foreach ($byDay as &$hours) {
+            sort($hours);
+        }
+        unset($hours);
+
+        $this->assertSame(
+            [
+                '2026-09-15' => [10, 19],
+                '2026-09-16' => [10],
+                '2026-09-17' => [10],
+                '2026-09-18' => [10],
+                '2026-09-19' => [10],
+            ],
+            $byDay,
+            'утро собирается на весь горизонт, вечер — только в пределах своих суток',
+        );
+    }
+
+    /** Без настройки оба слота заполняются как раньше — на весь горизонт. */
+    public function test_without_the_setting_both_slots_fill_the_horizon(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+
+        [$broadcast] = $this->channelWithEvents(12);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10, 19],
+            'horizon_days' => 3,
+        ]);
+        $broadcast->save();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame(
+            [10, 10, 10, 19, 19, 19],
+            collect($this->publishHours($broadcast->id))->sort()->values()->all(),
+            'три дня по два слота',
+        );
+    }
+
+    /**
+     * Лента заполняется по расписанию, а не только по кнопке.
+     *
+     * Наполнитель звали ТОЛЬКО две кнопки админки, а единственный автомат
+     * (`broadcast:enqueue-due`) дня не назначает и выключается собственным
+     * капом на любой собранной ленте. То есть событие, объявленное в среду, в
+     * неделю попасть не могло вовсе.
+     */
+    public function test_scheduled_command_fills_free_slots(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+
+        [$broadcast] = $this->channelWithEvents(4);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10],
+            'horizon_days' => 3,
+        ]);
+        $broadcast->save();
+
+        $this->artisan('broadcast:fill-feed')->assertExitCode(0);
+
+        $this->assertSame(3, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereNotNull('publish_at')
+            ->count(), 'три свободных слота горизонта закрыты без единого нажатия');
+    }
+
     private function channelWithEvents(int $count): array
     {
         $city = $this->insertCity();
