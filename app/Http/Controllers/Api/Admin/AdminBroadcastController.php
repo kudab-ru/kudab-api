@@ -1840,6 +1840,7 @@ class AdminBroadcastController extends Controller
             $item->caption = $this->venuePortraits->buildVenueCaption(
                 $venue,
                 $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now(),
+                (int) $item->id,
             );
             $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
             $item->save();

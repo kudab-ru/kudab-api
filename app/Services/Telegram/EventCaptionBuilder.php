@@ -210,14 +210,7 @@ final class EventCaptionBuilder
             return $base;
         }
 
-        $url = $base.'/events/'.$eventId;
-        if ($itemId === null) {
-            return $url;
-        }
-
-        $utm = (array) config('broadcast_digest.utm', []);
-
-        return $url.'?utm_source='.($utm['source'] ?? 'tg').'&utm_medium=post&utm_content=i'.$itemId;
+        return PostLink::utm($base.'/events/'.$eventId, PostLink::MEDIUM_EVENT, $itemId);
     }
 
     // ------------------------------------------------------------------

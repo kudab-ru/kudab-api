@@ -604,7 +604,7 @@ final class BroadcastDigestComposer
 
             // НЕ $head: этим именем выше назван заголовок поста, и повторное
             // использование затирало его названием последнего события.
-            $titleLink = '<b>'.$this->link($this->eventUrl((int) $row->id), (string) $row->title).'</b>';
+            $titleLink = '<b>'.$this->link($this->eventUrl((int) $row->id, $item?->id), (string) $row->title).'</b>';
             $facts = '<i>'.$this->escape(implode(' · ', $meta)).'</i>';
             $hook = $this->hook($row, $item);
 
@@ -979,14 +979,25 @@ final class BroadcastDigestComposer
             ? $base.'/afisha/'.$citySlug.'/'.$slug
             : $base.'/events';
 
-        $url .= '?utm_source='.($utm['source'] ?? 'tg').'&utm_medium='.($utm['medium'] ?? 'digest');
-
-        return $itemId === null ? $url : $url.'&utm_content=i'.$itemId;
+        // Подвал ведёт на лендинг и метку несёт с самого начала — через общий
+        // помощник, чтобы она не разошлась с метками на строках поста.
+        return $itemId === null
+            ? $url.'?utm_source='.($utm['source'] ?? 'tg').'&utm_medium='.($utm['medium'] ?? 'digest')
+            : PostLink::utm($url, (string) ($utm['medium'] ?? 'digest'), $itemId);
     }
 
-    private function eventUrl(int $id): string
+    /**
+     * Ссылка на карточку названного события — с меткой поста.
+     *
+     * Три ссылки подборки уходили голыми, и переходы по ним не считались
+     * вовсе: прибор видел только подвал. Метка у всех ссылок поста одна — мерим
+     * пост, а не то, по какой из его строк нажали.
+     */
+    private function eventUrl(int $id, ?int $itemId = null): string
     {
-        return rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/').'/events/'.$id;
+        $base = rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/');
+
+        return PostLink::utm($base.'/events/'.$id, PostLink::MEDIUM_DIGEST, $itemId);
     }
 
     private function link(string $href, string $label): string

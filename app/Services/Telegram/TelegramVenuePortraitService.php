@@ -178,13 +178,13 @@ class TelegramVenuePortraitService
                         'review_reviewer_telegram_id' => (int) $reviewerTelegramId,
                         'review_deadline_at' => $deadline,
                         'publish_at' => $publishAt->copy()->utc(),
-                    ]);
+                    ], captionAt: $publishAt);
                 }
             } elseif (! $dryRun) {
                 $this->persist($broadcast->id, $venue->id, $caption, $photoUrl, [
                     'status' => TelegramChatBroadcastItem::STATUS_PENDING,
                     'publish_at' => $publishAt->copy()->utc(),
-                ]);
+                ], captionAt: $publishAt);
             }
 
             $summary['enqueued']++;
@@ -379,7 +379,13 @@ class TelegramVenuePortraitService
      * Готовый текст поста: 🏛 имя + живая проза (tg_portrait) + «ближайшее тут»
      * (у живых площадок) / зов в афишу (у площадок без будущего).
      */
-    public function buildVenueCaption(Venue $venue, Carbon $now): string
+    /**
+     * @param  int|null  $itemId  запись очереди: её номер уходит в метку ссылок,
+     *                            и по нему считаются переходы с ЭТОГО поста.
+     *                            При первой сборке записи ещё нет — подпись
+     *                            пересобирается сразу после вставки.
+     */
+    public function buildVenueCaption(Venue $venue, Carbon $now, ?int $itemId = null): string
     {
         $name = $this->esc((string) $venue->name);
         $addr = $this->shortAddress($venue);
@@ -401,12 +407,18 @@ class TelegramVenuePortraitService
 
         $next = $this->nextEvent((int) $venue->id, $now);
         if ($next) {
-            $lines[] = '🎟 <b>Ближайшее:</b> <a href="'.self::SITE.'/events/'.$next->id.'">'.$this->esc((string) $next->title).'</a>';
+            $lines[] = '🎟 <b>Ближайшее:</b> <a href="'
+                .PostLink::utm(self::SITE.'/events/'.$next->id, PostLink::MEDIUM_VENUE, $itemId)
+                .'">'.$this->esc((string) $next->title).'</a>';
             $lines[] = '🗓 '.$this->ruDate($next->start_time);
             $lines[] = '';
-            $lines[] = '📅 <a href="'.self::SITE.'/venues/'.$venue->id.'">Все события площадки</a>';
+            $lines[] = '📅 <a href="'
+                .PostLink::utm(self::SITE.'/venues/'.$venue->id, PostLink::MEDIUM_VENUE, $itemId)
+                .'">Все события площадки</a>';
         } else {
-            $lines[] = '📅 <a href="'.self::SITE.'/venues/'.$venue->id.'">Афиша площадки</a>';
+            $lines[] = '📅 <a href="'
+                .PostLink::utm(self::SITE.'/venues/'.$venue->id, PostLink::MEDIUM_VENUE, $itemId)
+                .'">Афиша площадки</a>';
         }
 
         return implode("\n", $lines);
@@ -515,8 +527,14 @@ class TelegramVenuePortraitService
     /**
      * @param  array<string, mixed>  $attrs
      */
-    private function persist(int $broadcastId, int $venueId, string $caption, ?string $photoUrl, array $attrs): TelegramChatBroadcastItem
-    {
+    private function persist(
+        int $broadcastId,
+        int $venueId,
+        string $caption,
+        ?string $photoUrl,
+        array $attrs,
+        ?Carbon $captionAt = null,
+    ): TelegramChatBroadcastItem {
         $item = new TelegramChatBroadcastItem;
         $item->broadcast_id = $broadcastId;
         $item->kind = TelegramChatBroadcastItem::KIND_VENUE;
@@ -527,6 +545,17 @@ class TelegramVenuePortraitService
             $item->{$k} = $v;
         }
         $item->save();
+
+        // Метка в ссылках несёт НОМЕР ЗАПИСИ, а его до вставки не существует.
+        // Поэтому подпись пересобирается сразу после save: иначе портрет
+        // уходил бы с голыми ссылками и не считался бы вовсе.
+        if ($captionAt !== null) {
+            $venue = Venue::query()->find($venueId);
+            if ($venue) {
+                $item->caption = $this->buildVenueCaption($venue, $captionAt, (int) $item->id);
+                $item->save();
+            }
+        }
 
         return $item;
     }
@@ -637,6 +666,6 @@ class TelegramVenuePortraitService
             ];
         }
 
-        return $this->persist($broadcastId, $venue->id, $caption, $photo, $attrs);
+        return $this->persist($broadcastId, $venue->id, $caption, $photo, $attrs, captionAt: $publishAt);
     }
 }

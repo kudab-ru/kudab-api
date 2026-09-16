@@ -2177,7 +2177,11 @@ class TelegramChatBroadcastService
                         // от которого считается «сегодня», у него нет.
                         $venue = $fromWaiting->venue_id ? Venue::query()->find($fromWaiting->venue_id) : null;
                         if ($venue && $fromWaiting->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
-                            $fromWaiting->caption = $this->venuePortraitService->buildVenueCaption($venue, $publishAt);
+                            $fromWaiting->caption = $this->venuePortraitService->buildVenueCaption(
+                                $venue,
+                                $publishAt,
+                                (int) $fromWaiting->id,
+                            );
                             $fromWaiting->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
                             $fromWaiting->save();
                         }
