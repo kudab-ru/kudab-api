@@ -633,6 +633,173 @@ class BroadcastSlotsTest extends TestCase
             'слот позже события не занимаем — запись ждёт подходящего');
     }
 
+    /**
+     * Мёртвая запись не держит место в очереди ожидания.
+     *
+     * Просроченность записи без дня замечала ТОЛЬКО доставка — и только если
+     * запись доберётся до головы очереди. У канала с заполненной лентой она
+     * туда не добирается никогда, а ячейку `feed_limit` держит.
+     */
+    public function test_sweeper_drops_waiting_items_whose_event_started(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 12:00:00', 'UTC'));
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+
+        $past = $this->eventAt($city->id, 'Начавшийся концерт', Carbon::parse('2026-09-15 11:00', 'UTC'));
+        $ahead = $this->eventAt($city->id, 'Завтрашний концерт', Carbon::parse('2026-09-17 18:00', 'UTC'));
+
+        $dead = $this->makeItem($broadcast->id, $past->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $alive = $this->makeItem($broadcast->id, $ahead->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $this->artisan('broadcast:sweep-queue')->assertExitCode(0);
+
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $dead->fresh()->status);
+        $this->assertStringContainsString('ждала свободного дня', (string) $dead->fresh()->error_message,
+            'причина обязана быть названа: снятая запись видна в ленте');
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $alive->fresh()->status,
+            'событие впереди — запись ждёт дальше');
+    }
+
+    /** Запись с назначенным днём подметальщик не трогает: за неё отвечает доставка. */
+    public function test_sweeper_leaves_scheduled_posts_alone(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 12:00:00', 'UTC'));
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $past = $this->eventAt($city->id, 'Начавшийся концерт', Carbon::parse('2026-09-15 11:00', 'UTC'));
+
+        $item = $this->makeItem($broadcast->id, $past->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = Carbon::parse('2026-09-15 07:00', 'UTC');
+        $item->save();
+
+        $this->artisan('broadcast:sweep-queue')->assertExitCode(0);
+
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $item->fresh()->status);
+    }
+
+    /**
+     * Два поста одной темы подряд — это одна новость дважды.
+     *
+     * Перекоса по темам в ленте нет (доля театра совпадает с долей в пуле),
+     * есть слипание: шесть пар соседей одной темы на двадцать семь записей.
+     */
+    public function test_neighbour_slots_do_not_repeat_the_theme(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10],
+            'horizon_days' => 2,
+        ]);
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $music = $this->interest('music-slots');
+        $theatre = $this->interest('theatre-slots');
+
+        // Два концерта с ПОЛНЫМИ карточками (скорер предпочтёт их) и один
+        // спектакль поскромнее: без правила оба слота заняли бы концерты.
+        // Спектакль стоит ПОЗЖЕ второго концерта: при равных баллах отбор
+        // берёт самое раннее начало, значит без правила второй слот достался
+        // бы концерту — именно это и проверяем.
+        $a = $this->eventAt($city->id, 'Концерт А', Carbon::parse('2026-09-16 16:00', 'UTC'), rich: true);
+        $b = $this->eventAt($city->id, 'Концерт Б', Carbon::parse('2026-09-17 15:00', 'UTC'), rich: true);
+        $c = $this->eventAt($city->id, 'Спектакль', Carbon::parse('2026-09-17 16:00', 'UTC'), rich: true);
+
+        $this->tag($a->id, $music);
+        $this->tag($b->id, $music);
+        $this->tag($c->id, $theatre);
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $themes = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereNotNull('publish_at')
+            ->orderBy('publish_at')
+            ->pluck('event_id')
+            ->map(fn ($id) => (int) DB::table('event_interest')->where('event_id', $id)
+                ->where('rank', 0)->orderBy('interest_id')->value('interest_id'))
+            ->all();
+
+        $this->assertCount(2, $themes, 'оба слота заняты');
+        $this->assertNotSame($themes[0], $themes[1], 'соседние слоты — разные темы');
+    }
+
+    /**
+     * Правило мягкое: другой темы нет — слот всё равно занят.
+     *
+     * Дыра в ленте хуже повтора, и молчать об этом нельзя — повтор уходит в лог.
+     */
+    public function test_theme_rule_gives_way_rather_than_leaving_a_hole(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10],
+            'horizon_days' => 2,
+        ]);
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $music = $this->interest('music-only');
+
+        foreach (['Концерт А', 'Концерт Б'] as $i => $title) {
+            $e = $this->eventAt($city->id, $title, Carbon::parse('2026-09-1'.(6 + $i).' 16:00', 'UTC'), rich: true);
+            $this->tag($e->id, $music);
+        }
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame(2, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereNotNull('publish_at')
+            ->count(), 'оба слота заняты, хотя тема одна на всех');
+    }
+
+    private function eventAt(int $cityId, string $title, Carbon $start, bool $rich = false): Event
+    {
+        $community = Community::create(['name' => $title.' орг', 'city_id' => $cityId]);
+
+        $event = new Event;
+        $event->community_id = $community->id;
+        $event->title = $title;
+        $event->status = 'active';
+        $event->city_id = $cityId;
+        $event->start_time = $start;
+        $event->start_date = $start->toDateString();
+        if ($rich) {
+            $event->description = str_repeat('Подробное описание вечера. ', 12);
+            $event->tickets_status = 'available';
+            $event->time_precision = 'datetime';
+        }
+        $event->save();
+
+        return $event;
+    }
+
+    private function interest(string $slug): int
+    {
+        return (int) DB::table('interests')->insertGetId([
+            'name' => $slug, 'slug' => $slug, 'created_at' => now(), 'updated_at' => now(),
+        ]);
+    }
+
+    private function tag(int $eventId, int $interestId): void
+    {
+        DB::table('event_interest')->insert([
+            'event_id' => $eventId,
+            'interest_id' => $interestId,
+            'rank' => 0,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
     private function actAsSuperadmin(): void
     {
         \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');

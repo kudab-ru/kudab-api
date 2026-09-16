@@ -1426,6 +1426,7 @@ class TelegramChatBroadcastService
         array $excludeEventIds = [],
         ?Carbon $notBefore = null,
         ?int $repeatCap = null,
+        ?int $avoidInterestId = null,
     ): ?int {
         // Навсегда исключаем только то, что уже прозвучало или стоит в ленте.
         // (error — НЕ включаем: отправку можно ретраить.)
@@ -1497,6 +1498,19 @@ class TelegramChatBroadcastService
 
         if (! empty($excludeEventIds)) {
             $query->whereNotIn('id', array_values(array_unique(array_map('intval', $excludeEventIds))));
+        }
+
+        // Тема соседнего слота. Сравниваем по ПЕРВИЧНОМУ интересу (rank = 0):
+        // вторичные теги стоят у события пачками, и по ним «та же тема»
+        // совпало бы почти у всего.
+        if ($avoidInterestId !== null) {
+            $query->whereNotExists(function ($q) use ($avoidInterestId) {
+                $q->selectRaw('1')
+                    ->from('event_interest as ei_theme')
+                    ->whereColumn('ei_theme.event_id', 'events.id')
+                    ->where('ei_theme.rank', 0)
+                    ->where('ei_theme.interest_id', $avoidInterestId);
+            });
         }
 
         // Горизонт — от ДНЯ СЛОТА, а не от сегодня. Считая верхнюю границу от
@@ -1959,7 +1973,11 @@ class TelegramChatBroadcastService
 
         // Занятые СЛОТЫ, а не дни: при двух слотах на один день встают два
         // поста, и считать занятость по дате больше нельзя.
-        $taken = TelegramChatBroadcastItem::query()
+        // Карта «слот → событие», а не просто список занятых ключей: сосед по
+        // ленте нужен не только чтобы не занять его место, но и чтобы знать его
+        // тему — два концерта подряд читаются как одна и та же новость.
+        $taken = [];
+        foreach (TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
             ->whereIn('status', [
                 TelegramChatBroadcastItem::STATUS_PENDING,
@@ -1969,9 +1987,26 @@ class TelegramChatBroadcastService
                 TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
             ])
             ->whereNotNull('publish_at')
-            ->pluck('publish_at')
-            ->map(fn ($d) => $this->slotKey(Carbon::parse($d)))
-            ->all();
+            ->get(['publish_at', 'event_id']) as $row) {
+            $taken[$this->slotKey(Carbon::parse($row->publish_at))] = $row->event_id !== null
+                ? (int) $row->event_id
+                : null;
+        }
+
+        // Тема последнего поста ПЕРЕД горизонтом: первый слот недели тоже чей-то
+        // сосед, и без этого правило начинало действовать только со второго.
+        $prevTheme = $this->primaryInterestId((int) (TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
+            ->whereNotNull('event_id')
+            ->where(function ($w) use ($now) {
+                $w->where('posted_at', '<=', $now)
+                    ->orWhere(function ($x) use ($now) {
+                        $x->whereNotNull('publish_at')->where('publish_at', '<=', $now);
+                    });
+            })
+            ->orderByRaw('COALESCE(posted_at, publish_at) DESC')
+            ->value('event_id') ?? 0));
 
         // Записи, ждущие свободного дня, — ПЕРВЫМИ в освободившиеся слоты.
         // Иначе очередь ожидания не разбирается никогда: наполнитель каждый
@@ -2026,7 +2061,11 @@ class TelegramChatBroadcastService
                     && $publishAt->gt($now->copy()->addDays($lead))) {
                     continue;
                 }
-                if (in_array($this->slotKey($publishAt), $taken, true)) {
+                $slotKey = $this->slotKey($publishAt);
+                if (array_key_exists($slotKey, $taken)) {
+                    // Сосед следующего слота — тот, кто стоит здесь.
+                    $prevTheme = $this->primaryInterestId($taken[$slotKey]);
+
                     continue;
                 }
 
@@ -2112,6 +2151,7 @@ class TelegramChatBroadcastService
                         $exclude = array_merge($exclude, $this->linkedEventIds((int) $fromWaiting->id));
                     }
 
+                    $prevTheme = $this->primaryInterestId($fromWaiting->event_id);
                     $summary['filled']++;
 
                     continue;
@@ -2119,19 +2159,50 @@ class TelegramChatBroadcastService
 
                 // Событие не должно начаться раньше публикации: день в день
                 // можно, но не «пост в 10:00 про концерт в 08:00».
+                //
+                // И не та же тема, что у соседнего слота: два концерта подряд
+                // читаются как одна новость, даже если события разные. Замер
+                // 2026-09-16 по ленте боевого канала: шесть пар соседей с
+                // одной темой из двадцати семи записей.
                 $eventId = $this->pickBestEventIdForChat(
                     $chat,
                     $broadcast->id,
                     $exclude,
                     $publishAt->copy()->utc(),
                     $this->venueRepeatCap($broadcast),
+                    $prevTheme,
                 );
+
+                // Правило мягкое: если из-за него слот остаётся пустым, лучше
+                // повтор темы, чем дыра. Но молчать об этом нельзя — мягкий
+                // слой, который при исчерпании тихо возвращает неотфильтрованный
+                // пул, невозможно ни заметить, ни измерить.
+                if (! $eventId && $prevTheme !== null) {
+                    $eventId = $this->pickBestEventIdForChat(
+                        $chat,
+                        $broadcast->id,
+                        $exclude,
+                        $publishAt->copy()->utc(),
+                        $this->venueRepeatCap($broadcast),
+                    );
+
+                    if ($eventId) {
+                        Log::info('broadcast.feed.theme_repeat', [
+                            'broadcast_id' => $broadcast->id,
+                            'slot' => $publishAt->toIso8601String(),
+                            'interest_id' => $prevTheme,
+                            'why' => 'другой темы на этот слот не нашлось',
+                        ]);
+                    }
+                }
+
                 if (! $eventId) {
                     $summary['no_candidate']++;
 
                     continue;
                 }
                 $exclude[] = $eventId;
+                $prevTheme = $this->primaryInterestId($eventId);
 
                 // enqueue() возвращает СУЩЕСТВУЮЩУЮ запись, если событие когда-то
                 // уже ставили: на (broadcast_id, event_id) стоит UNIQUE. Такая
@@ -2157,6 +2228,39 @@ class TelegramChatBroadcastService
         }
 
         return $summary;
+    }
+
+    /**
+     * Первичная тема события — та же, по которой собирается подборка недели.
+     *
+     * Кэш на время прогона: наполнитель спрашивает тему у каждого соседа и у
+     * каждого кандидата, а горизонт — две недели.
+     *
+     * У 4.8% событий первичных интересов несколько (замер 2026-09-15). Берём
+     * наименьший id: нужна не «правильная» тема, а устойчивое сравнение
+     * соседей между собой.
+     *
+     * @var array<int, int|null>
+     */
+    private array $primaryInterestCache = [];
+
+    private function primaryInterestId(?int $eventId): ?int
+    {
+        if (! $eventId) {
+            return null;
+        }
+
+        if (array_key_exists($eventId, $this->primaryInterestCache)) {
+            return $this->primaryInterestCache[$eventId];
+        }
+
+        $id = DB::table('event_interest')
+            ->where('event_id', $eventId)
+            ->where('rank', 0)
+            ->orderBy('interest_id')
+            ->value('interest_id');
+
+        return $this->primaryInterestCache[$eventId] = $id !== null ? (int) $id : null;
     }
 
     /**
