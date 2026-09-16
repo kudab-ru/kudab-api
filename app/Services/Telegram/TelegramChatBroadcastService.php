@@ -1099,6 +1099,56 @@ class TelegramChatBroadcastService
      *
      * @return bool false — на этом тике отправлять нечего: запись снята или ждёт текста
      */
+    /**
+     * Собрать подборку ЗАРАНЕЕ — за сутки до слота, а не в минуту отправки.
+     *
+     * ЗАЧЕМ. Раньше состав и текст появлялись внутри доставки, и между
+     * «состав зафиксирован» и «пост в канале» проходили секунды: замер по
+     * отправленным подборкам — 6 секунд у записи 214 и 28 у 215. Посмотреть на
+     * состав было некогда, поменять в нём позицию — тем более. Всё, что для
+     * этого нужно, у доставки уже есть; не хватало только момента времени.
+     *
+     * ЧТО ДЕЛАЕТ. Ровно первую половину prepareDigest: если состава нет —
+     * собирает его, и если канал хочет текст ИИ — заказывает. Пересборку
+     * (recompose) не трогает намеренно: она обязана случиться перед отправкой,
+     * потому что пересчитывает шапку с диапазоном дат, цены и время. То есть
+     * заранее замораживается СОСТАВ, а не буквы.
+     *
+     * ЧЕГО НЕ ДЕЛАЕТ. Не отправляет и не приближает отправку: planned_at
+     * трогает только заявка на текст, и её окно — минуты, а не сутки.
+     *
+     * @return string что случилось: composed | text_requested | ready | failed
+     */
+    public function prepareDigestAhead(
+        TelegramChatBroadcastItem $item,
+        TelegramChatBroadcast $broadcast,
+        Carbon $now,
+    ): string {
+        if ($this->digestRosterSize($item) > 0 && $item->digestTheme() !== null) {
+            // Состав уже стоит. Текст мог не поехать с первого раза — канал
+            // включили после сборки, или заявка не дошла; тогда просим сейчас.
+            if ($this->digestWantsText($item, $broadcast) && $item->text_requested_at === null) {
+                $this->requestDigestText($item, $now);
+
+                return 'text_requested';
+            }
+
+            return 'ready';
+        }
+
+        if (! $this->composeDigest($item, $broadcast, $now)) {
+            return 'failed';
+        }
+
+        if ($this->digestWantsText($item, $broadcast)) {
+            $this->requestDigestText($item, $now);
+
+            return 'text_requested';
+        }
+
+        return 'composed';
+    }
+
     private function prepareDigest(
         TelegramChatBroadcastItem $item,
         TelegramChatBroadcast $broadcast,

@@ -1183,6 +1183,7 @@ class AdminBroadcastController extends Controller
             return response()->json(['ok' => false, 'error' => 'Ни одна тема не набрала состава — собирать нечего.'], 422);
         }
 
+        $this->rememberManualCaption($item, 'текст собран заново');
         $this->broadcasts->applyDigestDraft($item, $draft);
 
         return response()->json(['data' => $this->itemPayload($item->fresh(), null, null)]);
@@ -1203,6 +1204,40 @@ class AdminBroadcastController extends Controller
 
     /** Сколько версий поста храним: история нужна для отмены, а не для архива. */
     private const REVISIONS_KEPT = 20;
+
+    /**
+     * Сохранить ручной текст, который сейчас будет затёрт машиной.
+     *
+     * Две кнопки подборки — «собрать заново» и «написать сейчас» — безусловно
+     * ставят caption от машины: первая через applyDigestDraft, вторая через
+     * holdDigestForText, которая обнуляет подпись вовсе. Обе проверяли только
+     * kind и posted_at, и обе молча уничтожали час ручной работы, не оставляя
+     * следа НИГДЕ: saveRevision звали ровно два места — правка карточки и
+     * откат к версии.
+     *
+     * Отказывать нельзя: человек, нажавший «собрать заново», именно этого и
+     * хочет. Поэтому снимок, а не запрет — текст остаётся в истории, и его
+     * видно там же, где остальные версии, кнопкой «вернуть».
+     *
+     * Только manual и только непустое: шаблонная подпись пересобирается из
+     * события в любой момент, хранить её версии — значит забить историю тем,
+     * что и так воспроизводится.
+     */
+    private function rememberManualCaption(TelegramChatBroadcastItem $item, string $reason): void
+    {
+        if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            return;
+        }
+        if (trim((string) $item->caption) === '') {
+            return;
+        }
+
+        $this->saveRevision($item, [$reason], [
+            'caption' => $item->caption,
+            'caption_source' => $item->caption_source,
+            'photo_urls' => $item->photo_urls,
+        ]);
+    }
 
     /**
      * Запомнить состояние поста ДО правки.
@@ -2241,6 +2276,11 @@ class AdminBroadcastController extends Controller
                 ], 422);
             }
 
+            // Снимок ДО applyDigestDraft, а не только перед придержкой ниже:
+            // он ставит caption_source='template', и holdDigestForText уже
+            // ничего не нашёл бы. Второй вызов там после этого — пустышка,
+            // ручной текст к тому моменту уже в истории.
+            $this->rememberManualCaption($item, 'заказан текст у ИИ');
             $this->broadcasts->applyDigestDraft($item, $draft);
             $item->refresh();
         }
@@ -2263,6 +2303,8 @@ class AdminBroadcastController extends Controller
      */
     private function holdDigestForText(TelegramChatBroadcastItem $item): void
     {
+        $this->rememberManualCaption($item, 'заказан текст у ИИ');
+
         $item->caption = null;
         $item->caption_source = null;
         $item->text_requested_at = Carbon::now();
