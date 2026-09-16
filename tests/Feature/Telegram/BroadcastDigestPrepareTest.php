@@ -409,6 +409,82 @@ class BroadcastDigestPrepareTest extends TestCase
         ])->assertStatus(409);
     }
 
+    /**
+     * Провал пересборки откатывает ВСЁ.
+     *
+     * Событие из состава снимают с публикации, пока панель открыта. Состав
+     * после этого не собирается, и замена обязана не оставить следов: раньше
+     * `return null` из замыкания транзакции Laravel считал нормальным выходом
+     * и коммитил подменённую связь под ответом «подборка осталась как была».
+     */
+    public function test_failed_recompose_rolls_everything_back(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+
+        DB::table('events')->where('id', $named[0]['id'])->update(['deleted_at' => now()]);
+
+        $before = DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)->orderBy('event_id')->pluck('event_id')->all();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[1]['id'], 'in' => $candidate,
+        ])->assertStatus(409);
+
+        $this->assertSame($before, DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)->orderBy('event_id')->pluck('event_id')->all(),
+            'состав остался как был — иначе ответ врёт');
+    }
+
+    /** Закреплённый пост одной кнопкой не снимаем: закрепление — решение человека. */
+    public function test_swap_refuses_to_drop_a_pinned_post(): void
+    {
+        [$item, $named] = $this->composedDigestWithSpare();
+
+        $spare = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->json('data.candidates.0.id');
+
+        $post = new TelegramChatBroadcastItem;
+        $post->broadcast_id = $item->broadcast_id;
+        $post->kind = TelegramChatBroadcastItem::KIND_EVENT;
+        $post->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $post->event_id = $spare;
+        $post->publish_at = Carbon::now()->addDays(2)->setTime(10, 0);
+        $post->is_pinned = true;
+        $post->save();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[1]['id'], 'in' => $spare, 'swap' => true,
+        ])->assertStatus(409);
+
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $post->fresh()->status);
+    }
+
+    /** Отказ от ПОДБОРКИ остужает все три названных события, а не ноль. */
+    public function test_rejected_digest_cools_down_the_events_it_named(): void
+    {
+        [$item] = $this->composedDigestWithSpare();
+
+        $rows = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->json('data.candidates');
+        $victim = (int) $rows[0]['id'];
+
+        // Другая подборка того же канала, названная этим событием, отклонена.
+        $other = new TelegramChatBroadcastItem;
+        $other->broadcast_id = $item->broadcast_id;
+        $other->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $other->status = TelegramChatBroadcastItem::STATUS_REJECTED;
+        $other->save();
+        DB::table('telegram.chat_broadcast_item_events')->insert([
+            'item_id' => $other->id, 'event_id' => $victim, 'position' => 1, 'created_at' => now(),
+        ]);
+
+        $after = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->json('data.candidates');
+
+        $this->assertNotContains($victim, array_column($after, 'id'),
+            'у подборки event_id пуст — остывание обязано читаться связью');
+    }
+
     /** @return array{0: TelegramChatBroadcastItem, 1: array<int, array<string, mixed>>, 2: int} */
     private function composedDigestWithSpare(): array
     {

@@ -440,6 +440,10 @@ class BroadcastSlotsTest extends TestCase
             sort($hours);
         }
         unset($hours);
+        // По дням — иначе сравнение зависит от порядка строк, который Postgres
+        // не обещает: запрос выше без ORDER BY, и любая правка, задевающая
+        // физический порядок записей, роняла тест на идентичных данных.
+        ksort($byDay);
 
         $this->assertSame(
             [

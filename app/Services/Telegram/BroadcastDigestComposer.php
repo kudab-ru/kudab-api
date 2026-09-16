@@ -13,8 +13,9 @@ use Illuminate\Support\Facades\DB;
 /**
  * Собрать подборку недели: тему, состав и текст.
  *
- * КОГДА. Перед самой отправкой, а не при постановке. Подборка, собранная за
- * неделю, показывает пятую часть недели: в следующей неделе событий вчетверо
+ * КОГДА. Состав — за сутки до слота (broadcast:prepare-digests), подпись —
+ * перед самой отправкой. Не при постановке брони: подборка, собранная за
+ * неделю, показывает пятую часть недели — в следующей неделе событий вчетверо
  * меньше, чем в текущей (замер в docs/broadcast-admin/CADENCE.md).
  *
  * ЧТО ПОКАЗЫВАЕТ. Три события поимённо, остальное числом. Это не приём
@@ -265,12 +266,13 @@ final class BroadcastDigestComposer
      * с оставшимися строками. Выбор всё равно за ним: иногда два спектакля в
      * один день лучше, чем один хороший и один никакой.
      *
-     * @return array{theme_slug: string, named: list<object>, rows: list<array<string, mixed>>}|null
+     * @return array{theme_slug: string, named: list<object>, rows: list<array<string, mixed>>, in_feed: list<array<string, mixed>>}|null
      */
     public function candidatesForItem(
         TelegramChatBroadcastItem $item,
         TelegramChatBroadcast $broadcast,
         Carbon $publishAt,
+        ?int $replacing = null,
     ): ?array {
         $slug = $item->digestTheme();
         $cityId = $broadcast->chat?->city_id;
@@ -297,9 +299,16 @@ final class BroadcastDigestComposer
 
         // Площадки и дни занятых строк — с НОМЕРОМ строки: «та же площадка, что
         // во второй» полезнее, чем «площадка занята».
+        // Заменяемая строка в споре не участвует: она уходит. Без этого самые
+        // естественные замены — другой спектакль того же театра вместо этого —
+        // помечались ложным «та же площадка, что в строке 2» при замене как раз
+        // второй строки и утопали вниз списка.
         $venueAt = [];
         $dayAt = [];
         foreach ($named as $i => $row) {
+            if ($replacing !== null && (int) $row->id === $replacing) {
+                continue;
+            }
             if ($row->venue_id !== null) {
                 $venueAt[(int) $row->venue_id] ??= $i + 1;
             }
@@ -362,11 +371,10 @@ final class BroadcastDigestComposer
             return $b['description_length'] <=> $a['description_length'];
         });
 
-        // Второй список: события темы, которые канал УЖЕ показывает отдельным
-        // постом. В обычные кандидаты они не попадают и попадать не должны —
-        // назвать в подборке то, что выйдет своим постом, значит сделать
-        // дубль. Но обмен осмыслен: событие переезжает в подборку, а его пост
-        // снимается. Поэтому отдельный список, а не общая куча.
+        // Второй список: события темы, которые канал УЖЕ показывает своим
+        // постом. Назвать такое в подборке — дубль, поэтому в обычные
+        // кандидаты они не попадают. Но обмен осмыслен: событие переезжает в
+        // подборку, а пост снимается. Цена разная — значит и список отдельный.
         $withShown = $this->poolForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $item->id, true);
         $fresh = array_map(static fn (array $r) => $r['id'], $out);
 
@@ -384,6 +392,15 @@ final class BroadcastDigestComposer
                 ->where('i.broadcast_id', $broadcast->id)
                 ->where('l.event_id', $id)
                 ->whereNull('i.posted_at')
+                // Только обычный пост: снять ради одной строки чужую подборку
+                // значило бы потерять ещё два события заодно.
+                ->where('i.kind', TelegramChatBroadcastItem::KIND_EVENT)
+                // И только не взятый на отправку: у заклеймленного подпись уже
+                // уехала боту, и обмен выпустил бы событие дважды.
+                ->where(function ($q) {
+                    $q->whereNull('i.claimed_at')
+                        ->orWhere('i.claimed_at', '<', Carbon::now()->subSeconds(TelegramChatBroadcastService::CLAIM_LEASE_SECONDS));
+                })
                 ->whereIn('i.status', [
                     TelegramChatBroadcastItem::STATUS_PENDING,
                     TelegramChatBroadcastItem::STATUS_PLANNED,
@@ -594,13 +611,6 @@ final class BroadcastDigestComposer
     }
 
     /**
-     * Вычесть то, что канал уже показал или вот-вот покажет.
-     *
-     * По ТРЁМ ключам: сам идентификатор, группа повторов и нормализованный
-     * заголовок. Одного мало — то же событие приезжает из разных источников
-     * разными строками, и подборка стала бы оглавлением уже прочитанного.
-     */
-    /**
      * Событие, от которого канал недавно отказался, рубрика не предлагает.
      *
      * Тот же срок и тот же признак, что у ленты: запись со статусом rejected,
@@ -615,22 +625,48 @@ final class BroadcastDigestComposer
     ): \Illuminate\Support\Collection {
         $since = Carbon::now()->subDays(TelegramChatBroadcastService::REJECTED_COOLDOWN_DAYS);
 
-        $cold = DB::table('telegram.chat_broadcast_items')
-            ->where('broadcast_id', $broadcast->id)
-            ->where('status', TelegramChatBroadcastItem::STATUS_REJECTED)
-            ->where('updated_at', '>=', $since)
-            ->whereNotNull('event_id')
-            ->pluck('event_id')
-            ->map(fn ($id) => (int) $id)
-            ->all();
+        // Через СВЯЗЬ, а не по колонке items.event_id: у подборки колонка пуста
+        // по построению, и отказ от подборки не остужал бы ни одно из трёх
+        // названных ею событий. Тот же джойн, что у rejectAlreadyShown.
+        $cold = DB::table('telegram.chat_broadcast_item_events as l')
+            ->join('telegram.chat_broadcast_items as i', 'i.id', '=', 'l.item_id')
+            ->join('events as e', 'e.id', '=', 'l.event_id')
+            ->where('i.broadcast_id', $broadcast->id)
+            ->where('i.status', TelegramChatBroadcastItem::STATUS_REJECTED)
+            ->where('i.updated_at', '>=', $since)
+            ->get(['e.id', 'e.event_group_id', 'e.title']);
 
-        if ($cold === []) {
+        if ($cold->isEmpty()) {
             return $rows;
         }
 
-        return $rows->reject(fn ($r) => in_array((int) $r->id, $cold, true))->values();
+        // И по трём ключам, а не по одному id. Пул схлопывает повторы, но
+        // ПОСЛЕ этой отсечки: выброшенный спектакль вернулся бы следующей
+        // датой того же названия сразу же, и кнопка «больше не предлагать»
+        // выглядела бы сломанной.
+        $ids = $cold->pluck('id')->map(fn ($v) => (int) $v)->all();
+        $groups = $cold->pluck('event_group_id')->filter()->map(fn ($v) => (int) $v)->all();
+        $titles = $cold->pluck('title')->map(fn ($t) => $this->titleKey((string) $t))->filter()->all();
+
+        return $rows->reject(function ($r) use ($ids, $groups, $titles) {
+            if (in_array((int) $r->id, $ids, true)) {
+                return true;
+            }
+            if ($r->event_group_id !== null && in_array((int) $r->event_group_id, $groups, true)) {
+                return true;
+            }
+
+            return in_array($this->titleKey((string) $r->title), $titles, true);
+        })->values();
     }
 
+    /**
+     * Вычесть то, что канал уже показал или вот-вот покажет.
+     *
+     * По ТРЁМ ключам: сам идентификатор, группа повторов и нормализованный
+     * заголовок. Одного мало — то же событие приезжает из разных источников
+     * разными строками, и подборка стала бы оглавлением уже прочитанного.
+     */
     private function rejectAlreadyShown(
         TelegramChatBroadcast $broadcast,
         \Illuminate\Support\Collection $rows,

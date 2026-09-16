@@ -720,11 +720,20 @@ class TelegramChatBroadcastService
                 'telegram_chat_id' => (int) $chat->telegram_chat_id,
             ];
             if ($hasReadyCaption) {
-                // Подборка собирается ЗДЕСЬ, перед самой отправкой. Собранная
-                // при постановке, она показала бы пятую часть недели: на момент
-                // брони событий следующей недели вчетверо меньше, чем будет.
+                // Подпись подборки пересобирается ЗДЕСЬ, перед самой
+                // отправкой, — даже если она уже собрана. Состав к этому
+                // моменту заморожен (его ставит prepare-digests за сутки), а
+                // вот шапка с диапазоном дат, цены и время обязаны быть
+                // свежими: собранные накануне, они выходят в канал устаревшими.
+                //
+                // Раньше условием была ПУСТАЯ подпись, и это работало, только
+                // пока подборка собиралась в последнюю секунду. Как только
+                // сборку унесли на сутки вперёд, непустая подпись стала
+                // выключать последнюю проверку перед выходом.
+                //
+                // Ручной текст не трогаем: его пересборка и есть потеря.
                 if ($item->kind === TelegramChatBroadcastItem::KIND_DIGEST
-                    && trim((string) $item->caption) === '') {
+                    && $item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
                     if (! $this->prepareDigest($item, $broadcast, $now)) {
                         continue;
                     }
@@ -1073,13 +1082,69 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * Наполнить бронь подборки: тема, состав, текст.
+     * Собрать подборку ЗАРАНЕЕ — за сутки до слота, а не в минуту отправки.
      *
-     * Возвращает false, если наполнять нечем — тогда запись снята, и цикл
-     * доставки должен идти дальше. Пустую подборку отправлять нельзя: бот
-     * положит задачу без текста в bad_task и не пометит её никак, а защита
-     * «одна запись в полёте» задержит из-за неё весь канал.
+     * Замораживается СОСТАВ, а не буквы: пересборку подписи трогать нельзя, она
+     * обязана случиться перед отправкой — там пересчитываются шапка с
+     * диапазоном дат, цены и время.
+     *
+     * Отправку не приближает: planned_at двигает только заявка на текст, и её
+     * окно — минуты, а не сутки.
+     *
+     * @return string что случилось: composed | text_requested | ready | failed
      */
+    public function prepareDigestAhead(
+        TelegramChatBroadcastItem $item,
+        TelegramChatBroadcast $broadcast,
+        Carbon $now,
+    ): string {
+        // Состав выбирается на момент СЛОТА, а не на момент прогона команды.
+        // От этого аргумента зависят окно недели, правило срока и диапазон дат
+        // в шапке: возьми мы «сейчас», подборка собиралась бы по позавчерашней
+        // неделе и звала бы на события, которые к выходу уже прошли.
+        $at = $item->publish_at ? Carbon::parse($item->publish_at) : $now;
+
+        if ($this->digestRosterSize($item) > 0 && $item->digestTheme() !== null) {
+            // Состав уже стоит — например, его собрал наполнитель ленты, когда
+            // назначал подборке день. Текста у такой записи нет, и попросить
+            // его стоит, но РОВНО ОДИН РАЗ: прогон почасовой, а неудачная
+            // генерация иначе переспрашивалась бы каждый час до самого слота,
+            // и каждая попытка стоит денег за модель.
+            $meta = (array) ($item->digest_meta ?? []);
+
+            if ($this->digestWantsText($item, $broadcast)
+                && $item->text_requested_at === null
+                && empty($meta['text_asked'])) {
+                $meta['text_asked'] = true;
+                $item->digest_meta = $meta;
+                $item->save();
+
+                $this->requestDigestText($item, $at);
+
+                return 'text_requested';
+            }
+
+            return 'ready';
+        }
+
+        if (! $this->composeDigest($item, $broadcast, $at)) {
+            return 'failed';
+        }
+
+        if ($this->digestWantsText($item, $broadcast)) {
+            $meta = (array) ($item->digest_meta ?? []);
+            $meta['text_asked'] = true;
+            $item->digest_meta = $meta;
+            $item->save();
+
+            $this->requestDigestText($item, $at);
+
+            return 'text_requested';
+        }
+
+        return 'composed';
+    }
+
     /**
      * Довести подборку до отправляемого вида — в момент слота.
      *
@@ -1099,56 +1164,6 @@ class TelegramChatBroadcastService
      *
      * @return bool false — на этом тике отправлять нечего: запись снята или ждёт текста
      */
-    /**
-     * Собрать подборку ЗАРАНЕЕ — за сутки до слота, а не в минуту отправки.
-     *
-     * ЗАЧЕМ. Раньше состав и текст появлялись внутри доставки, и между
-     * «состав зафиксирован» и «пост в канале» проходили секунды: замер по
-     * отправленным подборкам — 6 секунд у записи 214 и 28 у 215. Посмотреть на
-     * состав было некогда, поменять в нём позицию — тем более. Всё, что для
-     * этого нужно, у доставки уже есть; не хватало только момента времени.
-     *
-     * ЧТО ДЕЛАЕТ. Ровно первую половину prepareDigest: если состава нет —
-     * собирает его, и если канал хочет текст ИИ — заказывает. Пересборку
-     * (recompose) не трогает намеренно: она обязана случиться перед отправкой,
-     * потому что пересчитывает шапку с диапазоном дат, цены и время. То есть
-     * заранее замораживается СОСТАВ, а не буквы.
-     *
-     * ЧЕГО НЕ ДЕЛАЕТ. Не отправляет и не приближает отправку: planned_at
-     * трогает только заявка на текст, и её окно — минуты, а не сутки.
-     *
-     * @return string что случилось: composed | text_requested | ready | failed
-     */
-    public function prepareDigestAhead(
-        TelegramChatBroadcastItem $item,
-        TelegramChatBroadcast $broadcast,
-        Carbon $now,
-    ): string {
-        if ($this->digestRosterSize($item) > 0 && $item->digestTheme() !== null) {
-            // Состав уже стоит. Текст мог не поехать с первого раза — канал
-            // включили после сборки, или заявка не дошла; тогда просим сейчас.
-            if ($this->digestWantsText($item, $broadcast) && $item->text_requested_at === null) {
-                $this->requestDigestText($item, $now);
-
-                return 'text_requested';
-            }
-
-            return 'ready';
-        }
-
-        if (! $this->composeDigest($item, $broadcast, $now)) {
-            return 'failed';
-        }
-
-        if ($this->digestWantsText($item, $broadcast)) {
-            $this->requestDigestText($item, $now);
-
-            return 'text_requested';
-        }
-
-        return 'composed';
-    }
-
     private function prepareDigest(
         TelegramChatBroadcastItem $item,
         TelegramChatBroadcast $broadcast,
@@ -1234,6 +1249,14 @@ class TelegramChatBroadcastService
         ]);
     }
 
+    /**
+     * Наполнить бронь подборки: тема, состав, текст.
+     *
+     * Возвращает false, если наполнять нечем — тогда запись снята, и цикл
+     * доставки должен идти дальше. Пустую подборку отправлять нельзя: бот
+     * положит задачу без текста в bad_task и не пометит её никак, а защита
+     * «одна запись в полёте» задержит из-за неё весь канал.
+     */
     private function composeDigest(
         TelegramChatBroadcastItem $item,
         TelegramChatBroadcast $broadcast,
@@ -1264,16 +1287,6 @@ class TelegramChatBroadcastService
         return true;
     }
 
-    /**
-     * Записать в запись то, что собрал композитор: текст и состав.
-     *
-     * Публичный, потому что собрать подборку можно двумя путями: сама перед
-     * отправкой и руками из админки, когда человек хочет увидеть и поправить
-     * текст заранее. Второй путь — осознанный выбор: собранный заранее состав
-     * к выходу устареет, зато его можно править.
-     *
-     * @param  array{caption: string, event_ids: list<int>}  $draft
-     */
     /**
      * Заменить одно событие в составе подборки, не переизбирая остальные.
      *
@@ -1333,6 +1346,16 @@ class TelegramChatBroadcastService
         return true;
     }
 
+    /**
+     * Записать в запись то, что собрал композитор: текст и состав.
+     *
+     * Публичный, потому что собрать подборку можно двумя путями: сама перед
+     * отправкой и руками из админки, когда человек хочет увидеть и поправить
+     * текст заранее. Второй путь — осознанный выбор: собранный заранее состав
+     * к выходу устареет, зато его можно править.
+     *
+     * @param  array{caption: string, event_ids: list<int>}  $draft
+     */
     public function applyDigestDraft(TelegramChatBroadcastItem $item, array $draft): void
     {
         $theme = (string) ($draft['theme_slug'] ?? ($draft['theme']['slug'] ?? ''));
