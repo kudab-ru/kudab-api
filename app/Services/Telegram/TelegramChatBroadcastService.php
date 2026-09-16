@@ -796,17 +796,22 @@ class TelegramChatBroadcastService
                 // прошедшего. Правило то же, что в админке при постановке и
                 // переносе: конец события, а если его нет — начало. Именно
                 // конец, иначе снялись бы живые многодневки.
-                $endsAt = $event->end_time ?: $event->start_time;
-                if ($endsAt && Carbon::parse($endsAt)->lt($now)) {
+                // Правило общее ([[PostTiming]]): у однодневки срок — начало, у
+                // многодневки — закрытие. Здесь стояла своя копия, судившая
+                // всех по концу, и последняя дверь перед каналом пропускала
+                // ровно то, ради чего правило заводилось: анонс концерта,
+                // который уже идёт. Админка при этом уже рисовала такому посту
+                // красное «уйдёт после начала» — интерфейс и доставка спорили.
+                if (! PostTiming::fits($event, $now)) {
                     $this->broadcastItemRepository->markSkipped(
                         $item,
-                        'событие '.$event->id.' уже прошло к моменту отправки — снято из очереди',
+                        'событие '.$event->id.' уже началось к моменту отправки — снято из очереди',
                     );
-                    Log::warning('broadcast.poll.skipped_event_finished', [
+                    Log::warning('broadcast.poll.skipped_event_started', [
                         'broadcast_id' => $broadcast->id,
                         'item_id' => $item->id,
                         'event_id' => $event->id,
-                        'ends_at' => Carbon::parse($endsAt)->toIso8601String(),
+                        'deadline' => optional(PostTiming::deadline($event))->toIso8601String(),
                     ]);
 
                     continue;
@@ -970,6 +975,12 @@ class TelegramChatBroadcastService
             $eventId = $this->pickBestEventIdForChat(
                 $chat,
                 $broadcast->id,
+                // Момент публикации у этой записи — «ближайший тик»: дня ей не
+                // назначают, и бот заберёт её в течение минут. Без этого
+                // аргумента весь блок правила внутри подбора стоял выключенным
+                // (он под `if ($notBefore !== null)`), и автонаполнение брало
+                // событие, начавшееся час назад: его пускал upcoming().
+                notBefore: $now,
                 repeatCap: $this->venueRepeatCap($broadcast),
             );
             if (! $eventId) {
@@ -1565,16 +1576,7 @@ class TelegramChatBroadcastService
         // Многодневки (выставки, прокат спектакля) по-прежнему годятся, пока
         // идут: у них «фора» — это время до закрытия, а не до начала.
         if ($notBefore !== null) {
-            $from = $notBefore->copy()->addHours(self::MIN_LEAD_HOURS);
-
-            $query->where(function ($w) use ($from) {
-                $w->where('start_time', '>=', $from)
-                    ->orWhere(function ($x) use ($from) {
-                        $x->whereNotNull('end_time')
-                            ->whereRaw("end_time > start_time + interval '24 hours'")
-                            ->where('end_time', '>=', $from);
-                    });
-            });
+            PostTiming::applyFits($query, $notBefore, self::MIN_LEAD_HOURS);
         }
 
         // Кандидатный пул — ближайшие, кап; качество выбираем скорингом в PHP.
@@ -2020,6 +2022,14 @@ class TelegramChatBroadcastService
                 : null;
         }
 
+        // ТЕМЫ ПОДБОРКИ ЗДЕСЬ НЕТ И БЫТЬ НЕ МОЖЕТ. Состав и тему подборка
+        // выбирает в момент отправки — на неделю вперёд она стоит пустой
+        // бронью, и её слот для правила соседства выглядит как «тема
+        // неизвестна» (null). Это не недосмотр, а следствие позднего выбора
+        // состава: собрать подборку заранее значит показать пятую часть
+        // недели. Цена — сосед подборки не знает, что она назовёт; принято
+        // сознательно.
+        //
         // Тема последнего поста ПЕРЕД горизонтом: первый слот недели тоже чей-то
         // сосед, и без этого правило начинало действовать только со второго.
         $prevTheme = $this->primaryInterestId((int) (TelegramChatBroadcastItem::query()
@@ -2237,6 +2247,26 @@ class TelegramChatBroadcastService
                 // прошлой пересборки. Если её не оживить, пост осядет невидимым,
                 // а счётчик «заполнено» соврёт: ровно это и случилось на проверке.
                 $item = $this->broadcastItemRepository->enqueue($broadcast->id, $eventId, null);
+
+                // ОТПРАВЛЕННОЕ НЕ ВОСКРЕШАЕМ. enqueue() возвращает
+                // существующую строку (UNIQUE на broadcast_id + event_id), в
+                // том числе уже опубликованную, а дальше наполнитель
+                // безусловно ставил ей pending и новый день. `posted_at` при
+                // этом остаётся, но выдача задач боту по нему НЕ фильтрует —
+                // то есть канал отправил бы тот же пост второй раз. Подбор
+                // такие события и так исключает; это страховка на случай, когда
+                // исключение не сработало.
+                if ($item->posted_at !== null) {
+                    Log::warning('broadcast.feed.skip_already_posted', [
+                        'broadcast_id' => $broadcast->id,
+                        'item_id' => $item->id,
+                        'event_id' => $eventId,
+                        'posted_at' => $item->posted_at->toIso8601String(),
+                    ]);
+
+                    continue;
+                }
+
                 $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
                 $item->error_message = null;
                 $item->claimed_at = null;

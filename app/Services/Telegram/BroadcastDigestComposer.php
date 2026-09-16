@@ -119,7 +119,14 @@ final class BroadcastDigestComposer
         }
 
         $named = $this->namedFromLinks($item, $publishAt);
-        if ($named === []) {
+        $roster = DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->count();
+
+        // Состав ПОХУДЕЛ — собираем заново, а не выпускаем огрызок. Подборку
+        // переносят на другой день, и из тройки выпадают начавшиеся события:
+        // защита стояла только на полный ноль, а «было три, стало одно»
+        // проходило молча — рубрика «Спектакли недели» выходила с одним
+        // названным спектаклем, обещая в подвале два десятка.
+        if ($named === [] || count($named) < $roster) {
             return null;
         }
 
@@ -173,7 +180,10 @@ final class BroadcastDigestComposer
             ->whereIn('e.id', $ids)
             ->whereNull('e.deleted_at')
             ->where('e.status', 'active')
-            ->where('e.start_time', '>=', $publishAt)
+            // Тем же правилом: многодневка годится, пока идёт. Прежнее
+            // «начнётся позже поста» выбрасывало из состава идущую выставку
+            // при любом переносе подборки.
+            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, 0, 'e'))
             ->get([
                 'e.id', 'e.title', 'e.start_time', 'e.event_group_id', 'e.venue_id',
                 'e.description', 'e.tg_description', 'e.price_min', 'e.price_max', 'e.price_status',
@@ -257,8 +267,13 @@ final class BroadcastDigestComposer
             ->whereNull('e.deleted_at')
             ->where('e.status', 'active')
             ->where('c.city_id', $cityId)
-            ->where('e.start_time', '>=', $publishAt)
             ->where('e.start_time', '<=', $until)
+            // Срок — общим правилом ([[PostTiming]]), а не «начнётся позже
+            // поста»: у многодневки успеть надо к ЗАКРЫТИЮ. Из-за своей копии
+            // рубрика «Выставки недели» по построению не могла назвать
+            // выставку, открывшуюся на прошлой неделе и висящую месяц, — то
+            // есть ровно ту, ради которой тема и заведена.
+            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, PostTiming::MIN_LEAD_HOURS, 'e'))
             // ПЕРВИЧНЫЙ интерес внутри дерева темы. Без rank = 0 в спектакли
             // попадает концерт, которому театр проставлен вторым тегом.
             ->where('ei.rank', 0)

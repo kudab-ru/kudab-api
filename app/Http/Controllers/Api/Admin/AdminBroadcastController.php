@@ -202,9 +202,11 @@ class AdminBroadcastController extends Controller
                 return true;
             }
 
-            $endsAt = $event->end_time ?: $event->start_time;
-
-            return $endsAt && Carbon::parse($endsAt)->lt($now);
+            // Тем же правилом, что и возврат ([[PostTiming]]): иначе список
+            // предлагает вернуть то, что возврат отдаст без дня, а уборщик
+            // через час снимет обратно — кольцо, в котором человек нажимает,
+            // а запись исчезает.
+            return ! PostTiming::fits($event, $now);
         })->values();
 
         // Площадки портретов — одним запросом. Без них интерфейс рисовал
@@ -372,17 +374,12 @@ class AdminBroadcastController extends Controller
                 $publishAt !== null,
                 // Событие ещё не должно начаться к моменту публикации.
                 // Многодневное считаем годным, пока не кончилось.
-                // Правило общее со всеми дверями ([[PostTiming]]): не позже
-                // начала, а у многодневки — не позже закрытия. Своя копия
-                // здесь пускала в предложения уже начавшееся однодневное.
-                fn ($q) => $q->where(function ($w) use ($publishAt) {
-                    $w->where('start_time', '>=', $publishAt)
-                        ->orWhere(function ($x) use ($publishAt) {
-                            $x->whereNotNull('end_time')
-                                ->whereRaw("end_time > start_time + interval '24 hours'")
-                                ->where('end_time', '>=', $publishAt);
-                        });
-                }),
+                // Правило общее со всеми дверями и буквально одним выражением
+                // ([[PostTiming]]::applyFits): не позже начала, а у многодневки
+                // — не позже закрытия. Своя копия здесь пускала в предложения
+                // уже начавшееся однодневное, а порог многодневки был зашит
+                // числом мимо константы.
+                fn ($q) => PostTiming::applyFits($q, $publishAt),
             )
             ->orderBy('start_time')
             ->limit(self::SUGGESTIONS_LIMIT)
@@ -508,11 +505,10 @@ class AdminBroadcastController extends Controller
             return response()->json(['ok' => false, 'error' => 'Событие не найдено.'], 404);
         }
 
-        $endsAt = $event->end_time ?: $event->start_time;
-        if ($endsAt && Carbon::parse($endsAt)->lt(Carbon::now())) {
+        if (! PostTiming::fits($event, Carbon::now())) {
             return response()->json([
                 'ok' => false,
-                'error' => 'Событие уже прошло — публиковать анонс незачем.',
+                'error' => $this->tooLateMessage($event),
             ], 422);
         }
 
@@ -937,9 +933,9 @@ class AdminBroadcastController extends Controller
             // мимо всех защит, которые стоят на соседних путях.
             if ($newAt !== null) {
                 $refusal = DB::transaction(function () use ($item, $newAt) {
-                    $event = $item->event_id ? Event::query()->find($item->event_id) : null;
-                    if (! PostTiming::fits($event, $newAt)) {
-                        return [$this->tooLateMessage($event), 422];
+                    $itemEvents = $this->itemEvents($item);
+                    if (! PostTiming::fitsAll($itemEvents, $newAt)) {
+                        return [$this->tooLateMessageForEvents($itemEvents), 422];
                     }
 
                     $broadcast = TelegramChatBroadcast::query()->find($item->broadcast_id);
@@ -1597,11 +1593,13 @@ class AdminBroadcastController extends Controller
         // числом. Правило общее со всеми остальными дверями ([[PostTiming]]):
         // раньше здесь стояла своя копия, и она пускала пост до КОНЦА события,
         // то есть анонс концерта мог уехать, когда он уже идёт.
-        $event = $item->event_id ? Event::query()->find($item->event_id) : null;
-        if (! PostTiming::fits($event, $target)) {
+        // Состав записи, а не колонка `event_id`: у подборки его нет, и раньше
+        // она проезжала эту дверь насквозь вместе со всеми тремя событиями.
+        $itemEvents = $this->itemEvents($item);
+        if (! PostTiming::fitsAll($itemEvents, $target)) {
             return response()->json([
                 'ok' => false,
-                'error' => $this->tooLateMessage($event),
+                'error' => $this->tooLateMessageForEvents($itemEvents),
             ], 422);
         }
 
@@ -1733,6 +1731,36 @@ class AdminBroadcastController extends Controller
     }
 
     /**
+     * События, за срок которых отвечает запись.
+     *
+     * У поста события оно одно, у подборки — весь её названный состав, у
+     * портрета площадки событий нет. До этого все двери читали только колонку
+     * `event_id`, и подборка проходила сквозь них: `PostTiming::fits(null, …)`
+     * честно отвечает «событию нечего сказать о сроке».
+     *
+     * @return list<Event>
+     */
+    private function itemEvents(TelegramChatBroadcastItem $item): array
+    {
+        if ($item->event_id) {
+            $event = Event::query()->find($item->event_id);
+
+            return $event ? [$event] : [];
+        }
+
+        if ($item->kind !== TelegramChatBroadcastItem::KIND_DIGEST) {
+            return [];
+        }
+
+        $ids = DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)
+            ->pluck('event_id')
+            ->all();
+
+        return $ids === [] ? [] : Event::query()->whereIn('id', $ids)->get()->all();
+    }
+
+    /**
      * Отказ обязан называть срок, а не только запрет.
      *
      * «К этому дню событие уже пройдёт» человек читает как ошибку интерфейса,
@@ -1740,7 +1768,17 @@ class AdminBroadcastController extends Controller
      */
     private function tooLateMessage(?Event $event): string
     {
-        $deadline = PostTiming::deadline($event);
+        return $this->tooLateMessageFor(PostTiming::deadline($event));
+    }
+
+    /** @param  list<Event>  $events */
+    private function tooLateMessageForEvents(array $events): string
+    {
+        return $this->tooLateMessageFor(PostTiming::earliestDeadline($events));
+    }
+
+    private function tooLateMessageFor(?Carbon $deadline): string
+    {
 
         if ($deadline === null) {
             return 'Пост уйдёт после начала события — звать будет уже некуда.';
@@ -1835,6 +1873,17 @@ class AdminBroadcastController extends Controller
 
         if ($item->posted_at !== null) {
             return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
+        }
+
+        // «Сейчас» — это тоже момент публикации, и правило срока на него
+        // распространяется: анонс концерта, который уже идёт, звать никуда не
+        // может. Эта дверь не проверяла НИЧЕГО — даже события не читала.
+        $itemEvents = $this->itemEvents($item);
+        if (! PostTiming::fitsAll($itemEvents, Carbon::now())) {
+            return response()->json([
+                'ok' => false,
+                'error' => $this->tooLateMessageForEvents($itemEvents),
+            ], 422);
         }
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->find($item->broadcast_id);
@@ -1947,9 +1996,8 @@ class AdminBroadcastController extends Controller
             if (! $event) {
                 return 'События больше нет — вернуть нечего.';
             }
-            $endsAt = $event->end_time ?: $event->start_time;
-            if ($endsAt && Carbon::parse($endsAt)->lt(Carbon::now())) {
-                return 'Событие уже прошло — возвращать его в ленту незачем.';
+            if (! PostTiming::fits($event, Carbon::now())) {
+                return 'Событие уже началось — возвращать его в ленту незачем.';
             }
         }
 
@@ -2048,6 +2096,18 @@ class AdminBroadcastController extends Controller
 
         if ($item->posted_at !== null) {
             return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
+        }
+
+        // Повтор двигает день на «сейчас», а значит подчиняется тому же
+        // правилу: запись ошиблась ровно потому, что не ушла вовремя, и
+        // выдать ей свежее «сейчас» после начала события значит отправить
+        // анонс задним числом штатным путём.
+        $itemEvents = $this->itemEvents($item);
+        if (! PostTiming::fitsAll($itemEvents, Carbon::now())) {
+            return response()->json([
+                'ok' => false,
+                'error' => $this->tooLateMessageForEvents($itemEvents),
+            ], 422);
         }
 
         $item->status = TelegramChatBroadcastItem::STATUS_PENDING;

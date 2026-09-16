@@ -829,6 +829,62 @@ class BroadcastSlotsTest extends TestCase
         ]);
     }
 
+    /**
+     * «Отправить сейчас» после начала события — отказ.
+     *
+     * Эта дверь не проверяла НИЧЕГО: не читала даже события, просто ставила
+     * publish_at = сейчас. Порог «не позже начала» объявлен жёстким и
+     * действующим на человека тоже — иначе он не правило, а пожелание.
+     */
+    public function test_publish_now_refuses_after_the_event_started(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 12:00:00', 'UTC'));
+        $this->actAsSuperadmin();
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        // Концерт идёт прямо сейчас: начался час назад, кончится через час.
+        $started = $this->eventAt($city->id, 'Идёт сейчас', Carbon::parse('2026-09-15 11:00', 'UTC'));
+        $started->end_time = Carbon::parse('2026-09-15 13:00', 'UTC');
+        $started->save();
+
+        $item = $this->makeItem($broadcast->id, $started->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/publish-now")->assertStatus(422);
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/retry")->assertStatus(422);
+    }
+
+    /**
+     * Доставка снимает пост по НАЧАЛУ события, а не по концу.
+     *
+     * Последняя дверь перед каналом судила всех по end_time и пропускала ровно
+     * то, ради чего правило заводилось: анонс концерта, который уже идёт.
+     * Админка при этом уже рисовала такому посту красное «уйдёт после начала» —
+     * интерфейс и доставка спорили о том же посте.
+     */
+    public function test_delivery_skips_a_post_whose_event_already_started(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 12:00:00', 'UTC'));
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $started = $this->eventAt($city->id, 'Идёт сейчас', Carbon::parse('2026-09-15 11:00', 'UTC'));
+        $started->end_time = Carbon::parse('2026-09-15 13:00', 'UTC');
+        $started->save();
+
+        $item = $this->makeItem($broadcast->id, $started->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = Carbon::parse('2026-09-15 11:30', 'UTC');
+        $item->caption = 'текст';
+        $item->save();
+
+        $tasks = $this->service()->collectDueSingleRuns(Carbon::now());
+
+        $this->assertNull(collect($tasks)->firstWhere('item_id', $item->id),
+            'пост про идущее событие в канал не идёт');
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $item->fresh()->status);
+        $this->assertStringContainsString('уже началось', (string) $item->fresh()->error_message);
+    }
+
     private function actAsSuperadmin(): void
     {
         \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
