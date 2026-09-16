@@ -80,4 +80,14 @@ return [
         'token' => env('VK_ACCESS_TOKEN'),
         'version' => env('VK_API_VERSION', '5.131'),
     ],
+
+    /*
+     * Яндекс.Метрика — единственный прибор отклика, который у канала может
+     * быть: просмотры постов Bot API не отдаёт вовсе (это MTProto-метрика).
+     * Ключи уже лежат в общем .env инфры, отдельной настройки не нужно.
+     */
+    'metrika' => [
+        'counter' => env('YANDEX_METRIKA_COUNTER'),
+        'token' => env('YANDEX_OAUTH_TOKEN'),
+    ],
 ];

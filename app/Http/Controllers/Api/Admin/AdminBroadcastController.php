@@ -449,11 +449,19 @@ class AdminBroadcastController extends Controller
                 'theme' => null,
                 'start_time' => null,
                 'price_status' => null,
-                'reasons' => [
+                // Сколько фотографий уйдёт — первой строкой: портрет без фото
+                // это просто текст в канале, и узнавать об этом постфактум
+                // человеку незачем. Фото у портрета берутся у СОБЫТИЙ
+                // площадки, поэтому у места без событий их не бывает.
+                'photos_count' => (int) ($portrait['photos_count'] ?? 0),
+                'reasons' => array_values(array_filter([
+                    ((int) ($portrait['photos_count'] ?? 0)) === 0
+                        ? 'без фото — уйдёт текстом'
+                        : $portrait['photos_count'].' фото',
                     $portrait['weeks_since'] === null
                         ? 'ни разу не показывали'
                         : 'не показывали '.$portrait['weeks_since'].' нед.',
-                ],
+                ])),
                 // Ссылка на страницу площадки: без неё портрет был единственной
                 // карточкой пула, которую нельзя посмотреть перед тем, как
                 // ставить, — а решение принимают именно глядя.
@@ -1657,6 +1665,39 @@ class AdminBroadcastController extends Controller
         }
 
         return response()->json(['ok' => true, 'data' => ['swapped' => $occupant !== null]]);
+    }
+
+    /**
+     * Ссылка на пост в канале: t.me/<канал>/<номер сообщения>.
+     *
+     * Имя канала кэшируем на запрос: лента зовёт эту сборку для каждой записи,
+     * а канал у всех записей один и тот же — без кэша это два запроса на
+     * строку на ровном месте.
+     *
+     * @var array<int, string>
+     */
+    private array $chatUsernameCache = [];
+
+    private function postUrl(TelegramChatBroadcastItem $item): ?string
+    {
+        if (! $item->message_id || ! $item->broadcast_id) {
+            return null;
+        }
+
+        $broadcastId = (int) $item->broadcast_id;
+
+        if (! array_key_exists($broadcastId, $this->chatUsernameCache)) {
+            $this->chatUsernameCache[$broadcastId] = trim((string) DB::table('telegram.chat_broadcasts as b')
+                ->join('telegram.chats as c', 'c.id', '=', 'b.chat_id')
+                ->where('b.id', $broadcastId)
+                ->value('c.username'));
+        }
+
+        $username = $this->chatUsernameCache[$broadcastId];
+
+        return $username === ''
+            ? null
+            : 'https://t.me/'.ltrim($username, '@').'/'.(int) $item->message_id;
     }
 
     /**
@@ -2909,6 +2950,15 @@ class AdminBroadcastController extends Controller
             // Тема поста: по ней интерфейс показывает, чем занята неделя, и
             // по ней же наполнитель не ставит два одинаковых рядом.
             'theme' => $this->themePayload($event),
+            // Отклик: сколько человек пришло на сайт с этого поста. NULL —
+            // «ещё не мерили», ноль — «мерили, переходов не было», и это
+            // разные вещи. Просмотров тут нет и быть не может: Bot API их не
+            // отдаёт, см. CollectClicksCommand.
+            'clicks' => $i->clicks !== null ? (int) $i->clicks : null,
+            // Ссылка на сам пост в канале — по ней проверяют, как он выглядит
+            // у подписчика. Без номера сообщения её собрать не из чего: у
+            // постов, ушедших до появления прибора, его нет.
+            'post_url' => $this->postUrl($i),
             'late_for_event' => $event !== null
                 && $i->posted_at === null
                 && $i->publish_at !== null
@@ -3160,6 +3210,7 @@ class AdminBroadcastController extends Controller
                 $item->publish_at
                     ? \Carbon\CarbonImmutable::parse($item->publish_at)->setTimezone('Europe/Moscow')
                     : null,
+                (int) $item->id,
             );
 
             // Ничего не изменилось — не трогаем строку: лента читается часто,

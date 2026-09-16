@@ -608,7 +608,7 @@ final class BroadcastDigestComposer
         // события другие, — обмануть в мелочи, которую читатель проверит первым
         // же нажатием.
         $footer = $this->link(
-            $this->landingUrl($broadcast, (string) $theme['slug']),
+            $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id),
             'Вся афиша '.($forms[2] ?? mb_strtolower((string) $theme['title'])),
         );
 
@@ -949,7 +949,12 @@ final class BroadcastDigestComposer
         return $name;
     }
 
-    private function landingUrl(TelegramChatBroadcast $broadcast, string $slug): string
+    /**
+     * @param  int|null  $itemId  номер записи в метке `utm_content`: по нему
+     *                            Метрика отличает переходы ЭТОЙ подборки от
+     *                            прошлой — иначе рубрика измерима только целиком
+     */
+    private function landingUrl(TelegramChatBroadcast $broadcast, string $slug, ?int $itemId = null): string
     {
         $base = rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/');
         $citySlug = $broadcast->chat?->city?->slug ?? '';
@@ -959,7 +964,9 @@ final class BroadcastDigestComposer
             ? $base.'/afisha/'.$citySlug.'/'.$slug
             : $base.'/events';
 
-        return $url.'?utm_source='.($utm['source'] ?? 'tg').'&utm_medium='.($utm['medium'] ?? 'digest');
+        $url .= '?utm_source='.($utm['source'] ?? 'tg').'&utm_medium='.($utm['medium'] ?? 'digest');
+
+        return $itemId === null ? $url : $url.'&utm_content=i'.$itemId;
     }
 
     private function eventUrl(int $id): string

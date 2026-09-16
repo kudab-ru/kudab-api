@@ -50,13 +50,24 @@ final class EventCaptionBuilder
      *                                      считаются «сегодня» и «завтра»: текст собирается заранее, иногда за
      *                                      неделю, и относительно момента сборки эти слова врут подписчику.
      */
-    public function build(Event $event, string $templateCode = 'basic', ?CarbonImmutable $asOf = null): string
-    {
+    /**
+     * @param  int|null  $itemId  запись очереди, из которой уходит пост: её номер
+     *                            становится меткой `utm_content`, и по нему
+     *                            Метрика считает переходы КАЖДОГО поста
+     *                            отдельно. Без метки у канала нет ни одного
+     *                            прибора: просмотры Bot API не отдаёт вовсе.
+     */
+    public function build(
+        Event $event,
+        string $templateCode = 'basic',
+        ?CarbonImmutable $asOf = null,
+        ?int $itemId = null,
+    ): string {
         $raw = $event->toArray();
 
         $body = $this->templateBody($templateCode);
 
-        return $this->assemble($raw, $body, $templateCode, $asOf);
+        return $this->assemble($raw, $body, $templateCode, $asOf, $itemId);
     }
 
     /**
@@ -74,9 +85,14 @@ final class EventCaptionBuilder
     /**
      * @param  array<string, mixed>  $raw
      */
-    private function assemble(array $raw, ?string $body, string $templateCode, ?CarbonImmutable $asOf): string
-    {
-        $ctx = $this->context($raw, $asOf);
+    private function assemble(
+        array $raw,
+        ?string $body,
+        string $templateCode,
+        ?CarbonImmutable $asOf,
+        ?int $itemId = null,
+    ): string {
+        $ctx = $this->context($raw, $asOf, $itemId);
 
         if ($body === null || trim($body) === '') {
             // Бот в этом случае уходит в _build_event_caption_fallback, который
@@ -108,7 +124,7 @@ final class EventCaptionBuilder
      * @param  array<string, mixed>  $raw
      * @return array<string, string>
      */
-    private function context(array $raw, ?CarbonImmutable $asOf = null): array
+    private function context(array $raw, ?CarbonImmutable $asOf = null, ?int $itemId = null): array
     {
         $city = $this->firstNonEmpty($raw, ['city', 'city_name']);
         $addressRaw = trim((string) ($raw['address'] ?? ''));
@@ -149,13 +165,13 @@ final class EventCaptionBuilder
             'price_status' => trim((string) ($raw['price_status'] ?? '')),
             'price_text' => trim((string) ($raw['price_text'] ?? '')),
             'canonical_url' => $canonicalUrl,
-            'url' => $this->eventUrl($eventId),
+            'url' => $this->eventUrl($eventId, $itemId),
             // Готовые ссылки для шаблона. Голый {canonical_url} в теге даёт
             // пустой href у события без источника — строка остаётся, а вести
             // ей некуда. Эти два ключа рендерятся в целый тег или в пустоту,
             // и шаблон честно показывает, откуда в посте берутся ссылки.
             'original_link' => $canonicalUrl === '' ? '' : $this->link($canonicalUrl, 'Открыть оригинал'),
-            'more_link' => $eventId === '' ? '' : $this->link($this->eventUrl($eventId), 'Подробнее на kudab.ru'),
+            'more_link' => $eventId === '' ? '' : $this->link($this->eventUrl($eventId, $itemId), 'Подробнее на kudab.ru'),
             // Ключа tags в боте нет вовсе, значение всегда пустое, и строка
             // «🏷 …» не печаталась ни разу. Сохраняем это поведение явно.
             'tags' => '',
@@ -175,11 +191,33 @@ final class EventCaptionBuilder
         return '<a href="'.htmlspecialchars($href, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'">'.$text.'</a>';
     }
 
-    private function eventUrl(string $eventId): string
+    /**
+     * Ссылка на карточку события — с метками, если пост уходит из очереди.
+     *
+     * `utm_content = i<номер записи>` — единственное, что связывает визит на
+     * сайте с конкретным постом. Просмотры постов Bot API не отдаёт (это
+     * MTProto-метрика), поэтому переходы — весь прибор, который у канала
+     * вообще может быть.
+     *
+     * Превью в редакторе шаблонов записи не имеет, и метки в нём нет: мерить
+     * там нечего, а лишний хвост в ссылке сбивал бы с толку.
+     */
+    private function eventUrl(string $eventId, ?int $itemId = null): string
     {
         $base = rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/');
 
-        return $eventId === '' ? $base : $base.'/events/'.$eventId;
+        if ($eventId === '') {
+            return $base;
+        }
+
+        $url = $base.'/events/'.$eventId;
+        if ($itemId === null) {
+            return $url;
+        }
+
+        $utm = (array) config('broadcast_digest.utm', []);
+
+        return $url.'?utm_source='.($utm['source'] ?? 'tg').'&utm_medium=post&utm_content=i'.$itemId;
     }
 
     // ------------------------------------------------------------------

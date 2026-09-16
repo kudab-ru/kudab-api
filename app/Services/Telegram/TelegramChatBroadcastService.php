@@ -245,6 +245,7 @@ class TelegramChatBroadcastService
         int $eventId,
         ?DateTimeInterface $moment = null,
         ?string $claimToken = null,
+        ?int $messageId = null,
     ): void {
         [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
 
@@ -274,6 +275,7 @@ class TelegramChatBroadcastService
             $this->broadcastItemRepository->markPosted($item, $moment);
         }
 
+        $this->rememberMessageId($item->id, $messageId);
         $this->broadcastRepository->touchLastRunAt($chat->id, $moment);
     }
 
@@ -283,15 +285,39 @@ class TelegramChatBroadcastService
      * НЕ двигает last_run_at: у портрета свой недельный каденс (по posted_at
      * venue-айтемов), а не событийное расписание канала.
      */
-    public function markItemSentForChat(int $itemId, string $claimToken, ?DateTimeInterface $moment = null): bool
-    {
+    public function markItemSentForChat(
+        int $itemId,
+        string $claimToken,
+        ?DateTimeInterface $moment = null,
+        ?int $messageId = null,
+    ): bool {
         $ok = $this->broadcastItemRepository->markPostedIfClaimed($itemId, $claimToken, $moment);
 
         if ($ok) {
+            $this->rememberMessageId($itemId, $messageId);
             $this->bookNextDigestAfter($itemId);
         }
 
         return $ok;
+    }
+
+    /**
+     * Запомнить номер сообщения в канале.
+     *
+     * Отдельным UPDATE, а не полем пометки: отметка идёт условным запросом по
+     * claim-токену, и подмешивать в неё необязательное поле значило бы связать
+     * успех отметки с наличием номера. Бот старой версии номера не пришлёт —
+     * пост от этого не должен остаться неотмеченным.
+     */
+    private function rememberMessageId(int $itemId, ?int $messageId): void
+    {
+        if ($messageId === null || $messageId <= 0) {
+            return;
+        }
+
+        TelegramChatBroadcastItem::query()
+            ->whereKey($itemId)
+            ->update(['message_id' => $messageId]);
     }
 
     /**
@@ -1897,6 +1923,7 @@ class TelegramChatBroadcastService
                 $event,
                 (string) $broadcast->template_code,
                 $showDay,
+                (int) $item->id,
             );
             $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
             $item->save();

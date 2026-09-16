@@ -49,6 +49,9 @@ class TelegramChatBroadcastItem extends Model
         'edited_at',
         'edited_fields',
         'digest_meta',
+        'message_id',
+        'clicks',
+        'clicks_at',
     ];
 
     protected $casts = [
@@ -63,6 +66,7 @@ class TelegramChatBroadcastItem extends Model
         'edited_fields' => 'array',
         // Подборка: тема состава и текст модели (intro + hooks по event_id).
         'digest_meta' => 'array',
+        'clicks_at' => 'datetime',
         'is_pinned' => 'bool',
         // NULL = собрать автоматически; массив = ровно эти картинки.
         'photo_urls' => 'array',

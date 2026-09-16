@@ -285,6 +285,10 @@ class TelegramChatBroadcastController extends Controller
             'event_id' => ['required', 'integer'],
             'posted_at' => ['nullable', 'string'], // парсим сами
             'claim_token' => ['nullable', 'string', 'max:40'], // claim-before-post (опц. для backward-compat)
+            // Номер сообщения в канале: без него пост нельзя ни открыть, ни
+            // связать с реакциями. Необязателен — бот прежней версии его не
+            // шлёт, и отметку это ломать не должно.
+            'message_id' => ['nullable', 'integer'],
         ]);
 
         $telegramId = (int) $validated['telegram_id'];
@@ -310,6 +314,7 @@ class TelegramChatBroadcastController extends Controller
                 $eventId,
                 $moment,
                 $claimToken,
+                isset($validated['message_id']) ? (int) $validated['message_id'] : null,
             );
 
             return response()->json([
@@ -343,6 +348,7 @@ class TelegramChatBroadcastController extends Controller
             'item_id' => ['required', 'integer'],
             'claim_token' => ['required', 'string', 'max:40'],
             'posted_at' => ['nullable', 'string'],
+            'message_id' => ['nullable', 'integer'],
         ]);
 
         $moment = null;
@@ -359,6 +365,7 @@ class TelegramChatBroadcastController extends Controller
                 (int) $validated['item_id'],
                 (string) $validated['claim_token'],
                 $moment,
+                isset($validated['message_id']) ? (int) $validated['message_id'] : null,
             );
 
             return response()->json(['ok' => $ok]);

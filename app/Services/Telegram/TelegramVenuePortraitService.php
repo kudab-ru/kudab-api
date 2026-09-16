@@ -547,10 +547,16 @@ class TelegramVenuePortraitService
             ->where('venue_id', $venue->id)
             ->max('posted_at');
 
+        // Сколько картинок уйдёт в пост — ВИДНО ЗАРАНЕЕ. Портрет собирает их
+        // из фотографий событий площадки, и у места без событий их нет вовсе:
+        // пост уходит голым текстом, а человек узнаёт об этом уже в канале.
+        $photos = $this->venuePhotoUrls((int) $venue->id, self::ALBUM_LIMIT);
+
         return [
             'venue_id' => (int) $venue->id,
             'name' => (string) $venue->name,
-            'cover' => $this->venueCoverUrl((int) $venue->id),
+            'cover' => $photos[0] ?? $this->venueCoverUrl((int) $venue->id),
+            'photos_count' => count($photos),
             'weeks_since' => $lastPosted
                 ? (int) floor(Carbon::parse($lastPosted)->diffInDays($now) / 7)
                 : null,
