@@ -10,6 +10,7 @@ use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Support\BroadcastSafety;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -81,31 +82,72 @@ class FillFeedCommand extends Command
                 continue;
             }
 
-            if ($dryRun) {
-                continue;
-            }
+            $filled = $dryRun
+                ? $this->wouldFill($service, $broadcast, $now)
+                : $service->fillFeedDays($broadcast, $now);
 
-            $filled = $service->fillFeedDays($broadcast, $now);
+            if (($filled['filled'] ?? 0) > 0 || ($filled['no_candidate'] ?? 0) > 0) {
+                $this->line(sprintf(
+                    '  канал #%d: %s %d, без кандидата %d, дней в горизонте %d',
+                    $broadcast->id,
+                    $dryRun ? 'заполнил бы' : 'заполнено',
+                    (int) ($filled['filled'] ?? 0),
+                    (int) ($filled['no_candidate'] ?? 0),
+                    (int) ($filled['days'] ?? 0),
+                ));
+            }
 
             if (($filled['filled'] ?? 0) > 0) {
                 $summary['channels']++;
                 $summary['filled'] += (int) $filled['filled'];
 
-                Log::info('broadcast.feed.filled', [
-                    'broadcast_id' => $broadcast->id,
-                    'filled' => $filled['filled'],
-                    'no_candidate' => $filled['no_candidate'] ?? 0,
-                ]);
+                if (! $dryRun) {
+                    Log::info('broadcast.feed.filled', [
+                        'broadcast_id' => $broadcast->id,
+                        'filled' => $filled['filled'],
+                        'no_candidate' => $filled['no_candidate'] ?? 0,
+                    ]);
+                }
             }
         }
 
         $this->info(sprintf(
-            'fill-feed: checked=%d filled=%d в %d каналах, off=%d, стенд не пустил=%d%s',
-            $summary['checked'], $summary['filled'], $summary['channels'],
+            'fill-feed: каналов %d, %s %d в %d каналах, выключено %d, стенд не пустил %d%s',
+            $summary['checked'],
+            $dryRun ? 'заполнил бы' : 'заполнено',
+            $summary['filled'], $summary['channels'],
             $summary['off'], $summary['not_allowed'],
-            $dryRun ? ' [DRY-RUN]' : '',
+            $dryRun ? ' [DRY-RUN, ничего не записано]' : '',
         ));
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Что наполнитель сделал БЫ — тем же кодом, но без записи.
+     *
+     * Прогон в транзакции с откатом, а не отдельная «сухая» ветка внутри
+     * наполнителя: второй путь расходится с первым в первый же месяц, и тогда
+     * `--dry-run` начинает врать — а зовут его ровно затем, чтобы поверить.
+     * Тот же приём уже держит кнопку «Пересобрать неделю» в админке.
+     *
+     * До этой правки dry-run просто пропускал канал и печатал «filled=0». Я сам
+     * на это купился: посмотрел на ноль и решил, что заполнять нечего, хотя
+     * свободных слотов было одиннадцать.
+     *
+     * @return array{filled: int, days: int, no_candidate: int}
+     */
+    private function wouldFill(
+        TelegramChatBroadcastService $service,
+        TelegramChatBroadcast $broadcast,
+        Carbon $now,
+    ): array {
+        DB::beginTransaction();
+
+        try {
+            return $service->fillFeedDays($broadcast, $now);
+        } finally {
+            DB::rollBack();
+        }
     }
 }

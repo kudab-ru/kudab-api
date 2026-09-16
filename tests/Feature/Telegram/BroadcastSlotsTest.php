@@ -503,6 +503,35 @@ class BroadcastSlotsTest extends TestCase
     }
 
     /**
+     * `--dry-run` показывает, что наполнитель СДЕЛАЛ БЫ, и ничего не пишет.
+     *
+     * Прежний dry-run просто пропускал канал и печатал «filled=0» — то есть
+     * врал ровно в том вопросе, ради которого его и зовут. Я сам на это
+     * купился: посмотрел на ноль и решил, что заполнять нечего, хотя свободных
+     * слотов было одиннадцать.
+     */
+    public function test_dry_run_reports_what_it_would_fill_and_writes_nothing(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+
+        [$broadcast] = $this->channelWithEvents(4);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10],
+            'horizon_days' => 3,
+        ]);
+        $broadcast->save();
+
+        $this->artisan('broadcast:fill-feed --dry-run')
+            ->expectsOutputToContain('заполнил бы 3')
+            ->assertExitCode(0);
+
+        $this->assertSame(0, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereNotNull('publish_at')
+            ->count(), 'dry-run обязан оставить ленту нетронутой');
+    }
+
+    /**
      * Пост нельзя поставить позже начала события — ни одной дверью.
      *
      * Правило разошлось по дверям: подбор требовал фору, перетаскивание

@@ -121,14 +121,23 @@ class AdminBroadcastController extends Controller
         ]);
     }
 
-    /** Лента канала: что стоит в очереди и что ушло за последние дни. */
-    public function feed(int $broadcastId): JsonResponse
+    /**
+     * Лента канала: что стоит в очереди и что ушло за последние дни.
+     *
+     * Окно истории просит интерфейс (`history_days`): в ленте видно ближайшую
+     * неделю, а «что вышло» человек разворачивает отдельно и иногда за месяц.
+     * Отдавать месяц всегда нельзя — это сотни строк на каждое открытие
+     * страницы, а лента читается часто.
+     */
+    public function feed(Request $request, int $broadcastId): JsonResponse
     {
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
 
+        $historyDays = max(1, min(90, (int) ($request->query('history_days') ?: self::HISTORY_DAYS)));
+
         $items = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
-            ->where(function ($q) {
+            ->where(function ($q) use ($historyDays) {
                 $q->whereIn('status', $this->openStatuses())
                     // Ошибочные показываем обязательно: раньше такой пост
                     // просто исчезал с глаз и повторялся в фоне.
@@ -150,9 +159,9 @@ class AdminBroadcastController extends Controller
                         $w->where('status', TelegramChatBroadcastItem::STATUS_REJECTED)
                             ->where('updated_at', '>=', now()->subDays(self::REJECTED_COOLDOWN_DAYS));
                     })
-                    ->orWhere(function ($w) {
+                    ->orWhere(function ($w) use ($historyDays) {
                         $w->where('status', TelegramChatBroadcastItem::STATUS_POSTED)
-                            ->where('posted_at', '>=', now()->subDays(7));
+                            ->where('posted_at', '>=', now()->subDays($historyDays));
                     });
             })
             ->orderByRaw('COALESCE(publish_at, planned_at, posted_at, created_at) ASC')
@@ -1171,6 +1180,9 @@ class AdminBroadcastController extends Controller
 
         return response()->json(['data' => $this->itemPayload($item->fresh(), null, null)]);
     }
+
+    /** Сколько суток отправленного лента показывает без отдельной просьбы. */
+    private const HISTORY_DAYS = 7;
 
     /** Сколько версий поста храним: история нужна для отмены, а не для архива. */
     private const REVISIONS_KEPT = 20;
