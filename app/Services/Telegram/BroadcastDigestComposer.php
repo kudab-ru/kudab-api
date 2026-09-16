@@ -239,6 +239,133 @@ final class BroadcastDigestComposer
     }
 
     /**
+     * Чем можно заменить позицию в подборке — ТОЛЬКО ЧТЕНИЕ.
+     *
+     * ЗАЧЕМ. Состав подборки пишется одним махом и до сих пор не имел ни одной
+     * операции над отдельной позицией: человек видел три названия и мог либо
+     * смириться, либо пересобрать всё заново другой тройкой. Прежде чем
+     * городить замену, надо ответить на вопрос дешевле: а есть ли вообще чем
+     * заменять. Эта выдача на него и отвечает.
+     *
+     * ПОЧЕМУ ЧЕРЕЗ poolForTheme, А НЕ СВОИМ ЗАПРОСОМ. Пул уже умеет ровно то,
+     * что нужно: окно недели, общее правило срока, первичный интерес внутри
+     * дерева темы, не распроданное, не официоз, и четыре отсечки поверх —
+     * стоп-лист заголовков, чужой жанр, чужая рубрика источника, «канал это уже
+     * показывает». Свой запрос неизбежно разошёлся бы с автосборкой, и человек
+     * выбирал бы из того, что автомат сам никогда бы не взял.
+     *
+     * $exceptItemId ОБЯЗАТЕЛЕН. Без него запись вычитает сама себя: собственный
+     * состав считается «уже показанным», и на выходе получается пул без трёх
+     * событий, которые мы как раз и собираемся заменять.
+     *
+     * ПОМЕТКИ, А НЕ ФИЛЬТР. Правила «одна площадка — одна строка» и «один день
+     * — одна строка» живут в pickNamed и действуют только на автосборку; состав,
+     * записанный извне, их не проверяет никто. Поэтому кандидат, который их
+     * нарушит, из списка не убирается — но человек видит, ЧЕМ именно он спорит
+     * с оставшимися строками. Выбор всё равно за ним: иногда два спектакля в
+     * один день лучше, чем один хороший и один никакой.
+     *
+     * @return array{theme_slug: string, named: list<object>, rows: list<array<string, mixed>>}|null
+     */
+    public function candidatesForItem(
+        TelegramChatBroadcastItem $item,
+        TelegramChatBroadcast $broadcast,
+        Carbon $publishAt,
+    ): ?array {
+        $slug = $item->digestTheme();
+        $cityId = $broadcast->chat?->city_id;
+        if ($slug === null || ! $cityId) {
+            return null;
+        }
+
+        $theme = collect((array) config('broadcast_digest.themes', []))
+            ->first(fn ($t) => (string) ($t['slug'] ?? '') === $slug);
+        if ($theme === null) {
+            return null;
+        }
+
+        // Состав — теми же свежими фактами, что увидит подпись: у события могли
+        // поменять площадку или день, и пометки обязаны считаться от того, что
+        // выйдет в канал, а не от того, что лежало в связи на момент сборки.
+        $named = $this->namedFromLinks($item, $publishAt);
+        $taken = array_map(static fn ($e) => (int) $e->id, $named);
+
+        $pool = $this->poolForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $item->id);
+        $rows = $pool['rows'] ?? collect();
+
+        $minDescription = (int) config('broadcast_digest.min_description', 120);
+
+        // Площадки и дни занятых строк — с НОМЕРОМ строки: «та же площадка, что
+        // во второй» полезнее, чем «площадка занята».
+        $venueAt = [];
+        $dayAt = [];
+        foreach ($named as $i => $row) {
+            if ($row->venue_id !== null) {
+                $venueAt[(int) $row->venue_id] ??= $i + 1;
+            }
+            $day = Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
+            $dayAt[$day] ??= $i + 1;
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (in_array((int) $row->id, $taken, true)) {
+                continue;
+            }
+
+            $venue = $row->venue_id !== null ? (int) $row->venue_id : null;
+            $day = Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
+            $length = mb_strlen(trim((string) $row->description));
+
+            $notes = [];
+            // Жёсткое правило автосборки, единственное из всех: строка без
+            // места говорит читателю ровно половину нужного.
+            if ($venue === null) {
+                $notes[] = 'без площадки — автомат такое не называет';
+            }
+            if ($venue !== null && isset($venueAt[$venue])) {
+                $notes[] = 'та же площадка, что в строке '.$venueAt[$venue];
+            }
+            if (isset($dayAt[$day])) {
+                $notes[] = 'тот же день, что в строке '.$dayAt[$day];
+            }
+            if (trim((string) $row->tg_description) !== '') {
+                $notes[] = 'есть свой анонс';
+            } elseif ($length < $minDescription) {
+                $notes[] = 'короткая карточка — строка выйдет сухой';
+            }
+
+            $out[] = [
+                'id' => (int) $row->id,
+                'title' => (string) $row->title,
+                'start_time' => $row->start_time ? Carbon::parse($row->start_time)->toIso8601String() : null,
+                'venue' => $row->venue_name,
+                'venue_id' => $venue,
+                'description_length' => $length,
+                'has_own_text' => trim((string) $row->tg_description) !== '',
+                'clash' => $venue !== null && isset($venueAt[$venue]) || isset($dayAt[$day]) || $venue === null,
+                'notes' => $notes,
+            ];
+        }
+
+        // Порядок тот же, которым думает автосборка: сначала то, что встанет в
+        // подборку без споров, внутри — по полноте карточки. Спорные не прячем,
+        // а опускаем вниз.
+        usort($out, function (array $a, array $b) {
+            if ($a['clash'] !== $b['clash']) {
+                return $a['clash'] <=> $b['clash'];
+            }
+            if ($a['has_own_text'] !== $b['has_own_text']) {
+                return $b['has_own_text'] <=> $a['has_own_text'];
+            }
+
+            return $b['description_length'] <=> $a['description_length'];
+        });
+
+        return ['theme_slug' => $slug, 'named' => $named, 'rows' => $out];
+    }
+
+    /**
      * Пул темы после всех отсечек — то, из чего выбирается тройка и что
      * считается в «20 концертов на 10 площадках».
      *

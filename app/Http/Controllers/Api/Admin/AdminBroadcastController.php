@@ -1189,6 +1189,52 @@ class AdminBroadcastController extends Controller
         return response()->json(['data' => $this->itemPayload($item->fresh(), null, null)]);
     }
 
+    /**
+     * Чем можно заменить позицию в подборке. ТОЛЬКО ЧТЕНИЕ.
+     *
+     * Первый шаг к замене позиции и одновременно ответ на вопрос, стоит ли её
+     * вообще городить: если у темы на эту неделю нет ни одного кандидата без
+     * споров, менять всё равно не на что, и дешевле это увидеть, чем построить.
+     *
+     * Кандидаты считает композитор тем же пулом, которым собирает подборку сам,
+     * — иначе человек выбирал бы из событий, которые автомат никогда бы не взял.
+     */
+    public function digestCandidates(int $itemId): JsonResponse
+    {
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+
+        if ($item->kind !== TelegramChatBroadcastItem::KIND_DIGEST) {
+            return response()->json(['ok' => false, 'error' => 'Кандидаты есть только у подборки.'], 422);
+        }
+
+        if ($item->digestTheme() === null) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Состав ещё не собран — сначала «Собрать и править», потом выбирать замену.',
+            ], 422);
+        }
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($item->broadcast_id);
+
+        $out = $this->digestComposer->candidatesForItem(
+            $item,
+            $broadcast,
+            $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now(),
+        );
+
+        if ($out === null) {
+            return response()->json(['ok' => false, 'error' => 'Тема записи неизвестна — пересоберите подборку.'], 422);
+        }
+
+        return response()->json(['data' => [
+            'theme' => $out['theme_slug'],
+            // Состав отдаём рядом с кандидатами: пометки кандидатов ссылаются
+            // на НОМЕРА строк, и без состава их не прочитать.
+            'named' => $this->linkedEvents($item),
+            'candidates' => $out['rows'],
+        ]]);
+    }
+
     /** Сколько суток отправленного лента показывает без отдельной просьбы. */
     private const HISTORY_DAYS = 7;
 
@@ -3234,9 +3280,16 @@ class AdminBroadcastController extends Controller
             ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
             ->where('l.item_id', $i->id)
             ->orderBy('l.position')
-            ->get(['e.id', 'e.title', 'e.start_time', 'v.name as venue_name']);
+            ->get(['e.id', 'e.title', 'e.start_time', 'v.name as venue_name', 'l.position']);
 
-        return $rows->map(fn ($r) => [
+        return $rows->values()->map(fn ($r, $i) => [
+            // Номер СТРОКИ, а не колонка position: она перенумеровывается при
+            // каждой пересборке (syncDigestEvents сносит состав и пишет заново
+            // по дате), и показывать её как «позицию 2» значило бы показывать
+            // число, которое завтра означает другое. Человеку нужен номер того,
+            // что он видит в посте.
+            'line' => $i + 1,
+            'position' => (int) $r->position,
             'id' => (int) $r->id,
             'title' => (string) $r->title,
             'venue' => $r->venue_name,

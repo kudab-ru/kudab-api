@@ -180,6 +180,80 @@ class BroadcastDigestPrepareTest extends TestCase
             ->where('item_id', $item->id)->count());
     }
 
+    /* ──────────── шаг 2: чем можно заменить позицию ──────────── */
+
+    public function test_candidates_never_repeat_the_current_roster(): void
+    {
+        $this->actingAsSuperadmin();
+
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+        $item = $this->digestItem($broadcast, Carbon::now()->addHours(12));
+        $this->artisan('broadcast:prepare-digests')->assertSuccessful();
+
+        $out = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->assertOk()->json('data');
+
+        $named = array_column($out['named'], 'id');
+        $candidates = array_column($out['candidates'], 'id');
+
+        $this->assertCount(3, $named);
+        $this->assertNotEmpty($candidates, 'шесть событий темы минус три названных — есть из чего выбирать');
+        $this->assertSame([], array_intersect($named, $candidates), 'названное не предлагаем заменой самому себе');
+        $this->assertSame([1, 2, 3], array_column($out['named'], 'line'), 'строки пронумерованы так, как стоят в посте');
+    }
+
+    /**
+     * Спорный кандидат виден, но помечен и лежит внизу.
+     *
+     * Правила «одна площадка — одна строка» и «один день — одна строка»
+     * действуют только на автосборку; состав, записанный человеком, их не
+     * проверяет никто. Прятать кандидата поэтому нельзя — иногда два спектакля
+     * в один день лучше, чем один хороший и один никакой, — но и молчать о
+     * споре тоже.
+     */
+    public function test_candidate_sharing_a_venue_is_marked_and_sunk(): void
+    {
+        $this->actingAsSuperadmin();
+
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+        $item = $this->digestItem($broadcast, Carbon::now()->addHours(12));
+        $this->artisan('broadcast:prepare-digests')->assertSuccessful();
+
+        $named = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->json('data.named');
+        $busyVenue = (int) DB::table('events')->where('id', $named[0]['id'])->value('venue_id');
+
+        // Тот же зал, но другой день: спор ровно один, и его должно быть видно.
+        $twinId = $this->themedEvent('Премьера в том же зале', 7, $busyVenue);
+
+        $rows = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->assertOk()->json('data.candidates');
+
+        $twin = collect($rows)->firstWhere('id', $twinId);
+        $this->assertNotNull($twin, 'кандидата со спорной площадкой не прячем');
+        $this->assertContains('та же площадка, что в строке 1', $twin['notes']);
+        $this->assertTrue($twin['clash']);
+        $this->assertNotSame($twinId, (int) $rows[0]['id'], 'спорный лежит ниже бесспорных');
+    }
+
+    /** Без состава кандидатов не бывает: не с чем сравнивать и нечего заменять. */
+    public function test_candidates_require_a_composed_roster(): void
+    {
+        $this->actingAsSuperadmin();
+
+        $broadcast = $this->makeChannel();
+        $item = $this->digestItem($broadcast, Carbon::now()->addHours(12));
+
+        $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->assertStatus(422);
+    }
+
     /* ───────────────────────── обстановка ───────────────────────── */
 
     private function actingAsSuperadmin(): void
@@ -202,14 +276,14 @@ class BroadcastDigestPrepareTest extends TestCase
         return $item;
     }
 
-    private function themedEvent(string $title, int $n): int
+    private function themedEvent(string $title, int $n, ?int $venueId = null): int
     {
         $community = \App\Models\Community::create([
             'name' => 'Организатор '.uniqid(),
             'city_id' => $this->cityId,
         ]);
 
-        $venueId = DB::table('venues')->insertGetId([
+        $venueId ??= DB::table('venues')->insertGetId([
             'city_id' => $this->cityId,
             'name' => 'Площадка '.$n.' '.uniqid(),
             'slug' => 'venue-'.uniqid(),

@@ -99,6 +99,9 @@ Route::prefix('admin')
         Route::post('/broadcast/items/{id}/retry', [AdminBroadcastController::class, 'retry']);
         Route::post('/broadcast/items/{id}/describe', [AdminBroadcastController::class, 'describe']);
         Route::post('/broadcast/items/{id}/compose', [AdminBroadcastController::class, 'composeDigest']);
+        // Чем заменить позицию в подборке. Только чтение: ручка ничего не
+        // меняет, она отвечает на вопрос «есть ли вообще чем заменять».
+        Route::get('/broadcast/items/{id}/digest-candidates', [AdminBroadcastController::class, 'digestCandidates']);
         Route::post('/broadcast/items/{id}/restore', [AdminBroadcastController::class, 'restore']);
         Route::post('/broadcast/items/{id}/unreject', [AdminBroadcastController::class, 'unreject']);
         Route::get('/broadcast/items/{id}/revisions', [AdminBroadcastController::class, 'revisions']);
