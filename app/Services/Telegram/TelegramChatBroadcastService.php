@@ -43,14 +43,8 @@ class TelegramChatBroadcastService
      */
     private const CANDIDATE_HORIZON_DAYS = 14;
 
-    /**
-     * Сколько часов между постом и началом события — минимум.
-     *
-     * Шесть: пост утром про вечер того же дня ещё имеет смысл, пост за час до
-     * начала — уже нет, человеку некогда собраться. Меньше суток и больше
-     * часа — это ровно тот диапазон, где решение принимает читатель, а не мы.
-     */
-    private const MIN_LEAD_HOURS = 6;
+    /** Запас автомата до начала события — см. [[PostTiming]]. */
+    private const MIN_LEAD_HOURS = PostTiming::MIN_LEAD_HOURS;
 
     /**
      * Сколько дней не предлагать снова отклонённое или снятое.
@@ -2059,10 +2053,11 @@ class TelegramChatBroadcastService
 
                         continue;
                     }
-                    $endsAt = $event->end_time ?: $event->start_time;
-                    // То же правило, что у подбора: событие не должно начаться
-                    // раньше публикации, а многодневное — не кончиться.
-                    if (! $endsAt || Carbon::parse($endsAt)->lt($publishAt)) {
+                    // То же правило, что у подбора, и теперь буквально то же:
+                    // общий [[PostTiming]]. Здесь оно раньше было своим и
+                    // пускало пост до КОНЦА события — то есть анонс концерта
+                    // мог уйти, когда он уже идёт.
+                    if (! PostTiming::fits($event, $publishAt, self::MIN_LEAD_HOURS)) {
                         continue;
                     }
 

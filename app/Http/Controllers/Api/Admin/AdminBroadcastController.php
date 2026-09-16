@@ -13,6 +13,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Repositories\EventRepository;
 use App\Services\Telegram\EventCaptionBuilder;
+use App\Services\Telegram\PostTiming;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Support\BroadcastSafety;
 use Carbon\Carbon;
@@ -706,14 +707,11 @@ class AdminBroadcastController extends Controller
             // Общий список карточек не привязан ко дню, и перетаскиванием на
             // дальний день можно было поставить анонс уже прошедшего.
             $publishAt = $this->toUtc($data['publish_at'] ?? null);
-            if ($publishAt && $event->start_time) {
-                $endsAt = $event->end_time ?: $event->start_time;
-                if (Carbon::parse($endsAt)->lt($publishAt)) {
-                    return response()->json([
-                        'ok' => false,
-                        'error' => 'К этому дню событие уже пройдёт — пост будет про прошлое.',
-                    ], 422);
-                }
+            if ($publishAt && ! PostTiming::fits($event, $publishAt)) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => $this->tooLateMessage($event),
+                ], 422);
             }
 
             // Занятый день уступает место. Раньше сюда нельзя было поставить
@@ -902,11 +900,8 @@ class AdminBroadcastController extends Controller
             if ($newAt !== null) {
                 $refusal = DB::transaction(function () use ($item, $newAt) {
                     $event = $item->event_id ? Event::query()->find($item->event_id) : null;
-                    if ($event && $event->start_time) {
-                        $endsAt = $event->end_time ?: $event->start_time;
-                        if (Carbon::parse($endsAt)->lt($newAt)) {
-                            return ['К этому дню событие уже пройдёт — пост будет про прошлое.', 422];
-                        }
+                    if (! PostTiming::fits($event, $newAt)) {
+                        return [$this->tooLateMessage($event), 422];
                     }
 
                     $broadcast = TelegramChatBroadcast::query()->find($item->broadcast_id);
@@ -1557,19 +1552,16 @@ class AdminBroadcastController extends Controller
             return response()->json(['ok' => false, 'error' => 'Не разобрал дату.'], 422);
         }
 
-        // Пост не может уйти ПОСЛЕ события — получится анонс задним числом.
-        // Перетаскивание в ленте позволяло это сделать в один жест: пост про
-        // концерт 9-го уезжал на 10-е и говорил «9 сен» в прошедшем времени.
-        // Правило то же, что у подбора: день в день можно, пока не началось.
+        // Пост не может уйти ПОСЛЕ начала события — получится анонс задним
+        // числом. Правило общее со всеми остальными дверями ([[PostTiming]]):
+        // раньше здесь стояла своя копия, и она пускала пост до КОНЦА события,
+        // то есть анонс концерта мог уехать, когда он уже идёт.
         $event = $item->event_id ? Event::query()->find($item->event_id) : null;
-        if ($event && $event->start_time) {
-            $endsAt = $event->end_time ?: $event->start_time;
-            if (Carbon::parse($endsAt)->lt($target)) {
-                return response()->json([
-                    'ok' => false,
-                    'error' => 'К этому дню событие уже пройдёт — пост будет про прошлое.',
-                ], 422);
-            }
+        if (! PostTiming::fits($event, $target)) {
+            return response()->json([
+                'ok' => false,
+                'error' => $this->tooLateMessage($event),
+            ], 422);
         }
 
         // Место в ленте — это СЛОТ, а не день, когда у канала слотов несколько.
@@ -1608,8 +1600,7 @@ class AdminBroadcastController extends Controller
         if ($occupant && $from !== null && $occupant->event_id) {
             $otherEvent = Event::query()->find($occupant->event_id);
             if ($otherEvent && $otherEvent->start_time) {
-                $otherEnds = $otherEvent->end_time ?: $otherEvent->start_time;
-                if (Carbon::parse($otherEnds)->lt($from)) {
+                if (! PostTiming::fits($otherEvent, Carbon::parse($from))) {
                     // Отказ обязан называть, КТО мешает и почему: без этого он
                     // читается как «нельзя, и всё» — человек видит два поста и
                     // не понимает, при чём тут второй.
@@ -1645,6 +1636,26 @@ class AdminBroadcastController extends Controller
         }
 
         return response()->json(['ok' => true, 'data' => ['swapped' => $occupant !== null]]);
+    }
+
+    /**
+     * Отказ обязан называть срок, а не только запрет.
+     *
+     * «К этому дню событие уже пройдёт» человек читает как ошибку интерфейса,
+     * пока не увидит, к какому именно моменту надо успеть.
+     */
+    private function tooLateMessage(?Event $event): string
+    {
+        $deadline = PostTiming::deadline($event);
+
+        if ($deadline === null) {
+            return 'Пост уйдёт после начала события — звать будет уже некуда.';
+        }
+
+        return sprintf(
+            'Пост уйдёт после начала события — звать будет уже некуда. Успеть надо до %s.',
+            $deadline->copy()->setTimezone('Europe/Moscow')->format('j.m в H:i'),
+        );
     }
 
     /** Пересобрать шаблонный текст под новый день публикации. */
@@ -1836,6 +1847,7 @@ class AdminBroadcastController extends Controller
     {
         // Событие могло закончиться, пока запись лежала снятой — возвращать
         // такое значит вернуть анонс прошлого.
+        $event = null;
         if ($item->event_id) {
             $event = Event::query()->find($item->event_id);
             if (! $event) {
@@ -1858,6 +1870,15 @@ class AdminBroadcastController extends Controller
         $slot = $item->kind === TelegramChatBroadcastItem::KIND_DIGEST
             ? $this->digestBooking->slotFor($broadcast, Carbon::now())
             : app(\App\Services\Telegram\BroadcastSlotPlanner::class)->nextFreeSlot($broadcast, Carbon::now());
+
+        // Свободный слот может оказаться ПОЗЖЕ события: планировщик про сроки
+        // не знает, он ищет пустую ячейку. Возврат от этого не отменяем —
+        // запись просто встаёт без дня и ждёт подходящего слота, как все
+        // остальные. Раньше она вставала в этот слот молча, и доставка потом
+        // снимала её с причиной «событие уже прошло».
+        if ($slot !== null && ! PostTiming::fits($event, $slot->copy()->utc())) {
+            $slot = null;
+        }
 
         $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
         $item->error_message = null;
@@ -2840,6 +2861,14 @@ class AdminBroadcastController extends Controller
             'original_url' => $event ? $this->originalUrl($event) : null,
             'event_start_time' => optional($event?->start_time)?->toIso8601String(),
             'event_end_time' => optional($event?->end_time)?->toIso8601String(),
+            // Пост стоит ПОЗЖЕ своего события. Такие записи в ленте уже есть —
+            // их наставили двери, у каждой из которых было своё правило, — и
+            // без пометки они выглядят обычными, пока доставка молча не снимет
+            // их с причиной «событие уже прошло», спалив слот.
+            'late_for_event' => $event !== null
+                && $i->posted_at === null
+                && $i->publish_at !== null
+                && ! PostTiming::fits($event, Carbon::parse($i->publish_at)),
             'event_address' => $event?->address,
             'event_city' => $event?->city,
             'price_status' => $event?->price_status,

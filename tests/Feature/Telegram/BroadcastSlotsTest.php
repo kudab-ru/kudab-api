@@ -502,6 +502,145 @@ class BroadcastSlotsTest extends TestCase
             ->count(), 'три свободных слота горизонта закрыты без единого нажатия');
     }
 
+    /**
+     * Пост нельзя поставить позже начала события — ни одной дверью.
+     *
+     * Правило разошлось по дверям: подбор требовал фору, перетаскивание
+     * пускало пост до КОНЦА события. Из-за этого в ленте появлялись записи,
+     * стоящие в день события, но позже него: доставка такую снимает, а слот
+     * сгорает молча. Владелец заметил это раньше тестов.
+     */
+    public function test_post_cannot_be_moved_past_the_event_start(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC')); // 06:00 МСК
+        $this->actAsSuperadmin();
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->slots = [10, 19];
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $community = Community::create(['name' => 'Орг вечернего', 'city_id' => $city->id]);
+
+        // Концерт сегодня в 13:00, идёт два часа.
+        $event = new Event;
+        $event->community_id = $community->id;
+        $event->title = 'Концерт в обед';
+        $event->status = 'active';
+        $event->city_id = $city->id;
+        $event->start_time = Carbon::parse('2026-09-15 13:00', 'Europe/Moscow')->utc();
+        $event->end_time = Carbon::parse('2026-09-15 15:00', 'Europe/Moscow')->utc();
+        $event->start_date = $event->start_time->toDateString();
+        $event->save();
+
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = Carbon::parse('2026-09-15 10:00', 'Europe/Moscow')->utc();
+        $item->save();
+
+        // 14:00 — концерт УЖЕ ИДЁТ. Прежнее правило пускало пост до конца
+        // события, то есть анонс мог уехать в антракте.
+        $this->postJson("/api/admin/broadcast/channels/{$broadcast->id}/move", [
+            'item_id' => $item->id,
+            'publish_at' => Carbon::parse('2026-09-15 14:00', 'Europe/Moscow')->format('Y-m-d\TH:i:sP'),
+        ])->assertStatus(422);
+
+        // И тем более вечером того же дня.
+        $this->postJson("/api/admin/broadcast/channels/{$broadcast->id}/move", [
+            'item_id' => $item->id,
+            'publish_at' => Carbon::parse('2026-09-15 19:00', 'Europe/Moscow')->format('Y-m-d\TH:i:sP'),
+        ])->assertStatus(422);
+
+        $this->assertSame(
+            '2026-09-15 10:00',
+            Carbon::parse($item->fresh()->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H:i'),
+            'пост остался на своём слоте',
+        );
+    }
+
+    /**
+     * Многодневку можно анонсировать, пока она идёт.
+     *
+     * У выставки «успеть» — это успеть до закрытия, а не до открытия. Правило
+     * «не позже начала» на неё не распространяется, иначе из ленты вылетели бы
+     * все выставки и прокаты.
+     */
+    public function test_running_exhibition_can_still_be_scheduled(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+        $this->actAsSuperadmin();
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->slots = [10];
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $community = Community::create(['name' => 'Музей', 'city_id' => $city->id]);
+
+        $event = new Event;
+        $event->community_id = $community->id;
+        $event->title = 'Выставка стекла';
+        $event->status = 'active';
+        $event->city_id = $city->id;
+        $event->start_time = Carbon::parse('2026-09-01 11:00', 'Europe/Moscow')->utc(); // уже открылась
+        $event->end_time = Carbon::parse('2026-10-01 20:00', 'Europe/Moscow')->utc();
+        $event->start_date = $event->start_time->toDateString();
+        $event->save();
+
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+
+        $this->postJson("/api/admin/broadcast/channels/{$broadcast->id}/move", [
+            'item_id' => $item->id,
+            'publish_at' => Carbon::parse('2026-09-18 10:00', 'Europe/Moscow')->format('Y-m-d\TH:i:sP'),
+        ])->assertOk();
+    }
+
+    /**
+     * Возврат снятого не ставит пост в слот, до которого событие уже пройдёт.
+     *
+     * Планировщик ищет пустую ячейку и про сроки не знает. Возврат от этого не
+     * отменяем — запись встаёт без дня и ждёт подходящего слота.
+     */
+    public function test_restored_post_waits_when_the_free_slot_is_too_late(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+        $this->actAsSuperadmin();
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->slots = [19];
+        $broadcast->settings = array_merge((array) $broadcast->settings, ['horizon_days' => 7]);
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $community = Community::create(['name' => 'Орг сегодняшнего', 'city_id' => $city->id]);
+
+        // Событие сегодня в 13:00 — ближайший свободный слот (сегодня 19:00)
+        // уже позже него.
+        $event = new Event;
+        $event->community_id = $community->id;
+        $event->title = 'Сегодняшний концерт';
+        $event->status = 'active';
+        $event->city_id = $city->id;
+        $event->start_time = Carbon::parse('2026-09-15 13:00', 'Europe/Moscow')->utc();
+        $event->end_time = Carbon::parse('2026-09-15 15:00', 'Europe/Moscow')->utc();
+        $event->start_date = $event->start_time->toDateString();
+        $event->save();
+
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/restore")->assertOk();
+
+        $this->assertNull($item->fresh()->publish_at,
+            'слот позже события не занимаем — запись ждёт подходящего');
+    }
+
+    private function actAsSuperadmin(): void
+    {
+        \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
+        $user = \App\Models\User::factory()->create();
+        $user->assignRole('superadmin');
+        \Laravel\Sanctum\Sanctum::actingAs($user);
+    }
+
     private function channelWithEvents(int $count): array
     {
         $city = $this->insertCity();
