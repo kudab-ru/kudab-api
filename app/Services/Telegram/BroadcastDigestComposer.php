@@ -362,7 +362,56 @@ final class BroadcastDigestComposer
             return $b['description_length'] <=> $a['description_length'];
         });
 
-        return ['theme_slug' => $slug, 'named' => $named, 'rows' => $out];
+        // Второй список: события темы, которые канал УЖЕ показывает отдельным
+        // постом. В обычные кандидаты они не попадают и попадать не должны —
+        // назвать в подборке то, что выйдет своим постом, значит сделать
+        // дубль. Но обмен осмыслен: событие переезжает в подборку, а его пост
+        // снимается. Поэтому отдельный список, а не общая куча.
+        $withShown = $this->poolForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $item->id, true);
+        $fresh = array_map(static fn (array $r) => $r['id'], $out);
+
+        $inFeed = [];
+        foreach (($withShown['rows'] ?? collect()) as $row) {
+            $id = (int) $row->id;
+            if (in_array($id, $taken, true) || in_array($id, $fresh, true)) {
+                continue;
+            }
+
+            // Только то, что ДЕЙСТВИТЕЛЬНО стоит в ленте: отсечка снимает ещё и
+            // отправленное за неделю, а его менять местами не на что.
+            $post = DB::table('telegram.chat_broadcast_item_events as l')
+                ->join('telegram.chat_broadcast_items as i', 'i.id', '=', 'l.item_id')
+                ->where('i.broadcast_id', $broadcast->id)
+                ->where('l.event_id', $id)
+                ->whereNull('i.posted_at')
+                ->whereIn('i.status', [
+                    TelegramChatBroadcastItem::STATUS_PENDING,
+                    TelegramChatBroadcastItem::STATUS_PLANNED,
+                    TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                    TelegramChatBroadcastItem::STATUS_APPROVED,
+                    TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+                ])
+                ->orderBy('i.publish_at')
+                ->first(['i.id as item_id', 'i.publish_at', 'i.is_pinned']);
+
+            if ($post === null) {
+                continue;
+            }
+
+            $inFeed[] = [
+                'id' => $id,
+                'title' => (string) $row->title,
+                'start_time' => $row->start_time ? Carbon::parse($row->start_time)->toIso8601String() : null,
+                'venue' => $row->venue_name,
+                'venue_id' => $row->venue_id !== null ? (int) $row->venue_id : null,
+                'has_own_text' => trim((string) $row->tg_description) !== '',
+                'post_item_id' => (int) $post->item_id,
+                'post_publish_at' => $post->publish_at ? Carbon::parse($post->publish_at)->toIso8601String() : null,
+                'post_pinned' => (bool) $post->is_pinned,
+            ];
+        }
+
+        return ['theme_slug' => $slug, 'named' => $named, 'rows' => $out, 'in_feed' => $inFeed];
     }
 
     /**
@@ -379,6 +428,7 @@ final class BroadcastDigestComposer
         array $theme,
         Carbon $publishAt,
         ?int $exceptItemId = null,
+        bool $keepShown = false,
     ): ?array {
         $ids = $this->interestTree((string) $theme['interest']);
         if ($ids === []) {
@@ -422,7 +472,18 @@ final class BroadcastDigestComposer
         $rows = $this->rejectStopList($rows);
         $rows = $this->rejectForeignGenre($rows, (string) $theme['slug']);
         $rows = $this->rejectForeignSourceRubric($rows, (string) $theme['slug']);
-        $rows = $this->rejectAlreadyShown($broadcast, $rows, $exceptItemId);
+        // Остывание отказа — и в подборке тоже. Событие, выброшенное из состава
+        // руками, до сих пор возвращалось в пул НЕМЕДЛЕННО: тридцатидневное
+        // «не предлагать» жило только на подборе обычной ленты
+        // (pickBestEventIdForChat), а рубрика про него не знала и на следующей
+        // же пересборке называла его снова.
+        $rows = $this->rejectRecentlyRejected($broadcast, $rows);
+
+        // $keepShown — для выдачи «уже в ленте»: там нужны как раз те события,
+        // которые эта отсечка и снимает. Автосборка её не отключает никогда.
+        if (! $keepShown) {
+            $rows = $this->rejectAlreadyShown($broadcast, $rows, $exceptItemId);
+        }
 
         return ['rows' => $this->collapseRepeats($rows)];
     }
@@ -539,6 +600,37 @@ final class BroadcastDigestComposer
      * заголовок. Одного мало — то же событие приезжает из разных источников
      * разными строками, и подборка стала бы оглавлением уже прочитанного.
      */
+    /**
+     * Событие, от которого канал недавно отказался, рубрика не предлагает.
+     *
+     * Тот же срок и тот же признак, что у ленты: запись со статусом rejected,
+     * тронутая за последние REJECTED_COOLDOWN_DAYS суток. Второго механизма
+     * заводить нельзя — «не предлагать» должно означать одно и то же в ленте и
+     * в подборке, иначе человек прячет событие в одном месте и встречает его в
+     * другом.
+     */
+    private function rejectRecentlyRejected(
+        TelegramChatBroadcast $broadcast,
+        \Illuminate\Support\Collection $rows,
+    ): \Illuminate\Support\Collection {
+        $since = Carbon::now()->subDays(TelegramChatBroadcastService::REJECTED_COOLDOWN_DAYS);
+
+        $cold = DB::table('telegram.chat_broadcast_items')
+            ->where('broadcast_id', $broadcast->id)
+            ->where('status', TelegramChatBroadcastItem::STATUS_REJECTED)
+            ->where('updated_at', '>=', $since)
+            ->whereNotNull('event_id')
+            ->pluck('event_id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
+        if ($cold === []) {
+            return $rows;
+        }
+
+        return $rows->reject(fn ($r) => in_array((int) $r->id, $cold, true))->values();
+    }
+
     private function rejectAlreadyShown(
         TelegramChatBroadcast $broadcast,
         \Illuminate\Support\Collection $rows,

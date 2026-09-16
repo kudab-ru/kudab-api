@@ -1190,6 +1190,184 @@ class AdminBroadcastController extends Controller
     }
 
     /**
+     * Заменить одно событие в составе подборки.
+     *
+     * Тело: out — кого выкинуть, in — кого поставить. Плюс два осознанных
+     * согласия, каждое под своим флагом, потому что каждое чем-то платит:
+     *   swap — новое событие уже стоит в ленте отдельным постом, и этот пост
+     *          будет снят (иначе канал показал бы одно и то же дважды);
+     *   cool — выброшенному событию ставится тридцатидневное «не предлагать»,
+     *          то же самое, что у кнопки отказа в ленте.
+     *
+     * Подпись пересобирается ЗДЕСЬ ЖЕ, в одной транзакции с составом, и это не
+     * украшение. Альбом доставка собирает по СОСТАВУ в момент опроса, а подпись
+     * не трогает, если она непустая: разойдись эти двое — в канал уехал бы
+     * текст про одно событие с картинкой от другого, молча и без единой ошибки
+     * в логе.
+     */
+    public function replaceDigestEvent(Request $request, int $itemId): JsonResponse
+    {
+        $data = $request->validate([
+            'out' => ['required', 'integer'],
+            'in' => ['required', 'integer', 'different:out'],
+            'swap' => ['sometimes', 'boolean'],
+            'cool' => ['sometimes', 'boolean'],
+        ]);
+
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+
+        if ($item->kind !== TelegramChatBroadcastItem::KIND_DIGEST) {
+            return response()->json(['ok' => false, 'error' => 'Состав есть только у подборки.'], 422);
+        }
+        if ($item->posted_at !== null) {
+            return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
+        }
+        // Заклеймленную не трогаем. Клейм ставится в том же проходе, где задача
+        // с УЖЕ СОБРАННЫМИ подписью и картинками уходит боту: правка попала бы
+        // в базу, но не в канал — админка показывала бы одно, подписчик видел
+        // бы другое. Чинится только отказом.
+        if ($item->claimed_at !== null
+            && Carbon::parse($item->claimed_at)->gt(Carbon::now()->subSeconds(TelegramChatBroadcastService::CLAIM_LEASE_SECONDS))) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Пост уже взят на отправку — менять состав поздно.',
+            ], 409);
+        }
+        // Заявка на текст в полёте: парсер перезапишет digest_meta целиком по
+        // тому составу, который прочитал в начале генерации. Замена, поданная
+        // в это окно, была бы затёрта по мете и осталась бы в связи — то есть
+        // текст про одних, состав про других.
+        if ($item->text_requested_at !== null) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Идёт заказ текста у ИИ — дождитесь, он занимает меньше минуты.',
+            ], 409);
+        }
+        // Ручной текст пересобрать нельзя, не потеряв его. Отказываем вместо
+        // молчаливой перезаписи: вернуть шаблонный — одно нажатие, а час
+        // работы не восстановить.
+        if ($item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Текст поста правлен целиком. Верните шаблонный — тогда состав можно менять.',
+            ], 409);
+        }
+
+        $roster = DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)->pluck('event_id')->map(fn ($v) => (int) $v)->all();
+
+        if (! in_array((int) $data['out'], $roster, true)) {
+            return response()->json(['ok' => false, 'error' => 'Этого события в подборке нет.'], 422);
+        }
+        if (in_array((int) $data['in'], $roster, true)) {
+            return response()->json(['ok' => false, 'error' => 'Это событие уже названо в подборке.'], 422);
+        }
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($item->broadcast_id);
+        $publishAt = $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now();
+
+        // Дубль канала: событие уже стоит своим постом. Меняем только с прямого
+        // согласия и вместе со снятием того поста.
+        $taken = $this->eventTakenByAnotherPost($broadcast->id, (int) $data['in'], $item->id);
+        if ($taken !== null && ! $request->boolean('swap')) {
+            return response()->json([
+                'ok' => false,
+                'error' => $this->takenMessage($taken),
+                'data' => ['needs_swap' => true, 'post_item_id' => $taken->id],
+            ], 409);
+        }
+        if ($taken !== null && $taken->posted_at !== null) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Канал уже показывал это событие — в подборке оно будет повтором.',
+            ], 409);
+        }
+
+        $out = DB::transaction(function () use ($item, $broadcast, $data, $publishAt, $taken, $request) {
+            if ($taken !== null) {
+                // Снимаем, а не отклоняем: это не отказ по качеству, событие
+                // просто переезжает в подборку. skipped подбору не мешает — и
+                // если подборка его потом выкинет, оно вернётся в ленту.
+                $taken->status = TelegramChatBroadcastItem::STATUS_SKIPPED;
+                $taken->error_message = 'переехало в подборку недели';
+                $taken->publish_at = null;
+                $taken->claimed_at = null;
+                $taken->claim_token = null;
+                $taken->save();
+            }
+
+            $ok = $this->broadcasts->replaceDigestEvent(
+                $item,
+                $broadcast,
+                (int) $data['out'],
+                (int) $data['in'],
+                $publishAt,
+            );
+
+            if (! $ok) {
+                return null;
+            }
+
+            if ($request->boolean('cool')) {
+                $this->coolDownEvent($broadcast->id, (int) $data['out']);
+            }
+
+            // Ручной выбор картинок держится белым списком из состава: после
+            // замены прежний набор ему больше не отвечает, и следующая правка
+            // формы отбилась бы 422. Снимаем — альбом соберётся по новому
+            // составу сам.
+            if (is_array($item->photo_urls)) {
+                $item->photo_urls = null;
+                $item->save();
+            }
+
+            return $item->fresh();
+        });
+
+        if ($out === null) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Новый состав не собрался — замена отменена, подборка осталась как была.',
+            ], 409);
+        }
+
+        return response()->json(['data' => $this->itemPayload($out, null, null)]);
+    }
+
+    /**
+     * Тридцатидневное «не предлагать» — тем же приёмом, что кнопка отказа.
+     *
+     * Остывание в этом проекте выражено ОДНИМ способом: запись очереди со
+     * статусом rejected на паре (канал, событие). Второго механизма заводить
+     * нельзя — иначе «не предлагать» значило бы разное в ленте и в подборке.
+     * У события, которое никогда не было отдельным постом, такой записи нет
+     * вовсе, поэтому её здесь и создаём.
+     */
+    private function coolDownEvent(int $broadcastId, int $eventId): void
+    {
+        $item = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            ->where('event_id', $eventId)
+            ->first();
+
+        if ($item === null) {
+            $item = new TelegramChatBroadcastItem;
+            $item->broadcast_id = $broadcastId;
+            $item->event_id = $eventId;
+        } elseif ($item->posted_at !== null) {
+            // Отправленное не перекрашиваем: posted — это факт, а не решение.
+            return;
+        }
+
+        $item->status = TelegramChatBroadcastItem::STATUS_REJECTED;
+        $item->error_message = 'снято из подборки: больше не предлагать';
+        $item->publish_at = null;
+        $item->claimed_at = null;
+        $item->claim_token = null;
+        $item->save();
+    }
+
+    /**
      * Чем можно заменить позицию в подборке. ТОЛЬКО ЧТЕНИЕ.
      *
      * Первый шаг к замене позиции и одновременно ответ на вопрос, стоит ли её
@@ -1228,6 +1406,10 @@ class AdminBroadcastController extends Controller
 
         return response()->json(['data' => [
             'theme' => $out['theme_slug'],
+            // Второй список — обмен: событие переезжает из ленты в подборку, а
+            // его отдельный пост снимается. Смешивать с обычными кандидатами
+            // нельзя: цена у выбора разная.
+            'in_feed' => $out['in_feed'],
             // Состав отдаём рядом с кандидатами: пометки кандидатов ссылаются
             // на НОМЕРА строк, и без состава их не прочитать.
             'named' => $this->linkedEvents($item),

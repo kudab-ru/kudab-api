@@ -1274,6 +1274,65 @@ class TelegramChatBroadcastService
      *
      * @param  array{caption: string, event_ids: list<int>}  $draft
      */
+    /**
+     * Заменить одно событие в составе подборки, не переизбирая остальные.
+     *
+     * ПОЧЕМУ ЧЕРЕЗ recompose, А НЕ ПРАВКОЙ СТРОКИ СВЯЗИ. Подпись подборки —
+     * монолит: шапка, подводка, по блоку на событие и подвал собираются вместе
+     * из состава. Поменять в ней один блок нельзя, можно только пересобрать по
+     * новому составу — что recompose и делает, НЕ трогая выбор событий.
+     *
+     * Позицию менять местами незачем: syncDigestEvents всё равно сносит состав
+     * и пишет заново, нумеруя строки по дате. Поэтому временная строка встаёт
+     * в хвост, а окончательный порядок расставит сборка.
+     *
+     * Подводка после замены снимется сама (applyDigestDraft сверяет состав с
+     * digest_meta.roster) — и правильно: она написана про конкретную тройку и
+     * после подмены врёт.
+     *
+     * @return bool удалось ли; false означает, что новый состав не собрался и
+     *              вызывающий обязан откатить транзакцию
+     */
+    public function replaceDigestEvent(
+        TelegramChatBroadcastItem $item,
+        TelegramChatBroadcast $broadcast,
+        int $outEventId,
+        int $inEventId,
+        Carbon $publishAt,
+    ): bool {
+        DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)
+            ->where('event_id', $outEventId)
+            ->delete();
+
+        $tail = (int) DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)
+            ->max('position');
+
+        DB::table('telegram.chat_broadcast_item_events')->insertOrIgnore([
+            'item_id' => $item->id,
+            'event_id' => $inEventId,
+            'position' => $tail + 1,
+            'created_at' => now(),
+        ]);
+
+        $draft = $this->digestComposer->recompose($item->refresh(), $broadcast, $publishAt);
+        if ($draft === null) {
+            return false;
+        }
+
+        $this->applyDigestDraft($item, $draft);
+
+        Log::info('broadcast.digest.event_replaced', [
+            'item_id' => $item->id,
+            'out' => $outEventId,
+            'in' => $inEventId,
+            'named' => count($draft['event_ids']),
+        ]);
+
+        return true;
+    }
+
     public function applyDigestDraft(TelegramChatBroadcastItem $item, array $draft): void
     {
         $theme = (string) ($draft['theme_slug'] ?? ($draft['theme']['slug'] ?? ''));

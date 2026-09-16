@@ -254,6 +254,187 @@ class BroadcastDigestPrepareTest extends TestCase
             ->assertStatus(422);
     }
 
+    /* ──────────── шаг 3: замена, обмен, остывание ──────────── */
+
+    public function test_replace_swaps_one_line_and_keeps_the_rest(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+
+        $out = $named[1]['id'];
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $out,
+            'in' => $candidate,
+        ])->assertOk();
+
+        $roster = DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)->pluck('event_id')->map(fn ($v) => (int) $v)->all();
+
+        $this->assertNotContains($out, $roster, 'выброшенного в составе нет');
+        $this->assertContains($candidate, $roster, 'новое встало на его место');
+        $this->assertContains($named[0]['id'], $roster, 'соседние строки не тронуты');
+        $this->assertContains($named[2]['id'], $roster);
+        $this->assertCount(3, $roster);
+    }
+
+    /** Подпись пересобирается в той же транзакции: иначе альбом разойдётся с текстом. */
+    public function test_replace_rebuilds_the_caption(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+
+        $before = $item->fresh()->caption;
+        $title = (string) DB::table('events')->where('id', $candidate)->value('title');
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[1]['id'],
+            'in' => $candidate,
+        ])->assertOk();
+
+        $after = $item->fresh()->caption;
+        $this->assertNotSame($before, $after);
+        $this->assertStringContainsString($title, $after, 'новое событие названо в тексте');
+        $this->assertStringNotContainsString($named[1]['title'], $after, 'выброшенного в тексте больше нет');
+    }
+
+    /** Флаг cool ставит то же тридцатидневное «не предлагать», что кнопка отказа. */
+    public function test_cooled_event_stops_coming_back(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $out = $named[1]['id'];
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $out, 'in' => $candidate, 'cool' => true,
+        ])->assertOk();
+
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_REJECTED, DB::table('telegram.chat_broadcast_items')
+            ->where('broadcast_id', $item->broadcast_id)->where('event_id', $out)->value('status'));
+
+        $rows = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->assertOk()->json('data.candidates');
+
+        $this->assertNotContains($out, array_column($rows, 'id'),
+            'остывшее событие рубрика больше не предлагает');
+    }
+
+    /** Без cool событие возвращается в пул — это осознанный выбор, а не забывчивость. */
+    public function test_without_cooling_the_event_returns_to_the_pool(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $out = $named[1]['id'];
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $out, 'in' => $candidate,
+        ])->assertOk();
+
+        $rows = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->assertOk()->json('data.candidates');
+
+        $this->assertContains($out, array_column($rows, 'id'));
+    }
+
+    /**
+     * Обмен с лентой — только с прямого согласия.
+     *
+     * Событие, стоящее своим постом, в обычные кандидаты не попадает вовсе: это
+     * был бы дубль. Но обмен осмыслен, и тогда пост обязан сняться.
+     */
+    public function test_taking_an_event_from_the_feed_requires_swap_and_drops_the_post(): void
+    {
+        [$item, $named] = $this->composedDigestWithSpare();
+
+        // Свободного кандидата ставим в ленту отдельным постом.
+        $spare = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->json('data.candidates.0.id');
+
+        $post = new TelegramChatBroadcastItem;
+        $post->broadcast_id = $item->broadcast_id;
+        $post->kind = TelegramChatBroadcastItem::KIND_EVENT;
+        $post->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $post->event_id = $spare;
+        $post->publish_at = Carbon::now()->addDays(2)->setTime(10, 0);
+        $post->save();
+
+        $body = ['out' => $named[1]['id'], 'in' => $spare];
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", $body)
+            ->assertStatus(409)
+            ->assertJsonPath('data.needs_swap', true);
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", $body + ['swap' => true])
+            ->assertOk();
+
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $post->fresh()->status,
+            'отдельный пост снят — иначе канал показал бы событие дважды');
+        $this->assertNull($post->fresh()->publish_at, 'и день освободился');
+
+        $inFeed = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->json('data.in_feed');
+        $this->assertIsArray($inFeed, 'список «уже в ленте» отдаётся отдельно от обычных кандидатов');
+    }
+
+    /** Ручной текст пересобрать нельзя, не потеряв его, — отказываем. */
+    public function test_manual_caption_blocks_the_replacement(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $item->caption_source = TelegramChatBroadcastItem::CAPTION_MANUAL;
+        $item->save();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[1]['id'], 'in' => $candidate,
+        ])->assertStatus(409);
+    }
+
+    /** Заявка на текст в полёте: парсер затрёт мету по своему составу. */
+    public function test_pending_text_request_blocks_the_replacement(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $item->text_requested_at = Carbon::now();
+        $item->save();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[1]['id'], 'in' => $candidate,
+        ])->assertStatus(409);
+    }
+
+    /** Заклеймленную не трогаем: подпись уже уехала боту задачей. */
+    public function test_claimed_item_blocks_the_replacement(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $item->claimed_at = Carbon::now();
+        $item->claim_token = 'x';
+        $item->save();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[1]['id'], 'in' => $candidate,
+        ])->assertStatus(409);
+    }
+
+    /** @return array{0: TelegramChatBroadcastItem, 1: array<int, array<string, mixed>>, 2: int} */
+    private function composedDigestWithSpare(): array
+    {
+        $this->actingAsSuperadmin();
+
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+        $item = $this->digestItem($broadcast, Carbon::now()->addHours(12));
+        $this->artisan('broadcast:prepare-digests')->assertSuccessful();
+
+        // Сборка заодно заказывает текст, и на время заявки состав заперт —
+        // парсер перезаписывает digest_meta по своему снимку. В жизни заявка
+        // закрывается за полминуты (TgDescribeDueCommand обнуляет
+        // text_requested_at), здесь парсера нет, поэтому закрываем руками.
+        $item->text_requested_at = null;
+        $item->planned_at = null;
+        $item->save();
+
+        $data = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->assertOk()->json('data');
+
+        return [$item, $data['named'], (int) $data['candidates'][0]['id']];
+    }
+
     /* ───────────────────────── обстановка ───────────────────────── */
 
     private function actingAsSuperadmin(): void
