@@ -342,6 +342,26 @@ class TelegramVenuePortraitService
             ->where('city_id', $cityId)
             ->whereNotNull('tg_portrait')
             ->where('tg_portrait', '<>', '')
+            // ПЛОЩАДКА БЕЗ ЕДИНОЙ ФОТОГРАФИИ В РОТАЦИЮ НЕ ИДЁТ.
+            //
+            // Фотографии портрет берёт у событий площадки, и у места без
+            // событий их нет вовсе: в канал уходит абзац прозы про бар — без
+            // картинки и без «что здесь скоро», потому что событий тоже нет.
+            // Замер 2026-09-16 по Воронежу: таких 19 площадок из 108 с готовым
+            // текстом, и ротация ставила их ПЕРВЫМИ — «ни разу не показывали»
+            // сортируется вперёд.
+            //
+            // Руками поставить такую по-прежнему можно: в карточке пула прямо
+            // написано «без фото — уйдёт текстом», и решение за человеком.
+            ->whereExists(function ($q) {
+                $q->selectRaw('1')
+                    ->from('events as e')
+                    ->join('event_sources as es', 'es.event_id', '=', 'e.id')
+                    ->whereColumn('e.venue_id', 'venues.id')
+                    ->whereNull('e.deleted_at')
+                    ->whereNotNull('es.images')
+                    ->whereRaw('json_array_length(es.images) > 0');
+            })
             ->when($exclude !== [], fn ($q) => $q->whereNotIn('id', $exclude))
             ->get(['id', 'name', 'tg_portrait', 'street', 'house', 'address', 'latitude', 'longitude']);
 

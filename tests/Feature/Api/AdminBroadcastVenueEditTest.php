@@ -92,6 +92,10 @@ class AdminBroadcastVenueEditTest extends TestCase
         $other->status = 'active';
         $other->tg_portrait = 'Второй этаж, кофе и лекции.';
         $other->save();
+        // Площадка без единой фотографии в ротацию не идёт: портрет без
+        // картинки — это абзац прозы. Фикстуре фото нужно, иначе тест проверял
+        // бы отсев, а не то, ради чего написан.
+        $this->givePhoto($other);
 
         $res = $this->getJson("/api/admin/broadcast/channels/{$item->broadcast_id}/suggestions");
 
@@ -117,6 +121,10 @@ class AdminBroadcastVenueEditTest extends TestCase
         $other->status = 'active';
         $other->tg_portrait = 'Второй этаж, кофе и лекции.';
         $other->save();
+        // Площадка без единой фотографии в ротацию не идёт: портрет без
+        // картинки — это абзац прозы. Фикстуре фото нужно, иначе тест проверял
+        // бы отсев, а не то, ради чего написан.
+        $this->givePhoto($other);
 
         $res = $this->postJson("/api/admin/broadcast/channels/{$item->broadcast_id}/enqueue-venue", [
             'venue_id' => $other->id,
@@ -158,6 +166,10 @@ class AdminBroadcastVenueEditTest extends TestCase
         $other->status = 'active';
         $other->tg_portrait = 'Второй этаж, кофе и лекции.';
         $other->save();
+        // Площадка без единой фотографии в ротацию не идёт: портрет без
+        // картинки — это абзац прозы. Фикстуре фото нужно, иначе тест проверял
+        // бы отсев, а не то, ради чего написан.
+        $this->givePhoto($other);
 
         $res = $this->postJson("/api/admin/broadcast/channels/{$item->broadcast_id}/enqueue-venue", [
             'venue_id' => $other->id,
@@ -235,5 +247,46 @@ class AdminBroadcastVenueEditTest extends TestCase
         );
 
         return City::query()->where('slug', 'voronezh')->firstOrFail();
+    }
+
+    /** Фотографии портрет берёт у событий площадки — другого источника нет. */
+    private function givePhoto(Venue $venue): void
+    {
+        $community = \App\Models\Community::create([
+            'name' => 'Фотоисточник '.uniqid(),
+            'city_id' => $venue->city_id,
+        ]);
+
+        $event = new \App\Models\Event;
+        $event->community_id = $community->id;
+        $event->title = 'Прошлое событие '.uniqid();
+        $event->status = 'active';
+        $event->city_id = $venue->city_id;
+        $event->venue_id = $venue->id;
+        $event->start_time = now()->subDays(30);
+        $event->start_date = $event->start_time->toDateString();
+        $event->save();
+
+        $networkId = DB::table('social_networks')->value('id')
+            ?? DB::table('social_networks')->insertGetId([
+                'name' => 'VK', 'slug' => 'vk', 'created_at' => now(), 'updated_at' => now(),
+            ]);
+        $linkId = DB::table('community_social_links')->insertGetId([
+            'community_id' => $community->id,
+            'social_network_id' => $networkId,
+            'url' => 'https://vk.com/'.uniqid(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        DB::table('event_sources')->insert([
+            'event_id' => $event->id,
+            'social_link_id' => $linkId,
+            'source' => 'vk',
+            'post_external_id' => 'post-'.uniqid(),
+            'images' => json_encode(['https://example.test/venue-'.$venue->id.'.jpg']),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 }

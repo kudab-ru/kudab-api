@@ -286,13 +286,57 @@ class VenuePortraitEnqueueTest extends TestCase
         return City::query()->where('slug', $slug)->firstOrFail();
     }
 
+    /**
+     * Площадка без единой фотографии в ротацию не идёт.
+     *
+     * Фотографии портрет берёт у событий площадки, и у места без событий их нет
+     * вовсе: в канал уходит абзац прозы про бар — без картинки и без «что здесь
+     * скоро», потому что событий тоже нет. Хуже того, ротация ставила такие
+     * ПЕРВЫМИ: «ни разу не показывали» сортируется вперёд. Замер по Воронежу —
+     * 19 таких площадок из 108 с готовым текстом.
+     */
+    public function test_venue_without_a_single_photo_is_not_rotated(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh-photo', 'active', 39.2, 51.6);
+        $chat = $this->createChannelChat($city->id, -1009100777, 8307201777);
+        $broadcast = TelegramChatBroadcast::create([
+            'chat_id' => $chat->id,
+            'enabled' => true,
+            'settings' => ['period' => 'daily_10', 'template_code' => 'basic'],
+        ]);
+
+        $mute = $this->createVenue($city->id, 'Бар без фото', 'bar-bez-foto', 'Проза про бар.', withPhoto: false);
+        $alive = $this->createVenue($city->id, 'Клуб с фото', 'klub-s-foto', 'Проза про клуб.');
+
+        $picked = app(\App\Services\Telegram\TelegramVenuePortraitService::class)
+            ->pickNextVenueForChat((int) $city->id, (int) $broadcast->id, Carbon::now());
+
+        $this->assertNotNull($picked);
+        $this->assertSame((int) $alive->id, (int) $picked->id,
+            'портрет без единой картинки — не портрет, а абзац прозы');
+        $this->assertNotSame((int) $mute->id, (int) $picked->id);
+    }
+
     private function createCommunity(int $cityId, string $name): Community
     {
         return Community::create(['name' => $name, 'city_id' => $cityId]);
     }
 
-    private function createVenue(int $cityId, string $name, string $slug, ?string $tgPortrait): Venue
-    {
+    /**
+     * @param  bool  $withPhoto  у площадки есть хотя бы одна фотография.
+     *                           Площадка без фото в ротацию портретов не идёт
+     *                           (портрет без единой картинки — это абзац прозы
+     *                           про бар), поэтому фикстуре она нужна по
+     *                           умолчанию: иначе тест проверял бы отсев, а не
+     *                           то, ради чего написан.
+     */
+    private function createVenue(
+        int $cityId,
+        string $name,
+        string $slug,
+        ?string $tgPortrait,
+        bool $withPhoto = true,
+    ): Venue {
         $venue = new Venue;
         $venue->city_id = $cityId;
         $venue->name = $name;
@@ -303,7 +347,52 @@ class VenuePortraitEnqueueTest extends TestCase
         }
         $venue->save();
 
+        if ($withPhoto) {
+            $this->givePhoto($venue);
+        }
+
         return $venue;
+    }
+
+    /** Фотографии портрет берёт у событий площадки — другого источника у него нет. */
+    private function givePhoto(Venue $venue): void
+    {
+        $community = Community::create([
+            'name' => 'Фотоисточник '.uniqid(),
+            'city_id' => $venue->city_id,
+        ]);
+
+        $event = new Event;
+        $event->community_id = $community->id;
+        $event->title = 'Прошлое событие площадки '.uniqid();
+        $event->status = 'active';
+        $event->city_id = $venue->city_id;
+        $event->venue_id = $venue->id;
+        $event->start_time = Carbon::now()->subDays(30);
+        $event->start_date = $event->start_time->toDateString();
+        $event->save();
+
+        $networkId = DB::table('social_networks')->value('id')
+            ?? DB::table('social_networks')->insertGetId([
+                'name' => 'VK', 'slug' => 'vk', 'created_at' => now(), 'updated_at' => now(),
+            ]);
+        $linkId = DB::table('community_social_links')->insertGetId([
+            'community_id' => $community->id,
+            'social_network_id' => $networkId,
+            'url' => 'https://vk.com/'.uniqid(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        DB::table('event_sources')->insert([
+            'event_id' => $event->id,
+            'social_link_id' => $linkId,
+            'source' => 'vk',
+            'post_external_id' => 'post-'.uniqid(),
+            'images' => json_encode(['https://example.test/venue-'.$venue->id.'.jpg']),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     private function createEvent(int $cityId, int $communityId, string $title, Carbon $startTime): Event
