@@ -6,12 +6,8 @@ use App\Services\Telegram\TelegramChatBroadcastService;
 use Illuminate\Console\Command;
 
 /**
- * P0 автопостинг, фаза 1 — автонаполнение очереди.
- *
- * Для каждого enabled+due city-канала (расписание в chat_broadcasts.settings.period)
- * подбирает событие города и кладёт в очередь (status=pending), если очередь пуста.
- * Сам постинг делает bot-cron, который поллит /broadcast/single/run/poll.
- * Тонкий адаптер над TelegramChatBroadcastService::enqueueDueForAllChannels.
+ * Тонкий адаптер над TelegramChatBroadcastService::enqueueDueForAllChannels —
+ * правила наполнения и их причины описаны там.
  */
 class BroadcastEnqueueDueCommand extends Command
 {
@@ -45,7 +41,6 @@ class BroadcastEnqueueDueCommand extends Command
             $this->line("  {$s['skipped_not_allowed']} канал(ов) пропущено: стенду боевые каналы запрещены (".\App\Support\BroadcastSafety::ALLOW_KEY.' в .env разрешает свой)');
         }
 
-        // Голодание: due-каналы, которые должны были опубликовать, но не смогли.
         $starved = $s['skipped_no_city'] + $s['no_candidate'] + $s['skipped_no_reviewer'];
         if ($starved > 0) {
             $this->warn("⚠ {$starved} due-канал(ов) не опубликовали (см. broadcast.enqueue.* в логах: no_city/no_candidate/no_reviewer)");

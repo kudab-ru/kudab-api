@@ -60,7 +60,8 @@ class TelegramChatBroadcastService
     private const CROSS_TIME_WINDOW_DAYS = 14;
 
     /**
-     * Минимальный зазор между двумя постами канала, в минутах.
+     * Минимальный зазор между двумя постами канала, в минутах (значение по
+     * умолчанию; канал может задать своё в settings.min_gap_minutes).
      *
      * Считается по факту последней отправки ЛЮБОГО вида — событие, портрет
      * площадки, «отправить сейчас». Обоснование и замеры — docs/broadcast-admin/CADENCE.md:
@@ -68,8 +69,6 @@ class TelegramChatBroadcastService
      * интервал в истории канала — 78 секунд между двумя событийными постами.
      */
     private const MIN_GAP_MINUTES = 90;
-
-    // Значение по умолчанию; канал может задать своё в settings.min_gap_minutes.
 
     /**
      * Насколько просроченный пост ещё отправляем, в часах.
@@ -119,12 +118,7 @@ class TelegramChatBroadcastService
 
     /**
      * Получить (или создать) настройки рассылки по telegram_id и telegram_chat_id.
-     *
-     * Проверяем:
-     *  - что TelegramUser существует,
-     *  - что чат существует,
-     *  - что у пользователя есть права управлять чатами,
-     *  - что этот пользователь действительно владелец чата (или хотя бы админ).
+     * Проверки прав — resolveManagedChat().
      */
     public function getSettingsByTelegram(
         int $telegramId,
@@ -399,16 +393,9 @@ class TelegramChatBroadcastService
     /**
      * Выбрать одно событие для предпросмотра/рассылки для заданного чата.
      *
-     * Логика v1:
-     *  - только активные события (scopeActive),
-     *  - только будущие (scopeUpcoming),
-     *  - самое ближайшее по start_time,
-     *  - если у чата есть city_id — берём события, где events.city совпадает по имени,
-     *  - можно дополнительно исключить конкретные event_id (excludeEventIds).
-     *
      * @param  int  $telegramId  Telegram ID пользователя (из лички)
      * @param  int  $telegramChatId  telegram_chat_id канала/чата
-     * @param  string  $mode  'preview' | 'run' и т.п. (на будущее, пока не используется)
+     * @param  string  $mode  'preview' — дополнительно отметить предпросмотр у канала
      * @param  array  $excludeEventIds  Список event_id, которые нельзя предлагать
      */
     public function pickSingleEventId(
@@ -419,13 +406,10 @@ class TelegramChatBroadcastService
     ): ?int {
         $chat = $this->getChatByTelegram($telegramId, $telegramChatId);
 
-        // Берём/создаём broadcast для этого чата
         $broadcast = $this->broadcastRepository->getOrCreateByChatId($chat->id);
 
-        // Город канала (через belongsTo City)
         $cityName = optional($chat->city)->name;
 
-        // Нормализуем список исключаемых id
         $excludeEventIds = array_values(array_unique(array_map('intval', $excludeEventIds)));
 
         // Какие статусы считаем "уже использованными" для этого канала
@@ -452,8 +436,6 @@ class TelegramChatBroadcastService
 
         if ($cityName) {
             $query->whereRaw('LOWER(city) = LOWER(?)', [$cityName]);
-            // либо попроще:
-            // $query->where('city', $cityName);
         }
 
         $event = $query
@@ -472,11 +454,7 @@ class TelegramChatBroadcastService
      *
      * По умолчанию берём только pending/planned и ограничиваем limit.
      *
-     * Возвращает массив:
-     * [
-     *   'items' => Collection<TelegramChatBroadcastItem>,
-     *   'total' => int,
-     * ]
+     * Возвращает ['items' => Collection<TelegramChatBroadcastItem>, 'total' => int].
      */
     public function listQueueForChat(
         int $telegramId,
@@ -491,7 +469,6 @@ class TelegramChatBroadcastService
 
         $broadcast = $this->broadcastRepository->getOrCreateByChatId($chat->id);
 
-        // Защита от странных лимитов
         $limit = max(1, min($limit, 50));
 
         $items = $this->broadcastItemRepository->listForBroadcast(
@@ -531,7 +508,6 @@ class TelegramChatBroadcastService
         );
 
         if (! $item) {
-            // Тихо выходим — ничего в очереди не было
             return;
         }
 
@@ -831,8 +807,7 @@ class TelegramChatBroadcastService
                 // «сегодня» про позавчера. Здесь, на отправке, день известен
                 // точно, поэтому шаблонный текст пересобираем под него.
                 $this->ensureEventCaption($item, $broadcast, $event, \Carbon\CarbonImmutable::parse($now));
-                // Ручной выбор сильнее автоподбора. NULL — «как раньше»,
-                // пустой массив — осознанное «без картинок».
+                // Ручной выбор сильнее автоподбора (как в ветке готового текста выше).
                 $eventPhotos = is_array($item->photo_urls)
                     ? array_values(array_filter($item->photo_urls, 'is_string'))
                     : $this->eventPhotos((int) $item->event_id);
@@ -853,7 +828,6 @@ class TelegramChatBroadcastService
             }
 
             if ($item->status === TelegramChatBroadcastItem::STATUS_PENDING_REVIEW) {
-                // Превью ещё не отправлено → review-задача; уже отправлено → ждём решения/таймаута.
                 if ($item->review_message_id) {
                     continue;
                 }
@@ -867,7 +841,6 @@ class TelegramChatBroadcastService
                     'review_deadline_at' => optional($item->review_deadline_at)?->toIso8601String(),
                 ];
             } else {
-                // pending/planned/approved/auto_approved → публикуем в канал.
                 if (! $ownerTelegramId) {
                     // Канал без владельца не публикует НИЧЕГО, и раньше молчал
                     // об этом: ни поста, ни лога, ни ЛС-сигнала, ни признака в
@@ -910,15 +883,15 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * P0 автопостинг, фаза 1 — автонаполнение очереди.
+     * Автонаполнение очереди (P0 автопостинг).
      *
-     * Для каждого enabled+due city-канала (расписание в settings.period), у которого
-     * очередь пуста, подбирает одно событие города и кладёт в очередь (status=pending).
+     * Для каждого enabled+due city-канала (расписание в settings.period), пока
+     * открытых СОБЫТИЙНЫХ записей меньше feed_limit, подбирает одно событие
+     * города и кладёт в очередь (status=pending).
      * Сам постинг — существующий bot-cron (collectDueSingleRuns → poll → send → mark-sent).
      *
      * Идёт из Laravel scheduler (broadcast:enqueue-due, withoutOverlapping). last_run_at
-     * НЕ трогаем здесь — его двигает фактический пост; пока он не сдвинулся, isSingleRunDue
-     * остаётся true, поэтому защищаемся «одно событие в полёте» (queue_busy).
+     * НЕ трогаем здесь — его двигает фактический пост.
      *
      * @return array{checked:int,due:int,enqueued:int,skipped_no_city:int,skipped_queue_busy:int,no_candidate:int,skipped_no_reviewer:int}
      */
@@ -1500,7 +1473,7 @@ class TelegramChatBroadcastService
         }
 
         if ($item->status !== TelegramChatBroadcastItem::STATUS_PENDING_REVIEW) {
-            return; // уже решено/уехало дальше — идемпотентно ok
+            return;
         }
 
         // fail-closed: без снапшота reviewer (===0) решать нельзя.
@@ -1540,7 +1513,6 @@ class TelegramChatBroadcastService
     ): array {
         $role = $this->botRoleService->getRoleByTelegramId($telegramId);
 
-        // Кто вообще может управлять чатами
         if (! in_array($role, ['user', 'moderator', 'admin', 'superadmin'], true)) {
             throw new RuntimeException('Недостаточно прав для управления связанными чатами');
         }
@@ -1566,11 +1538,7 @@ class TelegramChatBroadcastService
         return [$telegramChat, $role];
     }
 
-    /**
-     * Вытянуть TelegramChat с проверкой прав.
-     *
-     * Тонкая обёртка над resolveManagedChat, чтобы не дублировать проверки.
-     */
+    /** TelegramChat с проверкой прав — обёртка над resolveManagedChat. */
     private function getChatByTelegram(
         int $telegramId,
         int $telegramChatId,
@@ -1585,7 +1553,7 @@ class TelegramChatBroadcastService
      *
      * Отличие от pickSingleEventId (ручной флоу): фильтр города через
      * community.city_id == chat.city_id (надёжнее строкового LOWER(city)=name) и
-     * без user-контекста. Phase 1: top-1 по start_time; контент-скоринг — P0.3.
+     * без user-контекста.
      *
      * @param  int[]  $excludeEventIds
      */
@@ -1930,33 +1898,19 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * Логика “пора ли запускать рассылку” для одного канала.
-     *
-     * Основывается на:
-     *  - enabled
-     *  - period (daily_10 / weekly_fri_12 / …)
-     *  - last_run_at
-     */
-    /**
      * Картинки события — те же и в том же порядке, что видел бот.
      *
      * Грузим через тот же findWithDetails, которым отвечает бот-эндпоинт: он
      * зовёт hydrateImages, а тот подбирает обложку эвристикой CoverPicker и
      * кладёт её первой. Бот делал unique([poster] + images), а poster там
      * всегда images[0] — значит после дедупликации получался ровно images.
-     * Берём первые три: столько же брал бот.
      *
-     * Публичный, потому что тем же списком пользуется админка —
-     * превью поста обязано показывать ровно то, что уйдёт в канал.
+     * $limit = 3 — столько уходит в канал по умолчанию; столько же брал бот.
+     * Публичный, потому что тем же сборщиком пользуется админка: ей нужен
+     * полный список кандидатов, чтобы человек мог не только выбросить дубль,
+     * но и поставить вместо него четвёртую картинку.
      *
      * @return list<string>
-     */
-    /**
-     * Картинки события для поста.
-     *
-     * $limit = 3 — столько уходит в канал по умолчанию. Админке нужен полный
-     * список кандидатов, чтобы человек мог не только выбросить дубль, но и
-     * поставить вместо него четвёртую картинку.
      */
     public function eventPhotos(int $eventId, int $limit = 3): array
     {
@@ -2006,8 +1960,7 @@ class TelegramChatBroadcastService
      *
      * Ручную правку не трогаем: caption_source = manual означает, что текст
      * писал человек, и пересобирать его из шаблона нельзя.
-     */
-    /**
+     *
      * @param  Event|null  $event  уже загруженное событие — чтобы не ходить в базу второй раз
      * @param  \Carbon\CarbonImmutable|null  $sendingAt  момент отправки: задан только на пути доставки
      */
@@ -2017,7 +1970,6 @@ class TelegramChatBroadcastService
         ?Event $event = null,
         ?\Carbon\CarbonImmutable $sendingAt = null,
     ): void {
-        // Свой текст писал человек — ни собирать, ни пересобирать.
         if ($item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
             return;
         }
@@ -2190,12 +2142,11 @@ class TelegramChatBroadcastService
             ->whereNull('publish_at')
             ->whereNull('posted_at')
             ->get()
-            // Сначала события, по близости; портреты площадок — в хвост: у них
-            // нет срока, и уступить слот событию для них не потеря.
-            // В хвост — ВСЁ, у чего нет своего события: у такой записи нет и
-            // срока, уступить слот событию для неё не потеря. Сравнение с одним
-            // типом ставило подборку ПЕРВОЙ: Event::find(null) даёт null, а он
-            // приводится к пустой строке — меньше любой даты.
+            // Сначала события, по близости. В хвост — ВСЁ, у чего нет своего
+            // события: у такой записи нет и срока, уступить слот событию для
+            // неё не потеря. Сравнение с одним типом ставило подборку ПЕРВОЙ:
+            // Event::find(null) даёт null, а он приводится к пустой строке —
+            // меньше любой даты.
             ->sortBy(fn (TelegramChatBroadcastItem $i) => $i->hasReadyCaption()
                 ? '9999'
                 : (string) optional(Event::query()->find($i->event_id))?->start_time)
@@ -2264,7 +2215,6 @@ class TelegramChatBroadcastService
                 $fromWaiting = null;
                 $sameDayKey = null;
                 foreach ($waiting as $k => $candidate) {
-                    // Портрет площадки сроком не связан: занимает слот как есть.
                     // Запись с готовым текстом занимает слот как есть — у неё
                     // нет события, по которому можно было бы проверять сроки.
                     // Сравнение с одним типом выбрасывало подборку из
@@ -2369,10 +2319,7 @@ class TelegramChatBroadcastService
                     continue;
                 }
 
-                // Событие не должно начаться раньше публикации: день в день
-                // можно, но не «пост в 10:00 про концерт в 08:00».
-                //
-                // И не та же тема, что у соседнего слота: два концерта подряд
+                // Не та же тема, что у соседнего слота: два концерта подряд
                 // читаются как одна новость, даже если события разные. Замер
                 // 2026-09-16 по ленте боевого канала: шесть пар соседей с
                 // одной темой из двадцати семи записей.
@@ -2758,7 +2705,6 @@ class TelegramChatBroadcastService
             // последнее «окно» не позже now; день недели и час — московские
             $candidate = $now->copy()->setTimezone(self::SCHEDULE_TZ)->setTime($hour, 0, 0);
 
-            // отматываем назад до нужного дня недели и не позже now
             while ($candidate->dayOfWeek !== $targetDow || $candidate->gt($now)) {
                 $candidate->subDay();
             }

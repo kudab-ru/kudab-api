@@ -13,6 +13,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Repositories\EventRepository;
 use App\Services\Telegram\EventCaptionBuilder;
+use App\Services\Telegram\BroadcastDigestComposer;
 use App\Services\Telegram\PostTiming;
 use App\Exceptions\DigestRecomposeFailed;
 use App\Services\Telegram\TelegramChatBroadcastService;
@@ -53,11 +54,8 @@ class AdminBroadcastController extends Controller
     /**
      * Предел длины подписи поста с картинками — ограничение Telegram.
      *
-     * Пост длиннее не падает: альбом отбивается, и в канал уходит голый текст.
-     * Сегодня риск дремлет (самая длинная подпись в базе — 720 символов), но
-     * ручная правка ничем не ограничена.
+     * @deprecated Считать длину подписи — [[CaptionLength]]: там UTF-16 и без разметки.
      */
-    /** @deprecated Считать длину подписи — [[CaptionLength]]: там UTF-16 и без разметки. */
     public const CAPTION_LIMIT = CaptionLength::LIMIT;
 
     /**
@@ -72,7 +70,7 @@ class AdminBroadcastController extends Controller
     public function __construct(
         private readonly TelegramChatBroadcastService $broadcasts,
         private readonly EventCaptionBuilder $captions,
-        private readonly \App\Services\Telegram\BroadcastDigestComposer $digestComposer,
+        private readonly BroadcastDigestComposer $digestComposer,
         private readonly \App\Services\Telegram\BroadcastDigestBooking $digestBooking,
         // Репозитории — только для привязки канала: она пишет в telegram.chats
         // и заводит строку рассылки, а сервис таких методов не имеет.
@@ -91,15 +89,14 @@ class AdminBroadcastController extends Controller
     /** Каналы со сводкой: что в ленте, когда последний пост, молчит ли. */
     public function channels(): JsonResponse
     {
-        // Шаблоны отдаём вместе с каналами, чтобы админка не зашивала их
-        // список у себя: он живёт в telegram.message_templates.
-
         // Порядок стабильный: без него список приходил как ляжет, и в
         // интерфейсе первым оказывался выключенный канал.
         // chat.city — чтобы название города не тянулось отдельным запросом
         // на каждый канал.
         $rows = TelegramChatBroadcast::query()->with('chat.city')->orderBy('id')->get();
 
+        // Шаблоны отдаём вместе с каналами, чтобы админка не зашивала их
+        // список у себя: он живёт в telegram.message_templates.
         $templates = \App\Models\TelegramMessageTemplate::query()
             ->where('locale', 'ru')
             ->where('is_active', true)
@@ -153,11 +150,8 @@ class AdminBroadcastController extends Controller
                         $w->where('status', TelegramChatBroadcastItem::STATUS_SKIPPED)
                             ->where('updated_at', '>=', now()->subDays(7));
                     })
-                    // Отклонённые — за всё время остывания. Отказ прячет
-                    // событие от подбора на 30 дней, и до сих пор отменить его
-                    // было нечем: запись не показывалась нигде, а событие
-                    // просто пропадало из предложений. Случайное нажатие
-                    // стоило месяца.
+                    // Отклонённые — за всё время остывания: иначе отказ нечем
+                    // отменить (см. unreject()).
                     ->orWhere(function ($w) {
                         $w->where('status', TelegramChatBroadcastItem::STATUS_REJECTED)
                             ->where('updated_at', '>=', now()->subDays(self::REJECTED_COOLDOWN_DAYS));
@@ -375,8 +369,6 @@ class AdminBroadcastController extends Controller
             ->where('start_time', '<=', now()->addDays(14))
             ->when(
                 $publishAt !== null,
-                // Событие ещё не должно начаться к моменту публикации.
-                // Многодневное считаем годным, пока не кончилось.
                 // Правило общее со всеми дверями и буквально одним выражением
                 // ([[PostTiming]]::applyFits): не позже начала, а у многодневки
                 // — не позже закрытия. Своя копия здесь пускала в предложения
@@ -738,8 +730,6 @@ class AdminBroadcastController extends Controller
                 return response()->json(['ok' => false, 'error' => $this->takenMessage($taken)], 409);
             }
 
-            // Снятое или отклонённое оживляем: человек прямо сейчас сказал, что
-            // хочет этот пост, и его прошлое решение больше не в силе.
             // Та же проверка, что при переносе: пост не может уйти после события.
             // Общий список карточек не привязан ко дню, и перетаскиванием на
             // дальний день можно было поставить анонс уже прошедшего.
@@ -795,7 +785,6 @@ class AdminBroadcastController extends Controller
             $item->claimed_at = null;
             $item->claim_token = null;
             $item->publish_at = $publishAt;
-            // Текст пересобираем, если его не писали руками.
             if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
                 $item->caption = null;
                 $item->caption_source = null;
@@ -819,11 +808,9 @@ class AdminBroadcastController extends Controller
     public function update(Request $request, int $itemId): JsonResponse
     {
         $data = $request->validate([
-            // Предел считаем по ВИДИМОМУ тексту ([[CaptionLength]]): Telegram
-            // меряет готовый текст, адрес ссылки в длину не входит вовсе. На
-            // подборке с четырьмя ссылками разметка тянула на 1121 при 656
-            // видимых — и правка такого поста отбивалась ошибкой «длиннее
-            // 1024», то есть править подборку было нельзя в принципе.
+            // Предел считаем по ВИДИМОМУ тексту ([[CaptionLength]]): разметка и
+            // адреса ссылок в длину не входят, иначе править подборку было
+            // нельзя в принципе.
             //
             // Верхняя граница на саму строку остаётся: она про размер запроса,
             // а не про Telegram.
@@ -1018,9 +1005,8 @@ class AdminBroadcastController extends Controller
             $item->is_pinned = (bool) $data['is_pinned'];
         }
 
-        // Снимок ДО правки — чтобы её можно было отменить. Пишем только когда
-        // что-то действительно изменилось: иначе история заросла бы пустыми
-        // строками от каждого открытия карточки.
+        // Пишем только когда что-то действительно изменилось: иначе история
+        // заросла бы пустыми строками от каждого открытия карточки.
         if ($edited !== []) {
             $this->saveRevision($item, $edited, $snapshot);
         }
@@ -1278,10 +1264,13 @@ class AdminBroadcastController extends Controller
                 'data' => ['needs_swap' => true, 'post_item_id' => $taken->id],
             ], 409);
         }
-        if ($taken !== null && $taken->posted_at !== null) {
+        // Тем же окном, что и пул: иначе кандидат, показанный полмесяца назад,
+        // висел бы в панели и отбивался отказом при каждом нажатии.
+        if ($taken !== null && $taken->posted_at !== null
+            && Carbon::parse($taken->posted_at)->gt(Carbon::now()->subDays(BroadcastDigestComposer::SHOWN_WINDOW_DAYS))) {
             return response()->json([
                 'ok' => false,
-                'error' => 'Канал уже показывал это событие — в подборке оно будет повтором.',
+                'error' => 'Канал показывал это событие на этой неделе — в подборке оно будет повтором.',
             ], 409);
         }
         if ($taken !== null && $taken->kind !== TelegramChatBroadcastItem::KIND_EVENT) {
@@ -1364,8 +1353,7 @@ class AdminBroadcastController extends Controller
 
         return response()->json([
             'data' => $this->itemPayload($out['item'], null, null),
-            // Остывание могло не встать: у события с отправленным постом
-            // перекрашивать статус нельзя, publish — факт, а не решение.
+            // Остывание могло не встать: причина — в coolDownEvent().
             'cooled' => $out['cooled'],
         ]);
     }
@@ -1987,7 +1975,6 @@ class AdminBroadcastController extends Controller
         $format = $bySlot ? 'Y-m-d H' : 'Y-m-d';
         $targetKey = $target->copy()->setTimezone('Europe/Moscow')->format($format);
 
-        // Кто уже занимает это место.
         $occupant = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
             // Ошибочный пост место занимает — в сетке он виден.
@@ -2189,9 +2176,7 @@ class AdminBroadcastController extends Controller
             $venue = $item->venue_id ? \App\Models\Venue::query()->find($item->venue_id) : null;
             if (! $venue) {
                 // Площадку удалили или сняли с публикации — прежний текст
-                // оставляем. Обнулить его значило бы отдать боту пустую
-                // задачу: он такую бросает, ничего не помечая, и «один портрет
-                // в полёте» закрыл бы постановку следующего навсегда.
+                // оставляем: почему пустой нельзя, сказано в докблоке метода.
                 return;
             }
 
@@ -2420,7 +2405,6 @@ class AdminBroadcastController extends Controller
 
         $item->save();
 
-        // Текст собран под прежний день — пересобираем под новый. Свой не трогаем.
         $this->regenerateCaption($item, $broadcast);
 
         return null;
@@ -2741,8 +2725,6 @@ class AdminBroadcastController extends Controller
         ];
     }
 
-    /** Настройки канала. */
-
     /**
      * Проверить чат в Telegram и привязать его как канал рассылки.
      *
@@ -3014,13 +2996,6 @@ class AdminBroadcastController extends Controller
 
     // ------------------------------------------------------------------
 
-    /** @return list<string> */
-    /**
-     * Ровно те картинки и в том порядке, что уйдут в канал.
-     *
-     * Повторяет выбор из TelegramChatBroadcastService: ручной состав сильнее
-     * автоподбора, NULL — «собрать автоматически».
-     */
     /**
      * Картинки портрета: ручной состав сильнее, иначе обложка с записи.
      *
@@ -3081,14 +3056,6 @@ class AdminBroadcastController extends Controller
     }
 
     /**
-     * Причина снятия в машинном виде.
-     *
-     * manual — убрали руками; rebuild — пересборка или разбавление;
-     * stale — событие прошло или исчезло, возвращать такое незачем.
-     * Словарь причин принадлежит серверу: он их и пишет, а фронт не должен
-     * разбирать русский текст.
-     */
-    /**
      * Откуда событие пришло — та же ссылка, что стоит в посте «Открыть оригинал».
      *
      * Поля источника разные у разных парсеров, поэтому берём первое непустое —
@@ -3106,6 +3073,14 @@ class AdminBroadcastController extends Controller
         return null;
     }
 
+    /**
+     * Причина снятия в машинном виде.
+     *
+     * manual — убрали руками; rebuild — пересборка или разбавление;
+     * stale — событие прошло или исчезло, возвращать такое незачем.
+     * Словарь причин принадлежит серверу: он их и пишет, а фронт не должен
+     * разбирать русский текст.
+     */
     private function skipReason(string $message): string
     {
         $m = mb_strtolower($message);
@@ -3434,10 +3409,6 @@ class AdminBroadcastController extends Controller
             'original_url' => $event ? $this->originalUrl($event) : null,
             'event_start_time' => optional($event?->start_time)?->toIso8601String(),
             'event_end_time' => optional($event?->end_time)?->toIso8601String(),
-            // Пост стоит ПОЗЖЕ своего события. Такие записи в ленте уже есть —
-            // их наставили двери, у каждой из которых было своё правило, — и
-            // без пометки они выглядят обычными, пока доставка молча не снимет
-            // их с причиной «событие уже прошло», спалив слот.
             // Тема поста: по ней интерфейс показывает, чем занята неделя, и
             // по ней же наполнитель не ставит два одинаковых рядом.
             'theme' => $this->themePayload($event),
@@ -3450,6 +3421,10 @@ class AdminBroadcastController extends Controller
             // у подписчика. Без номера сообщения её собрать не из чего: у
             // постов, ушедших до появления прибора, его нет.
             'post_url' => $this->postUrl($i),
+            // Пост стоит ПОЗЖЕ своего события. Такие записи в ленте уже есть —
+            // их наставили двери, у каждой из которых было своё правило, — и
+            // без пометки они выглядят обычными, пока доставка молча не снимет
+            // их с причиной «событие уже прошло», спалив слот.
             'late_for_event' => $event !== null
                 && $i->posted_at === null
                 && $i->publish_at !== null
@@ -3569,10 +3544,6 @@ class AdminBroadcastController extends Controller
      * Почему это событие стоит взять. Без цифр: человеку нужен повод,
      * а не балл, который у всех одинаковый.
      *
-     * @param  list<int>  $feedVenueIds
-     * @return list<string>
-     */
-    /**
      * @param  list<int>  $feedVenueIds  площадки, уже занятые лентой
      * @param  list<int>  $feedThemeIds  темы, уже занятые лентой
      * @return list<string>

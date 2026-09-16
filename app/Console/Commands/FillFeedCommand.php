@@ -34,13 +34,9 @@ use Illuminate\Support\Facades\Log;
  * освободились после отправки, и те, до которых у канала дошёл черёд по
  * настройке `fill_lead_days`.
  *
- * ЧАСОВОЙ ТИК, а не суточный: поздний слот становится «можно заполнять» ровно
- * за `fill_lead_days` суток до себя, и часовой прогон занимает его на этой
- * границе. Суточный прогон либо опережал бы границу, либо проспал бы день.
- *
- * ЗАПРЕТ СТЕНДА действует здесь так же, как в `enqueueDueForAllChannels`: на
- * стенде очередь боевого канала не наполняем вовсе, иначе она копит посты,
- * которые никогда не уйдут, а «одно событие в полёте» блокирует канал.
+ * ЗАПРЕТ СТЕНДА — тот же, что в `enqueueDueForAllChannels` (см. BroadcastSafety):
+ * на стенде очередь боевого канала не наполняем, иначе она копит посты, которые
+ * никогда не уйдут.
  */
 class FillFeedCommand extends Command
 {
@@ -150,7 +146,7 @@ class FillFeedCommand extends Command
      * на это купился: посмотрел на ноль и решил, что заполнять нечего, хотя
      * свободных слотов было одиннадцать.
      *
-     * @return array{filled: int, days: int, no_candidate: int}
+     * @return array{filled: int, days: int, no_candidate: int, feed_limit: int}
      */
     private function wouldFill(
         TelegramChatBroadcastService $service,
