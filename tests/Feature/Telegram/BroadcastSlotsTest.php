@@ -885,6 +885,53 @@ class BroadcastSlotsTest extends TestCase
         $this->assertStringContainsString('уже началось', (string) $item->fresh()->error_message);
     }
 
+    /**
+     * «Разбавить» считает повтором только то, что рядом.
+     *
+     * Окна не было ни у кнопки, ни у предупреждения над лентой: горизонт у
+     * канала две недели, и два поста одной сети через девять дней поднимали
+     * тревогу, которую нечем закрыть, — подписчик такого повтора не замечает.
+     * Владелец это и увидел: «стендап клуб на следующей неделе, а уведомление
+     * висит».
+     */
+    public function test_diversify_ignores_repeats_outside_the_week(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+        $this->actAsSuperadmin();
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10],
+            'horizon_days' => 14,
+        ]);
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $venue = $this->insertVenue($city->id, 'Стендап клуб', 'standup-club');
+
+        // Две записи одной площадки — но между ними девять дней.
+        foreach ([3, 12] as $inDays) {
+            $event = $this->eventAt($city->id, 'Стендап '.$inDays, Carbon::now()->addDays($inDays)->setTime(16, 0));
+            $event->venue_id = $venue;
+            $event->save();
+
+            $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+            $item->publish_at = Carbon::now()->addDays($inDays)->setTime(7, 0);
+            $item->save();
+        }
+
+        $res = $this->postJson("/api/admin/broadcast/channels/{$broadcast->id}/rebuild?diversify=1");
+
+        $res->assertOk();
+        $this->assertSame(0, $res->json('data.dropped'),
+            'повтор через девять дней повтором не считается');
+        $this->assertSame(2, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereIn('status', ['pending', 'planned'])
+            ->whereNotNull('publish_at')
+            ->count(), 'обе записи остались в ленте');
+    }
+
     private function actAsSuperadmin(): void
     {
         \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
