@@ -257,6 +257,10 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     Route::post('/broadcast/single/mark-item-sent', [TelegramChatBroadcastController::class, 'markItemSent']);
     Route::post('/broadcast/single/mark-item-failed', [TelegramChatBroadcastController::class, 'markItemFailed']);
 
+    // Замер подписчиков: число отдаёт телеграм только боту, задачу на замер
+    // ставит API раз в сутки вместе с остальными задачами опроса.
+    Route::post('/broadcast/subscribers', [TelegramChatBroadcastController::class, 'recordSubscribers']);
+
     Route::post('/broadcast/single/enqueue', [TelegramChatBroadcastController::class, 'enqueueSingle']);
     Route::post('/broadcast/single/queue', [TelegramChatBroadcastController::class, 'listQueue']);
     Route::post('/broadcast/single/queue/skip', [TelegramChatBroadcastController::class, 'skipSingleFromQueue']);

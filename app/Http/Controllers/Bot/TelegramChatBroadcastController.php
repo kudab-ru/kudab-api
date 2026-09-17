@@ -342,6 +342,38 @@ class TelegramChatBroadcastController extends Controller
      * POST /api/bot/broadcast/single/mark-item-sent
      * Body: { "item_id": 987, "claim_token": "...", "posted_at": "..." }
      */
+    /**
+     * Записать замер подписчиков канала.
+     *
+     * POST /api/bot/broadcast/subscribers
+     * Body: { "telegram_chat_id": -100123, "count": 9 }
+     *
+     * Число знает только бот: getChatMemberCount отдаётся тому, у кого токен и
+     * кто состоит в канале администратором. Задачу на замер ставит сам API, раз
+     * в сутки, — см. buildSubscriberCountTask.
+     */
+    public function recordSubscribers(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'telegram_chat_id' => ['required', 'integer'],
+            'count' => ['required', 'integer', 'min:0'],
+        ]);
+
+        try {
+            $ok = $this->broadcastService->recordSubscriberCount(
+                (int) $validated['telegram_chat_id'],
+                (int) $validated['count'],
+                Carbon::now(),
+            );
+
+            return response()->json(['ok' => $ok]);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json(['ok' => false, 'error' => 'Не удалось записать число подписчиков.']);
+        }
+    }
+
     public function markItemSent(Request $request): JsonResponse
     {
         $validated = $request->validate([

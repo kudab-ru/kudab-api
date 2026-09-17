@@ -567,6 +567,14 @@ class TelegramChatBroadcastService
                 $tasks[] = $idleNotice;
             }
 
+            // Замер подписчиков — раз в сутки. Стоит рядом с сигналом о простое
+            // и по той же причине: число подписчиков телеграм отдаёт только
+            // боту, а бот приходит сюда сам, раз в минуту.
+            $countTask = $this->buildSubscriberCountTask($broadcast, $chat, $now);
+            if ($countTask !== null) {
+                $tasks[] = $countTask;
+            }
+
             // Зазор между постами. Стоит ЗДЕСЬ, в отборе записи на канал, а не
             // в гейтах по типу: иначе каждая новая рубрика приносила бы ту же
             // проблему заново. Портрет площадки гейт расписания не проходит
@@ -2518,6 +2526,75 @@ class TelegramChatBroadcastService
         }
 
         return null;
+    }
+
+    /**
+     * Попросить бота посчитать подписчиков — не чаще раза в сутки.
+     *
+     * ПОЧЕМУ ЧЕРЕЗ БОТА. getChatMemberCount отдаёт число только тому, у кого
+     * есть токен и кто состоит в канале администратором. API в телеграм не
+     * ходит вовсе.
+     *
+     * ПОЧЕМУ НЕ ОТДЕЛЬНЫМ РАСПИСАНИЕМ. Бот и так приходит сюда раз в минуту;
+     * отдельный контейнер с кроном ради одного числа в сутки — ещё одна вещь,
+     * которая может молча перестать работать. Признак «сегодня уже мерили»
+     * живёт в настройках канала, миграции ради отметки не нужно.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function buildSubscriberCountTask(
+        TelegramChatBroadcast $broadcast,
+        TelegramChat $chat,
+        Carbon $now,
+    ): ?array {
+        if (! $chat->telegram_chat_id || ! config('broadcast_subscribers.enabled', true)) {
+            return null;
+        }
+
+        $today = $now->copy()->setTimezone(self::SCHEDULE_TZ)->toDateString();
+        if ((string) (($broadcast->settings ?? [])['subscribers_measured_on'] ?? '') === $today) {
+            return null;
+        }
+
+        // Отметку ставим СЕЙЧАС, до ответа бота. Замер стоит дёшево, а повтор
+        // каждую минуту при недоступном телеграме — нет: задача уходила бы в
+        // каждом опросе, пока счёт не удастся.
+        $settings = $broadcast->settings ?? [];
+        $settings['subscribers_measured_on'] = $today;
+        $broadcast->settings = $settings;
+        $broadcast->save();
+
+        return [
+            'type' => 'subscribers',
+            'broadcast_id' => (int) $broadcast->id,
+            'telegram_chat_id' => (int) $chat->telegram_chat_id,
+        ];
+    }
+
+    /**
+     * Записать замер подписчиков за сегодня.
+     *
+     * Идемпотентно: повторный замер в тот же день перезаписывает число, а не
+     * заводит вторую строку.
+     */
+    public function recordSubscriberCount(int $telegramChatId, int $count, Carbon $now): bool
+    {
+        $chatId = DB::table('telegram.chats')
+            ->where('telegram_chat_id', $telegramChatId)
+            ->value('id');
+
+        if ($chatId === null) {
+            return false;
+        }
+
+        DB::table('telegram.chat_subscriber_counts')->upsert([[
+            'chat_id' => (int) $chatId,
+            'measured_on' => $now->copy()->setTimezone(self::SCHEDULE_TZ)->toDateString(),
+            'count' => max(0, $count),
+            'created_at' => $now,
+        ]], ['chat_id', 'measured_on'], ['count']);
+
+        return true;
     }
 
     /**
