@@ -97,6 +97,7 @@ Route::prefix('admin')
         Route::patch('/broadcast/items/{id}', [AdminBroadcastController::class, 'update']);
         Route::post('/broadcast/items/{id}/publish-now', [AdminBroadcastController::class, 'publishNow']);
         Route::post('/broadcast/items/{id}/retry', [AdminBroadcastController::class, 'retry']);
+        Route::post('/broadcast/items/{id}/withdraw', [AdminBroadcastController::class, 'withdraw']);
         Route::post('/broadcast/items/{id}/describe', [AdminBroadcastController::class, 'describe']);
         Route::post('/broadcast/items/{id}/compose', [AdminBroadcastController::class, 'composeDigest']);
         // Чем заменить позицию в подборке. Только чтение: ручка ничего не

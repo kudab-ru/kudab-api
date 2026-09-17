@@ -2128,6 +2128,8 @@ class TelegramChatBroadcastService
             ->where('broadcast_id', $broadcast->id)
             ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
             ->whereNotNull('event_id')
+            // Снятого поста в канале нет — соседом он быть не может.
+            ->where('status', '<>', TelegramChatBroadcastItem::STATUS_WITHDRAWN)
             ->where(function ($w) use ($now) {
                 $w->where('posted_at', '<=', $now)
                     ->orWhere(function ($x) use ($now) {
@@ -2684,6 +2686,53 @@ class TelegramChatBroadcastService
                 (string) $broadcast->period,
             ),
         ];
+    }
+
+    /**
+     * Снять вышедший пост: канал его больше не содержит.
+     *
+     * ЗАЧЕМ. Владелец удаляет сообщение в телеграме руками, и узнать об этом
+     * неоткуда — телеграм об удалении не сообщает. Запись при этом остаётся
+     * вышедшей и продолжает занимать слот тремя способами сразу: держит зазор
+     * до следующего поста (`lastPostedAt`), закрывает свой день в ленте и
+     * держит своё событие в показанных, из-за чего оно уже не вернётся в пул.
+     *
+     * ЧТО ДЕЛАЕМ. Гасим `posted_at` — на него и опираются все три проверки, —
+     * и ставим статус `withdrawn`. Статус важен отдельно: с пустым
+     * `posted_at` и прежним `posted` запись выглядела бы как стоящая в
+     * очереди, и наполнитель попробовал бы отправить её заново.
+     *
+     * ЧТО ОСТАВЛЯЕМ. Подпись, `publish_at`, число кликов и строки связи с
+     * событиями — это история, по ней видно, что и когда выходило. Читателей
+     * анти-дублей она не смущает: все они требуют непустой `posted_at`.
+     *
+     * `message_id` гасим: сообщения по нему в канале уже нет, а сбор кликов и
+     * закрепление ходят именно по нему.
+     */
+    public function withdrawPostedItem(TelegramChatBroadcastItem $item): bool
+    {
+        if ($item->posted_at === null) {
+            return false;
+        }
+
+        $postedAt = Carbon::parse($item->posted_at);
+
+        $item->status = TelegramChatBroadcastItem::STATUS_WITHDRAWN;
+        $item->posted_at = null;
+        $item->message_id = null;
+        $item->claimed_at = null;
+        $item->claim_token = null;
+        $item->error_message = 'снято из канала вручную '.Carbon::now()->toDateTimeString();
+        $item->save();
+
+        Log::info('broadcast.item_withdrawn', [
+            'item_id' => $item->id,
+            'broadcast_id' => $item->broadcast_id,
+            'kind' => $item->kind,
+            'posted_at' => $postedAt->toIso8601String(),
+        ]);
+
+        return true;
     }
 
     /**

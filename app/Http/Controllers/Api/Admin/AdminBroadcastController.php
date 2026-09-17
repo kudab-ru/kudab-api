@@ -159,6 +159,13 @@ class AdminBroadcastController extends Controller
                     ->orWhere(function ($w) use ($historyDays) {
                         $w->where('status', TelegramChatBroadcastItem::STATUS_POSTED)
                             ->where('posted_at', '>=', now()->subDays($historyDays));
+                    })
+                    // Снятые из канала руками: пост вышел и был удалён, и
+                    // след о нём нужен ровно затем же, зачем у снятых
+                    // автоматически — иначе запись пропадает из сетки молча.
+                    ->orWhere(function ($w) use ($historyDays) {
+                        $w->where('status', TelegramChatBroadcastItem::STATUS_WITHDRAWN)
+                            ->where('updated_at', '>=', now()->subDays($historyDays));
                     });
             })
             ->orderByRaw('COALESCE(publish_at, planned_at, posted_at, created_at) ASC')
@@ -2449,6 +2456,33 @@ class AdminBroadcastController extends Controller
     }
 
     /** Вернуть пост в очередь после ошибки — попробовать ещё раз. */
+    /**
+     * Снять вышедший пост: сообщения в канале больше нет.
+     *
+     * Обратная кнопке «убрать из ленты», которая работает только до выхода.
+     * После выхода запись держала слот, а единственным способом её освободить
+     * была правка базы руками.
+     */
+    public function withdraw(int $itemId): JsonResponse
+    {
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+
+        if ($item->posted_at === null) {
+            return response()->json(['ok' => false, 'error' => 'Пост ещё не выходил — снимать нечего.'], 409);
+        }
+
+        $this->broadcasts->withdrawPostedItem($item);
+
+        return response()->json([
+            'ok' => true,
+            'data' => $this->itemPayload(
+                $item->fresh(),
+                $item->event_id ? Event::query()->with('venue:id,name')->find($item->event_id) : null,
+                $item->venue_id ? \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']) : null,
+            ),
+        ]);
+    }
+
     public function retry(int $itemId): JsonResponse
     {
         $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
@@ -3469,12 +3503,14 @@ class AdminBroadcastController extends Controller
             'skip_reason' => match ($i->status) {
                 TelegramChatBroadcastItem::STATUS_SKIPPED => $this->skipReason((string) $i->error_message),
                 TelegramChatBroadcastItem::STATUS_REJECTED => 'rejected',
+                TelegramChatBroadcastItem::STATUS_WITHDRAWN => 'withdrawn',
                 default => null,
             },
             'error_message' => in_array($i->status, [
                 TelegramChatBroadcastItem::STATUS_ERROR,
                 TelegramChatBroadcastItem::STATUS_SKIPPED,
                 TelegramChatBroadcastItem::STATUS_REJECTED,
+                TelegramChatBroadcastItem::STATUS_WITHDRAWN,
             ], true) ? $i->error_message : null,
             // Ровно те картинки и в том порядке, что уйдут в канал: у события
             // — через тот же eventPhotos, которым собирается задача боту;
