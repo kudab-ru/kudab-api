@@ -1046,6 +1046,87 @@ class BroadcastSlotsTest extends TestCase
         return [$broadcast, $events];
     }
 
+    /**
+     * Портрет площадки не садится в поздний слот далёкого дня.
+     *
+     * ДЫРА, РАДИ КОТОРОЙ ТЕСТ. Правило «поздний слот решается накануне» знал
+     * только наполнитель ленты. Планировщик слотов — тот, по которому день
+     * назначают портреты площадок и возврат снятого поста, — про него не знал
+     * вовсе и отдавал первый попавшийся пустой час. То есть настройка
+     * освобождала вечера ради свежих событий, а занимал их портрет: ровно ту
+     * дверь, которую держали открытой.
+     */
+    public function test_planner_keeps_the_late_slot_closed_until_its_lead(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC')); // 06:00 МСК
+
+        [$broadcast, $events] = $this->channelWithEvents(6);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10, 19],
+            'horizon_days' => 5,
+            'fill_lead_days' => 1,
+        ]);
+        $broadcast->save();
+        $broadcast = $broadcast->fresh();
+
+        // Занимаем всё, что открыто по правилу упреждения: пять утренних
+        // слотов горизонта и сегодняшний вечер.
+        $taken = [
+            '2026-09-15 10:00', '2026-09-16 10:00', '2026-09-17 10:00',
+            '2026-09-18 10:00', '2026-09-19 10:00', '2026-09-15 19:00',
+        ];
+        foreach ($taken as $i => $at) {
+            $item = $this->makeItem($broadcast->id, $events[$i]->id, TelegramChatBroadcastItem::STATUS_PENDING);
+            $item->publish_at = Carbon::parse($at, 'Europe/Moscow')->utc();
+            $item->save();
+        }
+
+        $planner = app(\App\Services\Telegram\BroadcastSlotPlanner::class);
+
+        $this->assertNull(
+            $planner->nextFreeSlot($broadcast, now()),
+            'вечер 16-го и дальше ещё закрыт: до него больше суток',
+        );
+
+        // А человеку это правило не указ: он ставит пост руками.
+        $byHand = $planner->nextFreeSlot($broadcast, now(), false);
+        $this->assertNotNull($byHand);
+        $this->assertSame(
+            '2026-09-16 19',
+            $byHand->setTimezone('Europe/Moscow')->format('Y-m-d H'),
+            'рука получает ближайший пустой слот, как раньше',
+        );
+
+        Carbon::setTestNow();
+    }
+
+    /** Без настройки планировщик работает как работал — первый пустой слот. */
+    public function test_planner_without_the_setting_takes_any_free_slot(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+
+        [$broadcast, $events] = $this->channelWithEvents(1);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10, 19],
+            'horizon_days' => 5,
+        ]);
+        $broadcast->save();
+
+        $item = $this->makeItem($broadcast->id, $events[0]->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = Carbon::parse('2026-09-15 10:00', 'Europe/Moscow')->utc();
+        $item->save();
+
+        $slot = app(\App\Services\Telegram\BroadcastSlotPlanner::class)
+            ->nextFreeSlot($broadcast->fresh(), now());
+
+        $this->assertSame(
+            '2026-09-15 19',
+            $slot?->setTimezone('Europe/Moscow')->format('Y-m-d H'),
+        );
+
+        Carbon::setTestNow();
+    }
+
     private function makeItem(int $broadcastId, int $eventId, string $status): TelegramChatBroadcastItem
     {
         $item = new TelegramChatBroadcastItem;

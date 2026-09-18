@@ -55,9 +55,22 @@ class BroadcastSlotPlanner
      *
      * Прошедшие слоты пропускаем: пост встал бы просроченным и тут же потерял
      * бы день.
+     *
+     * @param  bool  $respectLead  считать ли поздний слот занятым, пока до него
+     *                             дальше `fill_lead_days` суток. По умолчанию
+     *                             да — иначе настройка «поздний слот решается
+     *                             накануне» держится только у наполнителя
+     *                             ленты, а портрет площадки садится ровно в ту
+     *                             освободившуюся дверь, ради свежести которой
+     *                             её и держали пустой. Человеку, который
+     *                             ставит пост руками, это правило не указ:
+     *                             такие пути передают false.
      */
-    public function nextFreeSlot(TelegramChatBroadcast $broadcast, Carbon $now): ?Carbon
-    {
+    public function nextFreeSlot(
+        TelegramChatBroadcast $broadcast,
+        Carbon $now,
+        bool $respectLead = true,
+    ): ?Carbon {
         $taken = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
             ->whereIn('status', [
@@ -73,13 +86,21 @@ class BroadcastSlotPlanner
             ->all();
 
         $slots = $this->slots($broadcast);
+        $lead = $respectLead ? $broadcast->fill_lead_days : null;
+        $leadEdge = $lead !== null ? $now->copy()->addDays($lead) : null;
 
         for ($i = 0; $i < $broadcast->horizon_days; $i++) {
             $day = $now->copy()->setTimezone(self::TZ)->addDays($i)->startOfDay();
 
-            foreach ($slots as $hour) {
+            foreach ($slots as $slotIndex => $hour) {
                 $at = $day->copy()->setTime($hour, 0, 0);
                 if ($at->lt($now)) {
+                    continue;
+                }
+                // Поздний слот открывается только на своей границе — то же
+                // правило и тот же расчёт, что у наполнителя ленты
+                // (fillFeedDays). Первый слот дня плановый всегда.
+                if ($leadEdge !== null && $slotIndex > 0 && $at->gt($leadEdge)) {
                     continue;
                 }
                 if (in_array($this->key($at), $taken, true)) {

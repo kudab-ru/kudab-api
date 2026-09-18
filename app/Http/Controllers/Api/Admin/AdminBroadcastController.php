@@ -2372,7 +2372,10 @@ class AdminBroadcastController extends Controller
         // есть утро вторника, и недельный каденс рубрики растворился бы.
         $slot = $item->kind === TelegramChatBroadcastItem::KIND_DIGEST
             ? $this->digestBooking->slotFor($broadcast, Carbon::now())
-            : app(\App\Services\Telegram\BroadcastSlotPlanner::class)->nextFreeSlot($broadcast, Carbon::now());
+            // respectLead = false: возврат снятого поста делает человек, и
+            // правило «поздний слот решается накануне» на него не
+            // распространяется — иначе вернуть пост в пустую неделю нельзя.
+            : app(\App\Services\Telegram\BroadcastSlotPlanner::class)->nextFreeSlot($broadcast, Carbon::now(), false);
 
         // Свободный слот может оказаться ПОЗЖЕ события: планировщик про сроки
         // не знает, он ищет пустую ячейку. Возврат от этого не отменяем —
