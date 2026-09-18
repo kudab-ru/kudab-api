@@ -1994,7 +1994,9 @@ class TelegramChatBroadcastService
             return;
         }
 
-        $event ??= Event::query()->find($item->event_id);
+        // Площадку тянем сразу: её имя печатается в строке места, и без
+        // eager-load сборщик подписи дёрнул бы связь отдельным запросом.
+        $event ??= Event::query()->with('venue:id,name')->find($item->event_id);
         if (! $event) {
             return;
         }
