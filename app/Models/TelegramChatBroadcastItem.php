@@ -45,6 +45,9 @@ class TelegramChatBroadcastItem extends Model
         'message_id',
         'clicks',
         'clicks_at',
+        'reactions',
+        'reactions_meta',
+        'reactions_at',
     ];
 
     protected $casts = [
@@ -60,6 +63,10 @@ class TelegramChatBroadcastItem extends Model
         // Подборка: тема состава и текст модели (intro + hooks по event_id).
         'digest_meta' => 'array',
         'clicks_at' => 'datetime',
+        // Разбивка реакций по эмодзи: [{"emoji":"🔥","count":4}]. Сумма без
+        // разбивки врёт — «🔥 4» и «👎 4» дают одно число.
+        'reactions_meta' => 'array',
+        'reactions_at' => 'datetime',
         'is_pinned' => 'bool',
         // NULL = собрать автоматически; массив = ровно эти картинки.
         'photo_urls' => 'array',

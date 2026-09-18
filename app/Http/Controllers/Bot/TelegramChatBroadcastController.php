@@ -350,6 +350,9 @@ class TelegramChatBroadcastController extends Controller
         $validated = $request->validate([
             'telegram_chat_id' => ['required', 'integer'],
             'count' => ['required', 'integer', 'min:0'],
+            // Заодно с замером: включены ли в канале реакции. Поля может не
+            // быть — бот старой версии его не шлёт, и это не ошибка.
+            'reactions_enabled' => ['sometimes', 'boolean'],
         ]);
 
         try {
@@ -357,6 +360,9 @@ class TelegramChatBroadcastController extends Controller
                 (int) $validated['telegram_chat_id'],
                 (int) $validated['count'],
                 Carbon::now(),
+                array_key_exists('reactions_enabled', $validated)
+                    ? (bool) $validated['reactions_enabled']
+                    : null,
             );
 
             return response()->json(['ok' => $ok]);
@@ -364,6 +370,42 @@ class TelegramChatBroadcastController extends Controller
             report($e);
 
             return response()->json(['ok' => false, 'error' => 'Не удалось записать число подписчиков.']);
+        }
+    }
+
+    /**
+     * Записать реакции на пост канала.
+     *
+     * POST /api/bot/broadcast/reactions
+     * Body: { "telegram_chat_id": -100…, "message_id": 42,
+     *         "reactions": [{"emoji":"🔥","count":4}] }
+     *
+     * Состав ПОЛНЫЙ, а не дельта: телеграм присылает текущее состояние
+     * сообщения целиком, и пустой список значит «все реакции сняли».
+     */
+    public function recordReactions(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'telegram_chat_id' => ['required', 'integer'],
+            'message_id' => ['required', 'integer'],
+            'reactions' => ['present', 'array'],
+            'reactions.*.emoji' => ['required', 'string', 'max:32'],
+            'reactions.*.count' => ['required', 'integer', 'min:0'],
+        ]);
+
+        try {
+            $ok = $this->broadcastService->recordReactions(
+                (int) $validated['telegram_chat_id'],
+                (int) $validated['message_id'],
+                array_values((array) $validated['reactions']),
+                Carbon::now(),
+            );
+
+            return response()->json(['ok' => $ok]);
+        } catch (Throwable $e) {
+            report($e);
+
+            return response()->json(['ok' => false, 'error' => 'Не удалось записать реакции.']);
         }
     }
 

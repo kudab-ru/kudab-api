@@ -261,6 +261,10 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     // ставит API раз в сутки вместе с остальными задачами опроса.
     Route::post('/broadcast/subscribers', [TelegramChatBroadcastController::class, 'recordSubscribers']);
 
+    // Реакции на пост: приходят обновлением message_reaction_count, то есть
+    // сами, без опроса. Состав полный, а не дельта.
+    Route::post('/broadcast/reactions', [TelegramChatBroadcastController::class, 'recordReactions']);
+
     Route::post('/broadcast/single/enqueue', [TelegramChatBroadcastController::class, 'enqueueSingle']);
     Route::post('/broadcast/single/queue', [TelegramChatBroadcastController::class, 'listQueue']);
     Route::post('/broadcast/single/queue/skip', [TelegramChatBroadcastController::class, 'skipSingleFromQueue']);

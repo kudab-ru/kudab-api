@@ -2559,8 +2559,12 @@ class TelegramChatBroadcastService
      * Идемпотентно: повторный замер в тот же день перезаписывает число, а не
      * заводит вторую строку.
      */
-    public function recordSubscriberCount(int $telegramChatId, int $count, Carbon $now): bool
-    {
+    public function recordSubscriberCount(
+        int $telegramChatId,
+        int $count,
+        Carbon $now,
+        ?bool $reactionsEnabled = null,
+    ): bool {
         $chatId = DB::table('telegram.chats')
             ->where('telegram_chat_id', $telegramChatId)
             ->value('id');
@@ -2569,12 +2573,102 @@ class TelegramChatBroadcastService
             return false;
         }
 
+        // Заодно — включены ли в канале реакции. Прибор реакций без них не
+        // получает ни одного обновления, и в админке против каждого поста
+        // стоит пустота, неотличимая от «реакций не было». Здесь у пустоты
+        // появляется причина.
+        //
+        // null значит «спросить не удалось» — прежнее значение не трогаем,
+        // иначе одна сетевая ошибка объявляла бы прибор сломанным.
+        if ($reactionsEnabled !== null) {
+            foreach (TelegramChatBroadcast::query()->where('chat_id', (int) $chatId)->get() as $broadcast) {
+                $settings = $broadcast->settings ?? [];
+                $settings['reactions_enabled'] = $reactionsEnabled;
+                $settings['reactions_checked_at'] = $now->toIso8601String();
+                $broadcast->settings = $settings;
+                $broadcast->save();
+            }
+        }
+
         DB::table('telegram.chat_subscriber_counts')->upsert([[
             'chat_id' => (int) $chatId,
             'measured_on' => $now->copy()->setTimezone(self::SCHEDULE_TZ)->toDateString(),
             'count' => max(0, $count),
             'created_at' => $now,
         ]], ['chat_id', 'measured_on'], ['count']);
+
+        return true;
+    }
+
+    /**
+     * Записать реакции на пост канала.
+     *
+     * ОТКУДА ЧИСЛА. Телеграм присылает боту обновление `message_reaction_count`
+     * с ПОЛНЫМ текущим составом реакций сообщения — не дельтой. Поэтому здесь
+     * не сложение, а замена: пришедшее значение и есть правда на этот момент,
+     * а снятая реакция иначе осталась бы в сумме навсегда.
+     *
+     * ПОЧЕМУ ПОИСК ПО message_id. Больше телеграм ничего и не даёт: чат и
+     * номер сообщения. Ищем в пределах каналов этого чата — номера сообщений
+     * уникальны только внутри чата, и без этого ограничения реакция в одном
+     * канале легла бы посту другого.
+     *
+     * Реакции на чужие сообщения канала (их пишет не бот) просто не находят
+     * записи — это не ошибка, и ответ остаётся честным false.
+     *
+     * @param  list<array{emoji: string, count: int}>  $counts
+     */
+    public function recordReactions(
+        int $telegramChatId,
+        int $messageId,
+        array $counts,
+        Carbon $now,
+    ): bool {
+        $chatId = DB::table('telegram.chats')
+            ->where('telegram_chat_id', $telegramChatId)
+            ->value('id');
+
+        if ($chatId === null) {
+            return false;
+        }
+
+        $item = TelegramChatBroadcastItem::query()
+            ->whereIn('broadcast_id', TelegramChatBroadcast::query()
+                ->where('chat_id', (int) $chatId)
+                ->select('id'))
+            ->where('message_id', $messageId)
+            ->first();
+
+        if (! $item) {
+            return false;
+        }
+
+        $clean = [];
+        $total = 0;
+        foreach ($counts as $row) {
+            $emoji = trim((string) ($row['emoji'] ?? ''));
+            $count = max(0, (int) ($row['count'] ?? 0));
+            if ($emoji === '' || $count === 0) {
+                continue;
+            }
+            $clean[] = ['emoji' => $emoji, 'count' => $count];
+            $total += $count;
+        }
+
+        // По убыванию: разбивку читают глазами, и первым должно стоять то,
+        // чего больше.
+        usort($clean, static fn (array $a, array $b): int => $b['count'] <=> $a['count']);
+
+        $item->reactions = $total;
+        $item->reactions_meta = $clean === [] ? null : $clean;
+        $item->reactions_at = $now;
+        $item->save();
+
+        Log::info('broadcast.reactions.recorded', [
+            'item_id' => $item->id,
+            'message_id' => $messageId,
+            'total' => $total,
+        ]);
 
         return true;
     }
