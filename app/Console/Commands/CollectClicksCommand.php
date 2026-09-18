@@ -44,9 +44,21 @@ class CollectClicksCommand extends Command
         $token = trim((string) config('services.metrika.token'));
 
         if ($counter === '' || $token === '') {
-            $this->warn('Метрика не настроена: нет YANDEX_METRIKA_COUNTER или YANDEX_OAUTH_TOKEN.');
+            // ГРОМКО, А НЕ ШЁПОТОМ. Раньше здесь стоял warn и SUCCESS: в
+            // расписании это выглядело как ровное «DONE 318ms» каждое утро, и
+            // единственный прибор канала мог молчать неделями, ничем себя не
+            // выдавая. Ноль переходов и «нечем мерить» — разные вещи, и
+            // различать их должна команда, а не человек, вспомнивший
+            // проверить настройки.
+            $this->error('Метрика не настроена: нет YANDEX_METRIKA_COUNTER или YANDEX_OAUTH_TOKEN. Переходы не считаются ВООБЩЕ.');
 
-            return self::SUCCESS;
+            Log::error('broadcast.clicks.not_configured', [
+                'counter' => $counter === '' ? 'нет' : 'есть',
+                'token' => $token === '' ? 'нет' : 'есть',
+                'why' => 'единственный прибор отклика канала выключен',
+            ]);
+
+            return self::FAILURE;
         }
 
         $days = max(1, (int) $this->option('days'));
