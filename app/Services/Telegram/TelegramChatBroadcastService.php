@@ -723,6 +723,15 @@ class TelegramChatBroadcastService
                     }
                 }
 
+                // Портрет площадки — по той же причине: он собран на
+                // постановке и пролежал в очереди до недели, а «ближайшее тут»
+                // к этому моменту зовёт на прошедшее. Здесь же в подпись
+                // попадает переписанный портрет: его пишут по заявке из
+                // админки, и без пересборки новый текст до канала не доедет.
+                if ($item->kind === TelegramChatBroadcastItem::KIND_VENUE) {
+                    $this->ensureVenueCaption($item, $now);
+                }
+
                 // Готовый текст + НЕСКОЛЬКО обложек-прокси (альбом).
                 // Портрет площадки: картинки берутся у площадки.
                 // Ручной выбор сильнее автоподбора — как у событий. Без этой
@@ -1987,6 +1996,36 @@ class TelegramChatBroadcastService
      * @param  Event|null  $event  уже загруженное событие — чтобы не ходить в базу второй раз
      * @param  \Carbon\CarbonImmutable|null  $sendingAt  момент отправки: задан только на пути доставки
      */
+    /**
+     * Подпись портрета площадки — заново, из свежего текста площадки.
+     *
+     * Пустую подпись не сохраняем и старую в этом случае не стираем: бот на
+     * пустом тексте бросает задачу, не помечая её ничем, и «один портрет в
+     * полёте» после этого закрывает постановку следующего навсегда. Поэтому
+     * площадка без текста оставляет пост с прежней подписью.
+     *
+     * Сборка бесплатная — подстановка в шаблон, модель здесь не участвует.
+     */
+    private function ensureVenueCaption(TelegramChatBroadcastItem $item, Carbon $now): void
+    {
+        if ($item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            return;
+        }
+
+        $venue = $item->venue_id ? Venue::query()->find($item->venue_id) : null;
+        if (! $venue || trim((string) $venue->tg_portrait) === '') {
+            return;
+        }
+
+        $item->caption = $this->venuePortraitService->buildVenueCaption(
+            $venue,
+            $item->publish_at ? Carbon::parse($item->publish_at) : $now,
+            (int) $item->id,
+        );
+        $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
+        $item->save();
+    }
+
     private function ensureEventCaption(
         TelegramChatBroadcastItem $item,
         TelegramChatBroadcast $broadcast,
