@@ -137,11 +137,7 @@ final class PostTiming
         });
     }
 
-    /**
-     * Последний момент, когда пост ещё имеет смысл.
-     *
-     * Для события одного дня — его начало, для многодневки — конец проката.
-     */
+    /** Последний момент, когда пост ещё имеет смысл. */
     public static function deadline(?Event $event): ?Carbon
     {
         if (! $event || ! $event->start_time) {

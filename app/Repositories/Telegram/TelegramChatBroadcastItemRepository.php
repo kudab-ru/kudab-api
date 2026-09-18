@@ -131,11 +131,8 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
     }
 
     /**
-     * Атомарно клеймит publish-айтем на публикацию (time-lease).
+     * {@inheritdoc}
      *
-     * UPDATE … WHERE id AND status∈publishable AND (claimed_at IS NULL OR
-     * claimed_at < now−lease). Возвращает claim_token при успехе (1 строка),
-     * иначе null — айтем уже заклеймлен другим поллером в пределах lease.
      * Так параллельный поллер / повторный poll после краша не берёт айтем дважды.
      */
     public function claimForPublish(int $itemId, DateTimeInterface $now, int $leaseSeconds): ?string
@@ -165,11 +162,10 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
     }
 
     /**
-     * Помечает айтем posted ТОЛЬКО если claim_token совпадает (атомарно).
+     * {@inheritdoc}
      *
-     * Защита от stale-claim: если lease истёк и айтем реклеймил другой поллер,
-     * наш токен не совпадёт → 0 строк → false (не двигаем last_run за чужой пост).
-     * Возвращает true при успехе.
+     * Если lease истёк и айтем реклеймил другой поллер, наш токен не совпадёт
+     * → 0 строк → false: не двигаем last_run за чужой пост.
      */
     public function markPostedIfClaimed(int $itemId, string $claimToken, ?DateTimeInterface $moment = null): bool
     {
@@ -248,15 +244,6 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
 
     /**
      * {@inheritdoc}
-     */
-    /**
-     * Сколько незакрытых записей у канала, с разделением по виду.
-     *
-     * Событийные и venue-записи обязаны считаться ОТДЕЛЬНО: у портретов
-     * площадок свой недельный каденс, и если считать их вместе с лентой, то
-     * заполненная неделя заблокирует портреты навсегда.
-     *
-     * @param  'event'|'venue'|null  $kind  null — считать всё, как раньше
      */
     public function countOpenForBroadcast(int $broadcastId, ?string $kind = null): int
     {

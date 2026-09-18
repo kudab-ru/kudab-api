@@ -58,18 +58,11 @@ class TelegramChatService
         );
     }
 
-    /**
-     * Проверка, что у telegram_id достаточно прав управлять чатами.
-     * Сейчас — только admin / superadmin.
-     */
+    /** Проверка, что у telegram_id достаточно прав управлять чатами. */
     private function assertCanManageChats(int $telegramId): void
     {
         $role = $this->botRoleService->getRoleByTelegramId($telegramId);
 
-        // было: только admin / superadmin
-        // if (!in_array($role, ['admin', 'superadmin'], true)) {
-
-        // стало: user, moderator, admin, superadmin
         if (!in_array($role, ['user', 'moderator', 'admin', 'superadmin'], true)) {
             throw new RuntimeException('Недостаточно прав для управления связанными чатами');
         }

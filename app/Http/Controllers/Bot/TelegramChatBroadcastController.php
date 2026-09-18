@@ -336,13 +336,6 @@ class TelegramChatBroadcastController extends Controller
     }
 
     /**
-     * Пометить айтем очереди (портрет площадки) как опубликованный — по item_id.
-     * У venue-поста нет event_id, поэтому mark идёт по id айтема + claim_token.
-     *
-     * POST /api/bot/broadcast/single/mark-item-sent
-     * Body: { "item_id": 987, "claim_token": "...", "posted_at": "..." }
-     */
-    /**
      * Записать замер подписчиков канала.
      *
      * POST /api/bot/broadcast/subscribers
@@ -374,6 +367,13 @@ class TelegramChatBroadcastController extends Controller
         }
     }
 
+    /**
+     * Пометить айтем очереди (портрет площадки) как опубликованный — по item_id.
+     * У venue-поста нет event_id, поэтому mark идёт по id айтема + claim_token.
+     *
+     * POST /api/bot/broadcast/single/mark-item-sent
+     * Body: { "item_id": 987, "claim_token": "...", "posted_at": "..." }
+     */
     public function markItemSent(Request $request): JsonResponse
     {
         $validated = $request->validate([

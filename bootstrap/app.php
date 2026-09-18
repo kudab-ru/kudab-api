@@ -25,15 +25,10 @@ return Application::configure(basePath: dirname(__DIR__))
         // $middleware->appendToGroup('api', \App\Http\Middleware\BotAuthMiddleware::class);
 
         /*
-         * Неавторизованный запрос к закрытому эндпоинту должен получать 401, а не 500.
-         * По умолчанию Laravel уводит гостя на именованный маршрут `login`; в этом
-         * приложении такого маршрута нет (вход — POST api/admin/auth/login), поэтому
-         * получался RouteNotFoundException → 500 с HTML-страницей ошибки, а при
-         * включённой отладке — со стеком вызовов. Проверено: до правки
-         * GET /api/admin/communities без токена отвечал 500.
-         *
-         * Это только API: возвращаем null, то есть перенаправлять некуда, и Laravel
-         * отдаёт честный AuthenticationException → 401 JSON.
+         * Перенаправлять гостя некуда: маршрута `login` в этом приложении нет, вход —
+         * POST api/admin/auth/login. null вместо редиректа даёт честный
+         * AuthenticationException → 401. Разбор случая и замер — ниже, у
+         * shouldRenderJsonWhen.
          */
         $middleware->redirectGuestsTo(fn () => null);
     })

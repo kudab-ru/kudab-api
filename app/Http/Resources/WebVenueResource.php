@@ -8,10 +8,8 @@ use Illuminate\Http\Resources\Json\JsonResource;
 /**
  * Карточка venue для каталога (`/web/venues?city_id=...`).
  *
- * `cover_image_url` — берётся через subquery в VenuesController (A4(a)
- * proxy: первый event на этом venue → первая картинка через
- * EventSource.images). Поле приходит в SELECT как `cover_image_url`.
- * Если у venue нет events с картинками — null.
+ * `cover_image_url` — подзапросы `cover_event_url` / `cover_community_url`
+ * из VenuesController::baseQuery(); нет ни того ни другого — null.
  *
  * `next_event` / `upcoming_total` — VenuesController::attachUpcoming()
  * (батч-window-запрос по видимым-в-вебе ПРЕДСТОЯЩИМ событиям). Имена полей

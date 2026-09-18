@@ -195,7 +195,7 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('ping', fn () => ['ok' => true, 'result' => 'pong']);
     Route::get('events', [WebEventsController::class, 'index']);
     Route::get('events/random', [WebEventsController::class, 'random']);
-    // Точки событий для карты города (/map). GeoJSON, отбор по городу + окну даты, без страниц.
+    // Точки событий для карты города — см. докблок WebEventsController::map.
     // Порядок: до events/{id} (иначе "map" уедет в show как id; whereNumber всё равно подстрахует).
     Route::get('events/map', [WebEventsController::class, 'map']);
     Route::get('event-groups/{id}', [WebEventGroupsController::class, 'show'])->whereNumber('id');
@@ -208,8 +208,7 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
 
     Route::get('interests', [\App\Http\Controllers\Api\Web\InterestsController::class, 'index']);
 
-    // Venues (PR4) — порядок важен: /map ДО /{id} чтобы Laravel routing
-    // не съел "map" как numeric id (whereNumber на show всё равно подстрахует).
+    // Venues (PR4): /map ДО /{id} по той же причине, что у events/map выше.
     Route::get('venues', [\App\Http\Controllers\Api\Web\VenuesController::class, 'index']);
     Route::get('venues/map', [\App\Http\Controllers\Api\Web\VenuesController::class, 'map']);
     Route::get('venues/{id}', [\App\Http\Controllers\Api\Web\VenuesController::class, 'show'])->whereNumber('id');

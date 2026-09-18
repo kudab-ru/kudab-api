@@ -8,18 +8,11 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * Элемент очереди публикаций в телеграм-чат.
- *
- * Связи:
- *  - broadcast() → TelegramChatBroadcast (настройки рассылки для чата)
- *  - event()     → Event (событие, которое публикуем)
  */
 class TelegramChatBroadcastItem extends Model
 {
     use HasFactory;
 
-    /**
-     * Полное имя таблицы с учётом схемы Postgres.
-     */
     protected $table = 'telegram.chat_broadcast_items';
 
     protected $fillable = [

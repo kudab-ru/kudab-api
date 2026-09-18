@@ -26,7 +26,6 @@ class LlmTextModelCommand extends Command
 
     protected $description = 'Показать или задать активную модель текст-движка (bulk / tg)';
 
-    /** Зеркало whitelist парсера — для подсказки в выводе. Исполнительная правда там. */
     private const KNOWN_MODELS = [
         'claude-sonnet-4-6',
         'claude-haiku-4-5',

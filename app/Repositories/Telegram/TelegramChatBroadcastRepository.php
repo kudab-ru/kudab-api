@@ -13,8 +13,6 @@ class TelegramChatBroadcastRepository implements TelegramChatBroadcastRepository
     {
         return TelegramChatBroadcast::query()
             ->where('enabled', true)
-            // period не 'off' и не пустой — на уровне PHP можно ещё раз проверить,
-            // но тут хоть что-то отфильтруем
             ->whereNotNull('settings')
             ->get();
     }
@@ -44,7 +42,6 @@ class TelegramChatBroadcastRepository implements TelegramChatBroadcastRepository
         $broadcast->chat_id = $chatId;
         $broadcast->enabled = false;
 
-        // Дефолтные настройки v1
         $broadcast->settings = [
             'period'        => 'off',
             'template_code' => 'basic',
@@ -69,12 +66,10 @@ class TelegramChatBroadcastRepository implements TelegramChatBroadcastRepository
         $broadcast->enabled = $enabled;
 
         if ($period !== null) {
-            // Используем аксессор/мутатор period (JSON settings)
             $broadcast->period = $period;
         }
 
         if ($templateCode !== null) {
-            // Используем аксессор/мутатор template_code (JSON settings)
             $broadcast->template_code = $templateCode;
         }
 

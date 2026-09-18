@@ -8,15 +8,9 @@ use Illuminate\Support\Collection;
 
 /**
  * Репозиторий очереди публикаций в Telegram-чаты.
- *
- * Работает с моделью TelegramChatBroadcastItem:
- *   telegram.chat_broadcast_items
  */
 interface TelegramChatBroadcastItemRepositoryInterface
 {
-    /**
-     * Найти элемент очереди по (broadcast_id, event_id).
-     */
     public function findByBroadcastAndEvent(
         int $broadcastId,
         int $eventId,
@@ -52,23 +46,11 @@ interface TelegramChatBroadcastItemRepositoryInterface
         ?DateTimeInterface $plannedAt = null,
     ): TelegramChatBroadcastItem;
 
-    /**
-     * Найти следующий элемент для отправки для конкретного broadcast'а.
-     *
-     * Логика v1:
-     *   - статус = planned;
-     *   - planned_at <= $before (обычно now());
-     *   - сортировка по planned_at ASC, затем id ASC.
-     */
     public function findNextPlannedForBroadcast(
         int $broadcastId,
         ?DateTimeInterface $before = null,
     ): ?TelegramChatBroadcastItem;
 
-    /**
-     * Отметить элемент как успешно отправленный.
-     * posted_at, status.
-     */
     public function markPosted(
         TelegramChatBroadcastItem $item,
         ?DateTimeInterface $moment = null,
@@ -86,19 +68,11 @@ interface TelegramChatBroadcastItemRepositoryInterface
      */
     public function markPostedIfClaimed(int $itemId, string $claimToken, ?DateTimeInterface $moment = null): bool;
 
-    /**
-     * Отметить элемент как пропущенный (например, дубль или устарело).
-     * status = skipped, error_message (опционально — причина).
-     */
     public function markSkipped(
         TelegramChatBroadcastItem $item,
         ?string $reason = null,
     ): TelegramChatBroadcastItem;
 
-    /**
-     * Отметить, что при отправке произошла ошибка.
-     * status = error, error_message.
-     */
     public function markError(
         TelegramChatBroadcastItem $item,
         string $errorMessage,
@@ -106,11 +80,6 @@ interface TelegramChatBroadcastItemRepositoryInterface
 
 
     /**
-     * Список элементов очереди для одного broadcast'а
-     * по заданным статусам (обычно pending/planned).
-     *
-     * @param  array  $statuses  Список строк-статусов
-     * @param  int  $limit  Максимальное количество элементов
      * @return Collection<int, TelegramChatBroadcastItem>
      */
     public function listForBroadcast(
@@ -119,10 +88,6 @@ interface TelegramChatBroadcastItemRepositoryInterface
         int $limit,
     ): Collection;
 
-    /**
-     * Количество элементов очереди для одного broadcast'а
-     * по заданным статусам.
-     */
     /**
      * Сколько незакрытых записей у канала. Событийные и venue считаются
      * раздельно: у портретов площадок свой каденс, и общий счёт заблокировал

@@ -37,7 +37,6 @@ interface TelegramChatBroadcastRepositoryInterface
 
     /**
      * Обновить отметку последней фактической отправки (last_run_at).
-     * Если moment не передан — используется now().
      */
     public function touchLastRunAt(
         int $chatId,
@@ -46,7 +45,6 @@ interface TelegramChatBroadcastRepositoryInterface
 
     /**
      * Обновить отметку последнего предпросмотра (last_preview_at).
-     * Если moment не передан — используется now().
      */
     public function touchLastPreviewAt(
         int $chatId,

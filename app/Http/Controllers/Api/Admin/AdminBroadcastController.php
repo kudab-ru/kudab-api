@@ -35,9 +35,7 @@ use Illuminate\Support\Facades\Log;
  * телеграм-пользователя и хранить где-то его id. Здесь обычная админская
  * авторизация: auth:sanctum + role:admin|superadmin, как у остальных разделов.
  *
- * Что здесь есть и чего не было нигде: лента канала на неделю вперёд,
- * закрепление поста, правка текста, перенос даты и пул предложений с
- * причинами. Раньше очередь снаружи можно было только пропустить (skip) да
+ * Раньше очередь снаружи можно было только пропустить (skip) да
  * одобрить/отклонить в ревью.
  */
 class AdminBroadcastController extends Controller
@@ -551,9 +549,7 @@ class AdminBroadcastController extends Controller
                 $item->caption = null;
                 $item->caption_source = null;
             }
-            // Событию без анонса даём время его написать: пост вне очереди уходит
-            // через секунды, и иначе в канал уедет сырое описание из парсера.
-            // Придержку снимет парсер, как только текст готов.
+            // Событию без анонса даём время его написать — зачем, см. publishNow().
             $waitForText = $broadcast->ai_text
                 && $item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL
                 && trim((string) $event->tg_description) === '';
@@ -2046,9 +2042,7 @@ class AdminBroadcastController extends Controller
     }
 
     /**
-     * Ссылка на пост в канале: t.me/<канал>/<номер сообщения>.
-     *
-     * Имя канала кэшируем на запрос: лента зовёт эту сборку для каждой записи,
+     * Имя канала кэшируем на запрос: лента зовёт postUrl() для каждой записи,
      * а канал у всех записей один и тот же — без кэша это два запроса на
      * строку на ровном месте.
      *
@@ -2455,7 +2449,6 @@ class AdminBroadcastController extends Controller
         return response()->json(['data' => ['restored' => $restored, 'failed' => $failed]]);
     }
 
-    /** Вернуть пост в очередь после ошибки — попробовать ещё раз. */
     /**
      * Снять вышедший пост: сообщения в канале больше нет.
      *
@@ -2483,6 +2476,7 @@ class AdminBroadcastController extends Controller
         ]);
     }
 
+    /** Вернуть пост в очередь после ошибки — попробовать ещё раз. */
     public function retry(int $itemId): JsonResponse
     {
         $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
@@ -3257,9 +3251,8 @@ class AdminBroadcastController extends Controller
             'slots' => $b->slots,
             'horizon_days' => $b->horizon_days,
             'fill_lead_days' => $b->fill_lead_days,
-            // Каденс портретов и пул площадок, из которого он берётся: без
-            // второго числа первое не с чем сверить. Потолок частоты —
-            // пул ÷ (кулдаун ÷ 7), то есть пул ÷ 12,86.
+            // Каденс портретов. Сверять его есть с чем: portrait_pool ниже,
+            // потолок — TelegramVenuePortraitService::POOL_PER_WEEKLY_POST.
             'portrait_every_days' => $b->portrait_every_days,
             'min_gap_minutes' => $b->min_gap_minutes,
             'ai_text' => $b->ai_text,
@@ -3302,8 +3295,7 @@ class AdminBroadcastController extends Controller
             'city_id' => $b->chat?->city_id ? (int) $b->chat->city_id : null,
             'city_name' => $b->chat?->city?->name,
             // Может ли ЭТОТ стенд вообще отправлять в этот канал. На проде
-            // всегда да; на стенде — нет, если канал не назван в
-            // KUDAB_ADMIN_BROADCAST разрешении (см. BroadcastSafety).
+            // всегда да; на стенде — только каналы из BroadcastSafety::ALLOW_KEY.
             'posting_allowed' => $b->chat?->telegram_chat_id
                 ? BroadcastSafety::postingAllowed((int) $b->chat->telegram_chat_id)
                 : false,

@@ -12,14 +12,6 @@ use Illuminate\Support\Str;
 
 /**
  * Команда для связи Telegram-аккаунта с супер-админом.
- *
- * Допущения (подправь под свой проект):
- * - Модель TelegramUser находится в App\Models\TelegramUser.
- * - В таблице telegram_users есть поля telegram_id и telegram_username.
- * - Есть связь $telegramUser->user() -> belongsTo(User::class).
- * - Роли либо через Spatie (assignRole / getRoleNames),
- *   либо через boolean-колонку users.is_superadmin,
- *   либо через строковую колонку users.role.
  */
 class BotSuperAdmin extends Command
 {

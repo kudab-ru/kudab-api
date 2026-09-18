@@ -424,12 +424,6 @@ class EventRepository
     }
 
     /**
-     * @return array{page: LengthAwarePaginator, totalEvents: int|null}
-     *                                                                  - page: пагинатор reps (используется для hasMore-логики на фронте)
-     *                                                                  - totalEvents: количество events до схлопывания (для display-счётчика),
-     *                                                                  либо null если ни grouped, ни grouped_by_post не были запрошены
-     */
-    /**
      * Double-write на время прод-rollout Этапа 2: фронт постепенно мигрирует
      * с interests[]=ID на interests[]=slug. Validator не пускает mixed, так
      * что массив гарантированно гомогенный.
@@ -505,13 +499,19 @@ class EventRepository
         return array_map(fn ($r) => (int) $r->id, $rows);
     }
 
+    /**
+     * @return array{page: LengthAwarePaginator, totalEvents: int|null}
+     *                                                                  - page: пагинатор reps (используется для hasMore-логики на фронте)
+     *                                                                  - totalEvents: количество events до схлопывания (для display-счётчика),
+     *                                                                  либо null если ни grouped, ни grouped_by_post не были запрошены
+     */
     public function paginateUpcomingWeb(array $filters, int $perPage = 20): array
     {
         $grouped = array_key_exists('grouped', $filters)
             ? (filter_var($filters['grouped'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) === true)
             : false;
 
-        // grouped_by_post: ось B группировки (kudab-parser/TASKS.md 2.3).
+        // grouped_by_post: ось B группировки.
         // Один пост в соцсети рождает несколько разных events — кластеризуем
         // по event_sources(source, post_external_id), оставляем одного
         // представителя на кластер, остальных отдаём в payload как siblings.
@@ -1014,7 +1014,7 @@ class EventRepository
             // 'solo|<event_id>' (иначе). Rank: future-first → earliest
             // start_at. rn=1 — rep кластера (или solo event).
             //
-            // future-first (TASKS.md §13p): если в кластере есть хотя бы
+            // future-first: если в кластере есть хотя бы
             // одно будущее событие — оно становится rep'ом, кластер
             // остаётся в актуальной ленте. Если все события past —
             // earliest past, как раньше (кластер уходит в архив целиком,
@@ -1092,7 +1092,7 @@ class EventRepository
             // гарантирует консистентность: события в siblings — subset тех
             // же, что попали в `total_events`. Без этого siblings могли
             // содержать events из другого города / категории / blacklisted
-            // source, и фронтенд показывал «84 из 78» (TASKS.md §14).
+            // source, и фронтенд показывал «84 из 78».
             $eligibleEventIds = $uncollapsedQ->toBase()->pluck('events.id')
                 ->map(fn ($v) => (int) $v)
                 ->all();
@@ -1998,9 +1998,7 @@ class EventRepository
 
             $images = array_values($images);
 
-            // Эвристический выбор обложки: сортируем так, чтобы первая
-            // картинка была наиболее «карточной» (правильные пропорции,
-            // достаточный размер). Поведение задаётся `App\Support\CoverPicker`.
+            // Порядок обложки задаёт `App\Support\CoverPicker` — там же почему.
             if (count($images) > 1) {
                 $images = \App\Support\CoverPicker::pickBest($images);
             }
@@ -2299,29 +2297,20 @@ class EventRepository
 
     private function excludeBlacklistedSources($q): void
     {
-        // Скрываем событие только если:
-        // - есть хотя бы один source с black ссылкой
-        // - и нет ни одного source, который НЕ black (включая source без social_link_id)
         // Само условие живёт в Event::scopeWebNotBlacklisted (единственный
         // источник правды — его же используют venues/communities-выдачи).
         $q->webNotBlacklisted();
     }
 
     /**
-     * Скрывает события вне формата «общегородская развлекательная лента»:
-     *  - audience IN ('kids','family') — детский / семейный профиль,
-     *  - content_kind NOT IN базового набора — официально-протокольное,
-     *    патриотические церемонии, религиозный обряд.
-     *
-     * NULL-значения (legacy events до v11/v12 или редкие пропуски LLM) НЕ
-     * скрываем — backwards-compat и защита от data-loss на backlog'е.
+     * Скрывает события вне формата «общегородская развлекательная лента».
+     * Сами условия и почему NULL-значения не скрываем — в
+     * Event::scopeWebMainFeedTaxonomy (единственный источник правды, его же
+     * используют venues-выдачи).
      *
      * Override: $filters['include_all'] === true (через `?include_all=1`) —
      * пропускает фильтр целиком. Для админки / dev-режима / специальных
      * страниц «увидеть всё».
-     *
-     * Сами условия живут в Event::scopeWebMainFeedTaxonomy (единственный
-     * источник правды — его же используют venues-выдачи).
      */
     private function applyMainFeedTaxonomyFilter($q, array $filters): void
     {
@@ -2335,11 +2324,6 @@ class EventRepository
         $q->webMainFeedTaxonomy();
     }
 
-    /**
-     * Result is stored as attributes:
-     * - group_dates: [{id,start_at,start_date,time_precision,time_text}, ...]
-     * - group_count: int (реальный размер группы по “видимым” событиям)
-     */
     /**
      * Жадная диверсификация: переставляет события так, чтобы не было >2 подряд
      * одного content_kind, минимально нарушая исходный (score) порядок. События
@@ -2738,11 +2722,10 @@ class EventRepository
      * Скоп: только active не-удалённые events. Cross-post: если rep в нескольких
      * (source, post_external_id), выбираем кластер с наибольшим количеством
      * братьев.
-     */
-    /**
+     *
      * @param  int[]|null  $eligibleEventIds  Если задано — siblings выбираются
      *                                        ТОЛЬКО среди этих event_ids. Используется для синхронизации с
-     *                                        `total_events` count'ом (TASKS.md §14): главная не должна показывать
+     *                                        `total_events` count'ом: главная не должна показывать
      *                                        в карусели events, которые не учтены в counter'е (другой город,
      *                                        blacklisted source, past beyond grace и т.п.).
      */
@@ -2820,7 +2803,7 @@ class EventRepository
 
         // Ограничение: siblings — только subset eligible events
         // (тех же, что попали в total_events). Гарантирует консистентность
-        // counter'а на главной (TASKS.md §14).
+        // counter'а на главной.
         if ($eligibleEventIds !== null) {
             // Включаем сами rep'ы (на случай если они есть в pool — обычно
             // да) и всё, что в pool. whereIn по пустому массиву = WHERE 0=1
@@ -2887,7 +2870,7 @@ class EventRepository
 
         // Cutoff'ы для фильтрации past siblings — те же, что в applyOnlyActual
         // / addPastFlags, чтобы поведение карусели и счётчика на главной
-        // совпадало с критериями «актуальности» (TASKS.md §13p).
+        // совпадало с критериями «актуальности».
         $cutoffTs = now('Europe/Moscow')->copy()->subHours(self::PAST_GRACE_HOURS);
         $todayMsk = now('Europe/Moscow')->toDateString();
 
@@ -2926,7 +2909,7 @@ class EventRepository
                     continue;
                 }
 
-                // §13p: отбрасываем уже прошедшие siblings — в карусели
+                // Отбрасываем уже прошедшие siblings — в карусели
                 // «другие даты этого события» прошлые даты бесполезны.
                 // Семантика: если у rep'а есть future-siblings, кластер
                 // в актуальной ленте; past-даты этого же поста просто не
@@ -2990,8 +2973,6 @@ class EventRepository
 
     /**
      * Sibling-строка — будущая (по тем же критериям, что applyOnlyActual)?
-     * Используется в hydrateSiblings для отбрасывания past дат из карусели
-     * (TASKS.md §13p).
      */
     private function siblingIsFuture(object $r, \Carbon\CarbonInterface $cutoffTs, string $todayMsk): bool
     {

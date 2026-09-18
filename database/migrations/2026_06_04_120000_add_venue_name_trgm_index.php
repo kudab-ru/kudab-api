@@ -8,11 +8,9 @@ use Illuminate\Support\Facades\DB;
 /**
  * GIN pg_trgm индекс на venues для name-first резолва площадки по имени.
  *
- * Контекст (PR1 venue-name-resolution, kudab-parser VenueNameMatcher):
- * агрегаторы-афиши (Visit Voronezh, Минкульт, ТИЦ) пишут venue-ИМЯ в адрес
- * («Матрёшка», «Воронежский театр оперы и балета»), DaData такой адрес не
- * геокодит → событие уходит в needs_geo. Matcher ищет venue по similarity
- * имени в пределах города; этот индекс делает trgm-поиск быстрым.
+ * Зачем имя вообще резолвят по similarity — разобрано в kudab-parser,
+ * App\Services\Venues\VenueNameMatcher (PR1 venue-name-resolution). Здесь
+ * только индекс, который делает этот поиск быстрым.
  *
  * Expression-индекс на public.ru_normalize(name) (lower + ё→е) — переиспользует
  * существующую IMMUTABLE-функцию из 2026_02_19_add_ru_normalize_search и

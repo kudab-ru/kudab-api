@@ -7,9 +7,6 @@ use Illuminate\Support\Collection;
 
 interface TelegramChatRepositoryInterface
 {
-    /**
-     * Найти чат по Telegram chat_id.
-     */
     public function findByTelegramChatId(int $telegramChatId): ?TelegramChat;
 
     /**
@@ -24,7 +21,6 @@ interface TelegramChatRepositoryInterface
 
     /**
      * Привязать (или перепривязать) чат к пользователю.
-     * Если записи ещё нет — создаём, иначе обновляем.
      *
      * Владелец может быть null: из админки канал привязывает веб-админ, за
      * которым нет телеграм-пользователя. Колонка telegram_user_id nullable.
@@ -37,8 +33,5 @@ interface TelegramChatRepositoryInterface
         ?string $username = null,
     ): TelegramChat;
 
-    /**
-     * Отвязать чат: пометить неактивным и выставить unlinked_at.
-     */
     public function unlinkChat(TelegramChat $chat): TelegramChat;
 }

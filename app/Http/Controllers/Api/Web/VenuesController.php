@@ -22,8 +22,8 @@ use Illuminate\Support\Facades\DB;
  *   GET /api/web/venues/{id}        — детальная карточка + future events;
  *   GET /api/web/venues/{id}/nearby — соседние площадки по расстоянию.
  *
- * `cover_image_url` (A4(a)) — proxy картинки первого event'а через
- * EventSource.images. Один subquery на запрос, без N+1.
+ * `cover_image_url` — постер ближайшего БУДУЩЕГО события, запасной путь —
+ * обложка привязанного сообщества; оба подзапросами, см. baseQuery().
  *
  * `next_event` / `upcoming_total` — обогащение карточки каталога (Vue-порт
  * /venues): строка «ближайшее» и состояние «сегодня / есть предстоящие /
@@ -309,7 +309,6 @@ class VenuesController extends Controller
         foreach ($rows as $r) {
             $cnt   = (int) $r->cnt;
             $share = $cnt / $denom;
-            // жанр либо повторяется (≥3), либо доминирует (≥30% при ≥2 событиях)
             if ($cnt >= 3 || ($cnt >= 2 && $share >= 0.30)) {
                 $chips[] = [
                     'slug'  => (string) $r->slug,
@@ -364,8 +363,8 @@ class VenuesController extends Controller
     }
 
     /**
-     * Базовый Eloquent-query с city_slug, events_count и cover_image_url
-     * подзапросами (один SQL, без N+1).
+     * Базовый Eloquent-query: city_slug, events_count и обложки — подзапросами,
+     * одним SQL, без N+1.
      */
     private function baseQuery()
     {

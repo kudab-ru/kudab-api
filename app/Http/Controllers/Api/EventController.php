@@ -102,7 +102,6 @@ class EventController extends Controller
         $filters = $validated;
         unset($filters['per_page'], $filters['page']);
 
-        // city=slug -> city_id -> фильтрация по events.city_id
         $citySlug = trim((string) ($validated['city'] ?? ''));
         if ($citySlug !== '') {
             $cityId = City::query()
