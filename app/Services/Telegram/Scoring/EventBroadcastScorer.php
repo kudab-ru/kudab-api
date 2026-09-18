@@ -120,13 +120,29 @@ class EventBroadcastScorer
         return $e->relationLoaded('interests') ? $e->interests->count() : 0;
     }
 
+    /**
+     * Цена известна — то есть в посте на её месте будет ЧИСЛО или «Бесплатно».
+     *
+     * СТАТУСА `priced` НЕ СУЩЕСТВУЕТ. Он стоял здесь с первого дня, и такой
+     * строки нет ни в одной записи: реальные статусы — free, paid, range,
+     * external, donation, unknown. То есть весь признак держался на одной
+     * проверке `price_min !== null`, а собственный тест скорера подставлял
+     * `'priced'` и потому подтверждал несуществующее поведение.
+     *
+     * ПОЧЕМУ НЕ ПРОСТО `priced` → `paid`. Цена «известна» не там, где
+     * источник назвал событие платным, а там, где подписчик увидит сумму:
+     * `paid` без price_min печатается как «Уточняется» (см.
+     * [[EventCaptionBuilder]]::priceLabel), и балл за такую строку был бы
+     * баллом за пустое место. Бесплатно и донат — знание о цене, число там
+     * не нужно.
+     */
     private function hasKnownPrice(Event $e): bool
     {
-        if (in_array($e->price_status, ['free', 'priced'], true)) {
+        if (in_array($e->price_status, ['free', 'donation'], true)) {
             return true;
         }
 
-        return $e->price_min !== null;
+        return $e->price_min !== null || $e->price_max !== null;
     }
 
     private function freshnessDelta(Event $e): int

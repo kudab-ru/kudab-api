@@ -48,7 +48,11 @@ class EventBroadcastScorerTest extends TestCase
                 'house_fias_id'  => 'fias-123',
                 'venue_id'       => 7,
                 'tickets_status' => 'available',
-                'price_status'   => 'priced',
+                // Цена известна = подписчик увидит число. Здесь стоял
+                // несуществующий статус 'priced', и тест подтверждал
+                // поведение, которого в базе нет ни у одной записи.
+                'price_status'   => 'paid',
+                'price_min'      => 500,
                 'description'    => str_repeat('я', EventBroadcastScorer::MIN_DESCRIPTION_LEN),
                 'time_precision' => 'datetime',
             ],
