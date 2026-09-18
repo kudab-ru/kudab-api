@@ -901,7 +901,9 @@ class TelegramChatBroadcastService
      * Идёт из Laravel scheduler (broadcast:enqueue-due, withoutOverlapping). last_run_at
      * НЕ трогаем здесь — его двигает фактический пост.
      *
-     * @return array{checked:int,due:int,enqueued:int,skipped_no_city:int,skipped_queue_busy:int,no_candidate:int,skipped_no_reviewer:int}
+     * Каналы со слотами сюда не заходят: их ведёт fillFeedDays (broadcast:fill-feed).
+     *
+     * @return array{checked:int,due:int,enqueued:int,skipped_slots:int,skipped_no_city:int,skipped_queue_busy:int,no_candidate:int,skipped_no_reviewer:int}
      */
     public function enqueueDueForAllChannels(Carbon $now, bool $dryRun = false): array
     {
@@ -909,6 +911,7 @@ class TelegramChatBroadcastService
             'checked' => 0,
             'due' => 0,
             'enqueued' => 0,
+            'skipped_slots' => 0,
             'skipped_no_city' => 0,
             'skipped_queue_busy' => 0,
             'no_candidate' => 0,
@@ -920,6 +923,18 @@ class TelegramChatBroadcastService
 
         foreach ($broadcasts as $broadcast) {
             $summary['checked']++;
+
+            // Канал со слотами ведёт наполнитель ленты, а не этот автомат.
+            // Здешняя запись дня не получает вовсе и уходит ближайшим тиком —
+            // рядом со слотами это лишний пост посреди дня, да ещё через ревью
+            // в ЛС. Раньше их разводил кап feed_limit, но он считает только
+            // события, а ячейки занимают ещё подборка и портрет площадки: на
+            // полной ленте кап недостижим, и автомат ожил сам собой.
+            if ($broadcast->slots !== []) {
+                $summary['skipped_slots']++;
+
+                continue;
+            }
 
             if (! $this->isSingleRunDue($broadcast, $now)) {
                 continue;
