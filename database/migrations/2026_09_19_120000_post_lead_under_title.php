@@ -36,9 +36,6 @@ use Illuminate\Support\Facades\DB;
  */
 return new class extends Migration
 {
-    /** Якорь — строка названия; ниже неё и встаёт анонс. */
-    private const TITLE = '🎟 <b>{title}</b>';
-
     public function up(): void
     {
         foreach (DB::table('telegram.message_templates')->get(['id', 'body']) as $row) {
@@ -51,22 +48,24 @@ return new class extends Migration
             // Анонс — только туда, где прозе уже отведено место. У шаблона
             // `short` её нет по замыслу, и подсовывать ему абзац нельзя:
             // короткий пост выбирают как раз затем, чтобы прозы не было.
-            if (preg_match('/\{description\s*\|\s*slice:0\.\.(\d+)\s*\|\s*escape_html\}/u', $body, $m)) {
+            // Регексп, а не поиск точной строки: тело шаблона правится из
+            // админки, и лишний пробел внутри скобок оставил бы прод без
+            // правки — молча и незаметно.
+            $descRe = '/\{description\s*\|\s*slice:0\.\.(\d+)\s*\|\s*escape_html\}/u';
+
+            if (preg_match($descRe, $body, $m)) {
                 $slice = $m[1];
 
-                $body = str_replace(
-                    '{description|slice:0..'.$slice.'|escape_html}',
-                    '{about|slice:0..'.$slice.'|escape_html}',
-                    $body,
-                );
+                $body = preg_replace($descRe, '{about|slice:0..'.$slice.'|escape_html}', $body) ?? $body;
 
                 // Идемпотентность: повторный прогон не удвоит строку.
                 if (! str_contains($body, '{lead')) {
-                    $body = str_replace(
-                        self::TITLE."\n",
-                        self::TITLE."\n".'{lead|slice:0..'.$slice.'|escape_html}'."\n",
+                    $body = preg_replace(
+                        '/(🎟\s*<b>\{title\}<\/b>)\n/u',
+                        '$1'."\n".'{lead|slice:0..'.$slice.'|escape_html}'."\n",
                         $body,
-                    );
+                        1,
+                    ) ?? $body;
                 }
             }
 
