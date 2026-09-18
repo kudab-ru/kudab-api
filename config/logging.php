@@ -52,9 +52,26 @@ return [
 
     'channels' => [
 
+        /*
+         * ЛОГ РОТИРУЕТСЯ ВСЕГДА, ЧЕМ БЫ НИ БЫЛ ЗАДАН LOG_STACK.
+         *
+         * Драйвер `single` пишет в один файл и не удаляет ничего никогда:
+         * на проде laravel.log дорос до 485 МБ, а на стенде до 45 МБ, и
+         * единственным способом это заметить был `du`. Поэтому `single`
+         * здесь читается как `daily` — тот же файл, но с суточной нарезкой
+         * и сроком хранения LOG_DAILY_DAYS.
+         *
+         * Почему подменой, а не правкой .env: .env прода лежит на сервере и
+         * выкаткой не обновляется, то есть правка окружения означала бы
+         * «когда-нибудь не забыть». Сменить поведение по-прежнему можно —
+         * задав LOG_STACK любым другим каналом (`stderr`, `syslog`).
+         */
         'stack' => [
             'driver' => 'stack',
-            'channels' => explode(',', env('LOG_STACK', 'single')),
+            'channels' => array_map(
+                static fn (string $channel): string => trim($channel) === 'single' ? 'daily' : trim($channel),
+                explode(',', (string) env('LOG_STACK', 'daily')),
+            ),
             'ignore_exceptions' => false,
         ],
 
