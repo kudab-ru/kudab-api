@@ -4,6 +4,7 @@ namespace App\Services\Telegram;
 
 use App\Models\Event;
 use App\Support\Telegram\CaptionTemplate;
+use App\Support\Telegram\VenueName;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Log;
 
@@ -16,11 +17,21 @@ use Illuminate\Support\Facades\Log;
  * существовало: ни отредактировать его, ни показать честное превью в админке
  * было нельзя. Теперь текст строится здесь и хранится вместе с записью очереди.
  *
- * ПРАВИЛО ПЕРЕНОСА. Повторяем поведение бота ПОБАЙТОВО, включая странности:
+ * ПРАВИЛО ПЕРЕНОСА. Повторяли поведение бота ПОБАЙТОВО, включая странности:
  * заголовок не экранируется, строка тегов не печатается никогда, у пустого
  * адреса остаётся висящий пробел после эмодзи. Эти вещи уже уходили
  * подписчикам; чинить их надо отдельно и осознанно, а не заодно с переездом,
  * иначе нельзя будет понять, что именно изменило текст.
+ *
+ * ЧТО ПОЧИНЕНО ПОСЛЕ ПЕРЕЕЗДА — три вещи, каждая отдельным решением:
+ * 1) заголовок экранируется (см. ключ `title`);
+ * 2) в строке места печатается ИМЯ ПЛОЩАДКИ, а не хвост адреса, и вся строка
+ *    экранируется (см. placeShort и `$locSafe`);
+ * 3) появились ключи `lead` и `about`: живая фраза модели и пресс-релиз
+ *    источника разведены, чтобы шаблон мог поднять первую наверх, не рискуя
+ *    поднять туда второй.
+ * Строка тегов так и не печатается — значений для неё нет, и строка `🏷 …`
+ * убрана из шаблонов, а не заполнена наугад.
  *
  * ВХОД. Берём Event::toArray() — ровно то, что отдаёт боту
  * EventController::show (response()->json($event), без ресурса). Значит на
@@ -58,11 +69,9 @@ final class EventCaptionBuilder
         ?CarbonImmutable $asOf = null,
         ?int $itemId = null,
     ): string {
-        $raw = $event->toArray();
-
         $body = $this->templateBody($templateCode);
 
-        return $this->assemble($raw, $body, $templateCode, $asOf, $itemId);
+        return $this->assemble($this->raw($event), $body, $templateCode, $asOf, $itemId);
     }
 
     /**
@@ -74,7 +83,39 @@ final class EventCaptionBuilder
      */
     public function buildWithBody(Event $event, string $body, ?CarbonImmutable $asOf = null): string
     {
-        return $this->assemble($event->toArray(), $body, 'preview', $asOf);
+        return $this->assemble($this->raw($event), $body, 'preview', $asOf);
+    }
+
+    /**
+     * Событие как массив — плюс имя площадки отдельной строкой.
+     *
+     * ПОЧЕМУ ЗДЕСЬ, А НЕ В ВЫЗЫВАЮЩЕМ КОДЕ. В `toArray()` связь `venue`
+     * приходит вложенным массивом, а нормализация берёт только строки — то
+     * есть имя площадки не попадало в подпись НИКОГДА, и читатель видел
+     * «📍 Воронеж, 54, 1 этаж» вместо «📍 Воронеж, Марьяж». Сборщиков подписи
+     * шесть штук в трёх файлах, и требовать от каждого `with('venue')` —
+     * значит завести седьмой, который забудет. Связь тянется здесь: подпись
+     * собирается по одной, лишний запрос на пост незаметен.
+     *
+     * @return array<string, mixed>
+     */
+    private function raw(Event $event): array
+    {
+        $raw = $event->toArray();
+
+        try {
+            $raw['venue_name'] = VenueName::label($event->venue?->name);
+        } catch (\Throwable $e) {
+            // Площадка удалена или связь недоступна — строка места просто
+            // остаётся прежней, хвостом адреса. Пост из-за этого не теряем.
+            Log::warning('caption.venue_unavailable', [
+                'event_id' => $event->id,
+                'error' => $e->getMessage(),
+            ]);
+            $raw['venue_name'] = '';
+        }
+
+        return $raw;
     }
 
     /**
@@ -128,10 +169,37 @@ final class EventCaptionBuilder
 
         // Строка места: город и «что-то поконкретнее». Ровно как в боте
         // (events.py:322-327) — сюда же подставляются {place} и {location}.
+        //
+        // Город из строки НЕ убираем, хотя канал городской и «Воронеж» в нём
+        // выглядит лишним: в поле `city` лежит НАСЕЛЁННЫЙ ПУНКТ, а не город
+        // канала, и у каждого седьмого поста это Рамонь, Костёнки или
+        // Дивногорье за 30–80 км. Убрав город, мы спрятали бы ровно ту
+        // подробность, ради которой человек решает, поедет ли он.
         $loc = implode(', ', array_values(array_filter(
             [trim($city), trim($placeShort !== '' ? $placeShort : $address)],
             static fn (string $s): bool => $s !== '',
         )));
+
+        // Имена площадок приходят из парсеров — это чужой текст, а не наш.
+        // В окне ленты живёт «JUST Bar&Kitchen»: без экранирования Telegram
+        // видит битую разметку и отклоняет ВЕСЬ пост. Заголовок экранируется
+        // по той же причине (см. ниже), и до появления имени площадки строка
+        // места была безопасна только потому, что в ней стоял хвост адреса.
+        $locSafe = htmlspecialchars($loc, ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+        // Живая фраза модели и пресс-релиз источника — это РАЗНЫЕ тексты, и
+        // место в посте у них разное. `{lead}` пуст, когда анонса модели нет,
+        // и шаблон с крючком наверху не поднимает в первую строку
+        // «Приглашаем вас на ток-шоу…». `{about}` — зеркально: он молчит,
+        // когда фраза модели уже стоит наверху, иначе один и тот же текст
+        // ушёл бы в пост дважды.
+        //
+        // `{description}` оставлен как был — по нему собраны шаблоны promo и
+        // short, и менять их смысл заодно нельзя.
+        $lead = $this->firstNonEmpty($raw, ['tg_description']);
+        $about = $lead !== ''
+            ? ''
+            : $this->firstNonEmpty($raw, ['description', 'short_description', 'excerpt', 'body', 'text']);
 
         $canonicalUrl = $this->firstNonEmpty($raw, ['canonical_url', 'external_url', 'source_url', 'original_url']);
         $eventId = trim((string) ($raw['id'] ?? $raw['event_id'] ?? ''));
@@ -151,9 +219,11 @@ final class EventCaptionBuilder
                 'UTF-8',
             ),
             'description' => $this->firstNonEmpty($raw, ['tg_description', 'description', 'short_description', 'excerpt', 'body', 'text']),
-            'address' => $loc,
-            'place' => $loc,
-            'location' => $loc,
+            'lead' => $lead,
+            'about' => $about,
+            'address' => $locSafe,
+            'place' => $locSafe,
+            'location' => $locSafe,
             'start_time' => $this->startHuman($raw, $asOf),
             'price_label' => $this->priceLabel($raw, $canonicalUrl),
             'price_url' => trim((string) ($raw['price_url'] ?? '')),
@@ -421,9 +491,15 @@ final class EventCaptionBuilder
      */
     private function placeShort(array $raw, string $city, string $address): string
     {
-        // venue в сыром JSON — объект связи, а не строка; берём только строки,
-        // как это делает _extract_first_non_empty_string в боте.
-        $name = $this->firstNonEmpty($raw, ['place', 'venue', 'location_name']);
+        // ЭТА ВЕТКА БЫЛА МЁРТВОЙ. Её переносили из бота вместе с остальным, но
+        // ни `place`, ни `venue`, ни `location_name` в таблице events не
+        // существует, а связь `venue` приходит из toArray() вложенным массивом
+        // и до строк не доходит. Имя площадки в посте ленты не печаталось ни
+        // разу: читатель видел хвост адреса — «54, 1 этаж».
+        //
+        // Имя кладёт сюда raw() — уже очищенное общим правилом [[VenueName]],
+        // тем же, которым его печатают подборка и портрет.
+        $name = $this->firstNonEmpty($raw, ['venue_name', 'place', 'venue', 'location_name']);
         if ($name !== '') {
             return $name;
         }
@@ -446,7 +522,13 @@ final class EventCaptionBuilder
     // Постобработка — три шага, в том же порядке, что и в боте
     // ------------------------------------------------------------------
 
-    /** Пустая строка с 📍 заполняется местом. Для нынешних шаблонов ветка мертва. */
+    /**
+     * Пустая строка с 📍 заполняется местом. Для нынешних шаблонов ветка мертва.
+     *
+     * `$loc` приходит УЖЕ экранированным — тем же значением, что подставляет
+     * `{address}`. Второго экранирования здесь нет намеренно: иначе «Bar&Kitchen»
+     * пришёл бы в пост как «Bar&amp;amp;Kitchen».
+     */
     private function fixEmptyLocationLine(string $caption, string $loc): string
     {
         $lines = explode("\n", $caption);
@@ -455,7 +537,7 @@ final class EventCaptionBuilder
                 continue;
             }
             if (trim(mb_substr(trim($line), 1)) === '' && $loc !== '') {
-                $lines[$i] = '📍 '.htmlspecialchars($loc, ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                $lines[$i] = '📍 '.$loc;
             }
             break;
         }

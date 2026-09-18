@@ -9,6 +9,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\Venue;
 use App\Support\BroadcastSafety;
+use App\Support\Telegram\VenueName;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -382,12 +383,15 @@ class TelegramVenuePortraitService
      */
     public function buildVenueCaption(Venue $venue, Carbon $now, ?int $itemId = null): string
     {
-        $name = $this->esc((string) $venue->name);
+        // Имя чистим тем же правилом, что подборка и пост ленты, — [[VenueName]]:
+        // «Новый театр | Воронеж» в заголовке портрета читается как опечатка.
+        $label = VenueName::label($venue->name);
+        $name = $this->esc($label);
         $addr = $this->shortAddress($venue);
         $addrLink = $addr !== '' ? '📍 <a href="'.$this->mapsUrl($venue).'">'.$this->esc($addr).'</a>' : '';
 
         // Короткие название+адрес — в одну строку; иначе адрес отдельной строкой.
-        if ($addrLink !== '' && (mb_strlen((string) $venue->name) + mb_strlen($addr)) <= self::HEADER_ONE_LINE_MAX) {
+        if ($addrLink !== '' && (mb_strlen($label) + mb_strlen($addr)) <= self::HEADER_ONE_LINE_MAX) {
             $lines = ['🏛 <b>'.$name.'</b>  ·  '.$addrLink];
         } else {
             $lines = ['🏛 <b>'.$name.'</b>'];
@@ -633,7 +637,10 @@ class TelegramVenuePortraitService
         // День назначаем ЗДЕСЬ, а не у вызывающего: запись без момента для
         // портрета означает «ехать следующим тиком в любой час» — ровно то
         // поведение, ради отмены которого портрету и дали слот.
-        $publishAt = $this->slotPlanner->nextFreeSlot($this->broadcastOf($broadcastId), $now);
+        // respectLead = false: портрет ставит ЧЕЛОВЕК, а «поздний слот
+        // решается накануне» — правило автомата. Отказать руке из-за него
+        // значило бы сказать «неделя занята» там, где она пуста.
+        $publishAt = $this->slotPlanner->nextFreeSlot($this->broadcastOf($broadcastId), $now, false);
         if (! $publishAt) {
             throw new RuntimeException(
                 'Неделя занята целиком: свободного слота нет. '

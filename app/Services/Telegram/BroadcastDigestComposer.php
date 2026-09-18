@@ -7,6 +7,7 @@ namespace App\Services\Telegram;
 use App\Models\Event;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
+use App\Support\Telegram\VenueName;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -1198,28 +1199,14 @@ final class BroadcastDigestComposer
     }
 
     /**
-     * Имя площадки без мусора источника.
+     * Имя площадки без мусора источника — общим правилом, см. [[VenueName]].
      *
-     * Афиши складывают в одно поле два названия одного места («Arena Hall /
-     * Aura Night Club») и приклеивают город через трубу («Новый театр |
-     * Воронеж»). В строке фактов, которую подборка ставит под каждым именем,
-     * это самое заметное место поста.
+     * Правило переехало в Support, когда имя площадки начал печатать и пост
+     * ленты: два экземпляра одной чистки разъехались бы в первый же месяц.
      */
     private function venueLabel(object $row): string
     {
-        $name = trim((string) ($row->venue_name ?? ''));
-        if ($name === '') {
-            return '';
-        }
-
-        foreach ([' | ', ' / ', ' — филиал'] as $mark) {
-            $at = mb_strpos($name, $mark);
-            if ($at !== false && $at >= 3) {
-                $name = trim(mb_substr($name, 0, $at));
-            }
-        }
-
-        return $name;
+        return VenueName::label($row->venue_name ?? null);
     }
 
     /**
