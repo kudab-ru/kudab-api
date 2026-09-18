@@ -7,6 +7,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\TelegramUser;
 use App\Services\Telegram\BroadcastDigestBooking;
+use App\Services\Telegram\BroadcastSlotPlanner;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -150,6 +151,140 @@ class BroadcastDigestBookingTest extends TestCase
             ->count());
 
         Carbon::setTestNow();
+    }
+
+    /**
+     * Воскресенье — такой же день недели, как остальные шесть.
+     *
+     * Настройка хранится по-человечески (1 пн … 7 вс), Carbon считает иначе
+     * (0 вс … 6 сб), и `next(7)` кидал исключение. Валидация значение
+     * пропускала, админка его предлагала — а `broadcast:enqueue-digests`
+     * падала целиком, для ВСЕХ каналов сразу.
+     */
+    public function test_sunday_books_like_any_other_weekday(): void
+    {
+        // Вторник 15 сентября — ближайшее воскресенье 20-е.
+        Carbon::setTestNow(Carbon::parse('2026-09-15 12:00', 'Europe/Moscow'));
+
+        $broadcast = $this->makeChannel();
+        $broadcast->slots = [10, 19];
+        $broadcast->digest_weekday = 7;
+        $broadcast->save();
+
+        $summary = $this->booking()->bookDue(Carbon::now());
+
+        $this->assertSame(0, $summary['failed'], 'воскресенье больше не роняет прогон');
+        $this->assertSame(1, $summary['booked']);
+
+        $item = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->firstOrFail();
+
+        $this->assertSame(
+            '2026-09-20 19:00',
+            Carbon::parse($item->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H:i'),
+            'воскресенье, вечерний слот',
+        );
+
+        Carbon::setTestNow();
+    }
+
+    /** Все семь дней доезжают до слота — ни один не роняет команду. */
+    public function test_every_weekday_books_a_slot(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 12:00', 'Europe/Moscow'));
+
+        for ($weekday = 1; $weekday <= 7; $weekday++) {
+            TelegramChatBroadcastItem::query()->delete();
+
+            $broadcast = TelegramChatBroadcast::query()->firstOr(fn () => $this->makeChannel());
+            $broadcast->slots = [10, 19];
+            $broadcast->digest_weekday = $weekday;
+            $broadcast->save();
+
+            $summary = $this->booking()->bookDue(Carbon::now());
+
+            $this->assertSame(0, $summary['failed'], "день {$weekday} уронил прогон");
+            $this->assertSame(1, $summary['booked'], "день {$weekday} не забронировал слот");
+
+            $at = Carbon::parse(TelegramChatBroadcastItem::query()
+                ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+                ->value('publish_at'))->setTimezone('Europe/Moscow');
+
+            $this->assertSame($weekday, $at->isoWeekday(), "день {$weekday} уехал не в свой день недели");
+        }
+
+        Carbon::setTestNow();
+    }
+
+    /**
+     * Упавший канал не уносит остальные, а команда об этом говорит.
+     *
+     * До гарда любая ошибка на одном канале уносила весь прогон: рубрика
+     * молча переставала бронировать слоты во ВСЕХ каналах разом, и заметить
+     * это можно было только по отсутствию подборок. Поломку подсовываем
+     * планировщику — это единственная общая зависимость брони, и ошибка в
+     * ней воспроизводит ровно тот случай, что был с воскресеньем.
+     */
+    public function test_a_broken_channel_does_not_take_the_others_down(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 12:00', 'Europe/Moscow'));
+
+        $broken = $this->makeChannel();
+        $broken->slots = [10, 19];   // вечерний час 19 — на нём и споткнётся
+        $broken->digest_weekday = 1;
+        $broken->save();
+
+        $healthy = $this->makeSecondChannel();
+        $healthy->slots = [10, 12];  // вечерний час 12 — этот канал доедет
+        $healthy->digest_weekday = 1;
+        $healthy->save();
+
+        $this->app->bind(BroadcastSlotPlanner::class, fn () => new class extends BroadcastSlotPlanner
+        {
+            public function key(\Carbon\CarbonInterface|Carbon|string $at): string
+            {
+                if (Carbon::parse($at)->setTimezone(self::TZ)->format('H') === '19') {
+                    throw new \RuntimeException('сломанный канал');
+                }
+
+                return parent::key($at);
+            }
+        });
+
+        $summary = $this->booking()->bookDue(Carbon::now());
+
+        $this->assertSame(1, $summary['failed'], 'сломанный канал посчитан отдельно');
+        $this->assertSame(1, $summary['booked'], 'исправный канал бронь получил');
+
+        $this->assertSame(1, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $healthy->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->count());
+        $this->assertSame(0, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broken->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->count());
+
+        Carbon::setTestNow();
+    }
+
+    private function makeSecondChannel(): TelegramChatBroadcast
+    {
+        $owner = TelegramUser::create(['telegram_id' => 8307201889]);
+        $chat = new TelegramChat;
+        $chat->telegram_chat_id = -1009999078;
+        $chat->chat_type = 'channel';
+        $chat->is_active = true;
+        $chat->telegram_user_id = $owner->id;
+        $chat->save();
+
+        return TelegramChatBroadcast::create([
+            'chat_id' => $chat->id,
+            'enabled' => true,
+            'settings' => ['period' => 'daily_10', 'template_code' => 'basic'],
+        ]);
     }
 
     private function booking(): BroadcastDigestBooking

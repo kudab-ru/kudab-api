@@ -8,6 +8,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Бронь слота под подборку недели.
@@ -41,53 +42,80 @@ final class BroadcastDigestBooking
     /**
      * Поставить брони всем каналам, где рубрика включена.
      *
-     * @return array{checked: int, booked: int, already: int, off: int}
+     * @return array{checked: int, booked: int, already: int, off: int, failed: int}
      */
     public function bookDue(Carbon $now, bool $dryRun = false): array
     {
-        $summary = ['checked' => 0, 'booked' => 0, 'already' => 0, 'off' => 0];
+        $summary = ['checked' => 0, 'booked' => 0, 'already' => 0, 'off' => 0, 'failed' => 0];
 
         $broadcasts = TelegramChatBroadcast::query()->with('chat')->get();
 
         foreach ($broadcasts as $broadcast) {
             $summary['checked']++;
 
-            if (! $broadcast->enabled || $broadcast->period === 'off' || $broadcast->digest_weekday === null) {
-                $summary['off']++;
-
-                continue;
+            try {
+                $this->bookOne($broadcast, $now, $dryRun, $summary);
+            } catch (\Throwable $e) {
+                // Один канал не должен ронять прогон. До этого гарда любая
+                // ошибка на одном канале уносила всю команду: настройка
+                // «воскресенье» роняла broadcast:enqueue-digests целиком, и
+                // рубрика молча переставала бронировать слоты ВЕЗДЕ.
+                $summary['failed']++;
+                Log::error('broadcast.digest.book_failed', [
+                    'broadcast_id' => $broadcast->id,
+                    'digest_weekday' => $broadcast->digest_weekday,
+                    'error' => $e->getMessage(),
+                ]);
             }
-
-            // Одна бронь в полёте: пока стоит будущая подборка, вторая не нужна.
-            // Следующую поставит этот же прогон после того, как первая уйдёт.
-            if ($this->hasOpenDigest($broadcast, $now)) {
-                $summary['already']++;
-
-                continue;
-            }
-
-            $at = $this->nextSlot($broadcast, $now);
-            if ($at === null) {
-                continue;
-            }
-
-            if ($dryRun) {
-                $summary['booked']++;
-
-                continue;
-            }
-
-            $item = new TelegramChatBroadcastItem;
-            $item->broadcast_id = $broadcast->id;
-            $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
-            $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
-            $item->publish_at = $at->utc();
-            $item->save();
-
-            $summary['booked']++;
         }
 
         return $summary;
+    }
+
+    /**
+     * Бронь одного канала.
+     *
+     * @param  array{checked: int, booked: int, already: int, off: int, failed: int}  $summary
+     */
+    private function bookOne(
+        TelegramChatBroadcast $broadcast,
+        Carbon $now,
+        bool $dryRun,
+        array &$summary,
+    ): void {
+        if (! $broadcast->enabled || $broadcast->period === 'off' || $broadcast->digest_weekday === null) {
+            $summary['off']++;
+
+            return;
+        }
+
+        // Одна бронь в полёте: пока стоит будущая подборка, вторая не нужна.
+        // Следующую поставит этот же прогон после того, как первая уйдёт.
+        if ($this->hasOpenDigest($broadcast, $now)) {
+            $summary['already']++;
+
+            return;
+        }
+
+        $at = $this->nextSlot($broadcast, $now);
+        if ($at === null) {
+            return;
+        }
+
+        if ($dryRun) {
+            $summary['booked']++;
+
+            return;
+        }
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $broadcast->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = $at->utc();
+        $item->save();
+
+        $summary['booked']++;
     }
 
     /** Стоит ли уже будущая подборка — в любом открытом статусе. */
@@ -133,7 +161,7 @@ final class BroadcastDigestBooking
         for ($week = 0; $week < 5; $week++) {
             $candidate = $msk->copy()
                 ->startOfDay()
-                ->next($broadcast->digest_weekday)
+                ->next($this->carbonWeekday($broadcast->digest_weekday))
                 ->addWeeks($week)
                 ->setTime($hour, 0);
 
@@ -147,6 +175,22 @@ final class BroadcastDigestBooking
         }
 
         return null;
+    }
+
+    /**
+     * День недели рубрики в нумерации Carbon.
+     *
+     * Настройка хранится по-человечески: 1 — понедельник … 7 — воскресенье.
+     * Carbon считает иначе: 0 — воскресенье … 6 — суббота, и `next(7)` не
+     * «воскресенье», а исключение InvalidFormatException. То есть выбор
+     * «воскресенье» в админке валидацию проходил (min:1, max:7), сохранялся —
+     * и ронял `broadcast:enqueue-digests` целиком, для всех каналов сразу.
+     * Понедельник–суббота совпадают в обеих нумерациях, поэтому дыра была
+     * ровно в одном значении из семи и на глаза не попадалась.
+     */
+    private function carbonWeekday(int $isoWeekday): int
+    {
+        return $isoWeekday % 7;
     }
 
     private function slotTaken(TelegramChatBroadcast $broadcast, Carbon $at): bool

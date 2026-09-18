@@ -28,11 +28,15 @@ class EnqueueDigestsCommand extends Command
         $s = $booking->bookDue(Carbon::now(), $dryRun);
 
         $this->info(sprintf(
-            'digests: checked=%d booked=%d already=%d off=%d%s',
-            $s['checked'], $s['booked'], $s['already'], $s['off'],
+            'digests: checked=%d booked=%d already=%d off=%d failed=%d%s',
+            $s['checked'], $s['booked'], $s['already'], $s['off'], $s['failed'] ?? 0,
             $dryRun ? ' [DRY-RUN]' : '',
         ));
 
-        return self::SUCCESS;
+        // Упавший канал — не «всё хорошо». Прогон продолжается (иначе один
+        // канал уносил бы остальные), но команда обязана сказать об этом
+        // ненулевым кодом: иначе беда видна только в логе, куда никто не
+        // смотрит, пока не спохватится.
+        return ($s['failed'] ?? 0) > 0 ? self::FAILURE : self::SUCCESS;
     }
 }
