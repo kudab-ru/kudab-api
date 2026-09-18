@@ -19,6 +19,7 @@ use App\Exceptions\DigestRecomposeFailed;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Support\BroadcastSafety;
 use App\Support\Telegram\CaptionLength;
+use App\Support\Telegram\VenueName;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -415,7 +416,7 @@ class AdminBroadcastController extends Controller
                     'kind' => 'event',
                     'event_id' => (int) $e->id,
                     'title' => (string) $e->title,
-                    'venue' => $e->venue?->name,
+                    'venue' => VenueName::label($e->venue?->name) ?: null,
                     'chain' => $key,
                     // Сколько ещё событий той же сети в пуле — по этому числу
                     // интерфейс сворачивает сеть в одну строку.
@@ -1481,7 +1482,7 @@ class AdminBroadcastController extends Controller
                 'line' => $i + 1,
                 'id' => (int) $e->id,
                 'title' => (string) $e->title,
-                'venue' => $e->venue_name,
+                'venue' => VenueName::label($e->venue_name) ?: null,
                 'start_time' => $e->start_time ? Carbon::parse($e->start_time)->toIso8601String() : null,
                 'url' => $this->siteUrl().'/events/'.$e->id,
             ], $out['named'], array_keys($out['named'])),
@@ -3452,11 +3453,16 @@ class AdminBroadcastController extends Controller
                 TelegramChatBroadcastItem::KIND_DIGEST => 'Подборка недели',
                 default => null,
             },
-            'venue' => $event?->venue?->name ?? $venue?->name,
+            // Имя чистим тем же правилом, что печатает пост, — [[VenueName]].
+            // Иначе в одной строке админки стоит «Театр Кот | Воронеж», а в
+            // посте под ней «Театр Кот», и человек ищет, где он опечатался.
+            // Ключ сети считается от ЧИСТОГО имени по той же причине: с
+            // хвостом «| Воронеж» филиал не сходился с головной площадкой.
+            'venue' => VenueName::label($event?->venue?->name ?? $venue?->name) ?: null,
             // Сеть площадок. Без неё лента не отличала «Матрёшку» от
             // «Матрёшки на Кольцовской»: предупреждение об однообразии считало
             // по venue_id и трёх филиалов одной сети не видело.
-            'chain' => $this->chainKey((string) ($event?->venue?->name ?? $venue?->name ?? '')) ?: null,
+            'chain' => $this->chainKey(VenueName::label($event?->venue?->name ?? $venue?->name)) ?: null,
             'original_url' => $event ? $this->originalUrl($event) : null,
             'event_start_time' => optional($event?->start_time)?->toIso8601String(),
             'event_end_time' => optional($event?->end_time)?->toIso8601String(),
@@ -3595,7 +3601,7 @@ class AdminBroadcastController extends Controller
             'position' => (int) $r->position,
             'id' => (int) $r->id,
             'title' => (string) $r->title,
-            'venue' => $r->venue_name,
+            'venue' => VenueName::label($r->venue_name) ?: null,
             'start_time' => $r->start_time ? Carbon::parse($r->start_time)->toIso8601String() : null,
             'url' => $this->siteUrl().'/events/'.$r->id,
         ])->values()->all();

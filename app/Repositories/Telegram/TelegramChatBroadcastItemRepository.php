@@ -327,7 +327,13 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
             // его created_at, а он старше, поэтому вытесненный пост обгонял
             // бы того, кто занял его день, — ровно наоборот обещанию «ждёт
             // свободного дня».
-            ->orderByRaw('(publish_at IS NULL) ASC, COALESCE(publish_at, planned_at, created_at) ASC')
+            // Номер записи последним ключом — не украшение. `created_at` имеет
+            // точность до секунды, и два поста, заведённых в одну секунду,
+            // дают полную ничью: что вернёт Postgres, не определено ничем.
+            // На проде это «какой из двух постов одного слота уйдёт первым»,
+            // а в тестах — падение раз через раз, в зависимости от того,
+            // успели ли две вставки в одну секунду.
+            ->orderByRaw('(publish_at IS NULL) ASC, COALESCE(publish_at, planned_at, created_at) ASC, id ASC')
             ->first();
     }
 
