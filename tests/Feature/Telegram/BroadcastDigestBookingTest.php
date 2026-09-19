@@ -270,6 +270,24 @@ class BroadcastDigestBookingTest extends TestCase
         Carbon::setTestNow();
     }
 
+    /**
+     * Выключенная рубрика не роняет возврат снятой подборки.
+     *
+     * `slotFor()` зовут из админки, когда снятый пост возвращают в ленту, и у
+     * подборки выключенного канала дня рубрики нет. Строгий тип у перевода
+     * нумерации превращал это в TypeError, то есть в 500 на кнопке «вернуть».
+     */
+    public function test_slot_for_a_disabled_rubric_is_null_not_a_crash(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 12:00', 'Europe/Moscow'));
+
+        $broadcast = $this->makeChannel(); // digest_weekday не задан
+
+        $this->assertNull($this->booking()->slotFor($broadcast, Carbon::now()));
+
+        Carbon::setTestNow();
+    }
+
     private function makeSecondChannel(): TelegramChatBroadcast
     {
         $owner = TelegramUser::create(['telegram_id' => 8307201889]);

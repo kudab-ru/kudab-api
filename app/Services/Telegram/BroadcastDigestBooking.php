@@ -155,13 +155,23 @@ final class BroadcastDigestBooking
      */
     private function nextSlot(TelegramChatBroadcast $broadcast, Carbon $now): ?Carbon
     {
+        // Рубрика выключена — слота у неё нет. Раньше здесь получалось
+        // `Carbon->next(null)`, то есть «тот же день недели через неделю», и
+        // снятая подборка возвращалась в случайный день выключенной рубрики.
+        // Возврат из админки это переживает штатно: запись без дня встаёт в
+        // «ждут свободного дня».
+        $weekday = $broadcast->digest_weekday;
+        if ($weekday === null) {
+            return null;
+        }
+
         $msk = $now->copy()->setTimezone(BroadcastSlotPlanner::TZ);
         $hour = $broadcast->digest_hour;
 
         for ($week = 0; $week < 5; $week++) {
             $candidate = $msk->copy()
                 ->startOfDay()
-                ->next($this->carbonWeekday($broadcast->digest_weekday))
+                ->next($this->carbonWeekday($weekday))
                 ->addWeeks($week)
                 ->setTime($hour, 0);
 

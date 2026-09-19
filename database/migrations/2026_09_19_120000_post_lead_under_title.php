@@ -43,7 +43,7 @@ return new class extends Migration
             $was = $body;
 
             // Строка тегов — из всех шаблонов: она мертва в каждом.
-            $body = preg_replace('/\n*\{tags\s*\|[^{}]*\}/u', '', $body) ?? $body;
+            $body = preg_replace('/\n*\{\s*tags\s*\|[^{}]*\}/u', '', $body) ?? $body;
 
             // Анонс — только туда, где прозе уже отведено место. У шаблона
             // `short` её нет по замыслу, и подсовывать ему абзац нельзя:
@@ -51,22 +51,41 @@ return new class extends Migration
             // Регексп, а не поиск точной строки: тело шаблона правится из
             // админки, и лишний пробел внутри скобок оставил бы прод без
             // правки — молча и незаметно.
-            $descRe = '/\{description\s*\|\s*slice:0\.\.(\d+)\s*\|\s*escape_html\}/u';
+            $descRe = '/\{\s*description\s*\|\s*slice:0\.\.(\d+)\s*\|\s*escape_html\s*\}/u';
 
-            if (preg_match($descRe, $body, $m)) {
-                $slice = $m[1];
+            // ОБЕ ПРАВКИ ИЛИ НИ ОДНОЙ. Переименование {description} → {about}
+            // и вставка {lead} — половинки одного целого: {about} молчит,
+            // когда у события есть анонс модели, и без {lead} такой пост
+            // остался бы ВООБЩЕ БЕЗ ТЕКСТА. Якорь названия при этом может и не
+            // найтись: тело шаблона правится из админки. Поэтому сначала
+            // пробуем вставить анонс, и переименовываем только если вышло.
+            if (preg_match($descRe, $body, $first)) {
+                $leadAlready = preg_match('/\{\s*lead\s*[|}]/u', $body) === 1;
 
-                $body = preg_replace($descRe, '{about|slice:0..'.$slice.'|escape_html}', $body) ?? $body;
-
-                // Идемпотентность: повторный прогон не удвоит строку.
-                if (! str_contains($body, '{lead')) {
-                    $body = preg_replace(
+                $withLead = $leadAlready
+                    ? $body
+                    : (preg_replace(
                         '/(🎟\s*<b>\{title\}<\/b>)\n/u',
-                        '$1'."\n".'{lead|slice:0..'.$slice.'|escape_html}'."\n",
+                        '$1'."\n".'{lead|slice:0..'.$first[1].'|escape_html}'."\n",
                         $body,
                         1,
-                    ) ?? $body;
+                    ) ?? $body);
+
+                $leadIsThere = $leadAlready || $withLead !== $body;
+
+                if ($leadIsThere) {
+                    // Срез у каждого блока СВОЙ: в правленом руками шаблоне
+                    // {description} может стоять дважды с разной длиной, и
+                    // общая замена одной строкой обрезала бы второй блок по
+                    // мерке первого.
+                    $body = preg_replace_callback(
+                        $descRe,
+                        static fn (array $m): string => '{about|slice:0..'.$m[1].'|escape_html}',
+                        $withLead,
+                    ) ?? $withLead;
                 }
+                // Якоря нет — шаблон оставляем с прежним {description}.
+                // Владелец увидит пост как раньше, а не пустой.
             }
 
             if ($body !== $was) {
@@ -81,9 +100,9 @@ return new class extends Migration
             $body = (string) $row->body;
             $was = $body;
 
-            $body = preg_replace('/\n\{lead\s*\|[^{}]*\}/u', '', $body) ?? $body;
+            $body = preg_replace('/\n\{\s*lead\s*\|[^{}]*\}/u', '', $body) ?? $body;
             $body = preg_replace(
-                '/\{about(\s*\|\s*slice:0\.\.\d+\s*\|\s*escape_html)\}/u',
+                '/\{\s*about(\s*\|\s*slice:0\.\.\d+\s*\|\s*escape_html\s*)\}/u',
                 '{description$1}',
                 $body,
             ) ?? $body;
