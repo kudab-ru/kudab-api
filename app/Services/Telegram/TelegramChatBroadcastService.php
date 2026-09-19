@@ -647,9 +647,29 @@ class TelegramChatBroadcastService
                 // день». Портрету день назначаем заново: без момента он попал
                 // бы под то же окно, что события, и его недельный каденс
                 // растворился бы в событийном расписании.
-                $item->publish_at = $item->kind === TelegramChatBroadcastItem::KIND_VENUE
-                    ? $this->slotPlanner->nextFreeSlot($broadcast, $now)?->utc()
-                    : null;
+                //
+                // Свободного слота может не оказаться: с настройкой
+                // `fill_lead_days` поздние слоты дальних дней закрыты, и это
+                // намеренно — их держат для событий, объявленных поздно.
+                // Тогда портрет встаёт БЕЗ дня и ждёт наполнителя: тот
+                // разбирает очередь ожидания первой (fillFeedDays, $waiting),
+                // то есть день придёт в ближайший часовой тик. Молчать об
+                // этом всё равно нельзя — иначе «портрет пропал» выглядит
+                // как поломка.
+                $slot = null;
+                if ($item->kind === TelegramChatBroadcastItem::KIND_VENUE) {
+                    $slot = $this->slotPlanner->nextFreeSlot($broadcast, $now);
+
+                    if ($slot === null) {
+                        Log::info('broadcast.venue.no_free_slot_on_reschedule', [
+                            'broadcast_id' => $broadcast->id,
+                            'item_id' => $item->id,
+                            'why' => 'свободных слотов в горизонте нет — портрет ждёт наполнителя',
+                        ]);
+                    }
+                }
+
+                $item->publish_at = $slot?->utc();
                 $item->save();
 
                 continue;
