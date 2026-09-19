@@ -1127,6 +1127,64 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
+    /**
+     * Просроченный портрет без свободного слота ПРИДЕРЖИВАЕТСЯ, а не уезжает
+     * в произвольный час.
+     *
+     * Запись без назначенного момента доставка пропускает по общему суточному
+     * окну канала. То есть портрет, потерявший день, уехал бы первым же
+     * подходящим тиком и съел окно у дневного событийного поста — ровно то
+     * поведение, ради отмены которого портрету и дали слот. С настройкой
+     * `fill_lead_days` это не редкий случай: утро горизонта занято лентой, а
+     * поздние слоты дальних дней закрыты намеренно.
+     */
+    public function test_overdue_portrait_without_a_slot_is_held_not_sent(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 09:00:00', 'UTC')); // 12:00 МСК
+
+        [$broadcast, $events] = $this->channelWithEvents(6);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10, 19],
+            'horizon_days' => 3,
+            'fill_lead_days' => 1,
+            'min_gap_minutes' => 0,
+        ]);
+        $broadcast->save();
+        $broadcast = $broadcast->fresh();
+
+        // Занимаем всё, что планировщик считает доступным: утро трёх дней
+        // горизонта и сегодняшний вечер.
+        foreach (['2026-09-15 19:00', '2026-09-16 10:00', '2026-09-17 10:00'] as $i => $at) {
+            $busy = $this->makeItem($broadcast->id, $events[$i]->id, TelegramChatBroadcastItem::STATUS_PENDING);
+            $busy->publish_at = Carbon::parse($at, 'Europe/Moscow')->utc();
+            $busy->save();
+        }
+
+        // Портрет, просроченный на четыре часа (порог — два).
+        $portrait = new TelegramChatBroadcastItem;
+        $portrait->broadcast_id = $broadcast->id;
+        $portrait->kind = TelegramChatBroadcastItem::KIND_VENUE;
+        $portrait->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $portrait->caption = '🏛 <b>Площадка</b>';
+        $portrait->publish_at = Carbon::parse('2026-09-15 08:00', 'Europe/Moscow')->utc();
+        $portrait->save();
+
+        $tasks = $this->service()->collectDueSingleRuns(now(), 20);
+
+        $fresh = $portrait->fresh();
+        $this->assertNull($fresh->publish_at, 'день снят: он просрочен');
+        $this->assertNotNull($fresh->planned_at, 'портрет придержан, а не отпущен в общее окно');
+        $this->assertTrue($fresh->planned_at->isFuture());
+
+        $this->assertNotContains(
+            $portrait->id,
+            array_column($tasks, 'item_id'),
+            'придержанный портрет в эфир не выдан',
+        );
+
+        Carbon::setTestNow();
+    }
+
     private function makeItem(int $broadcastId, int $eventId, string $status): TelegramChatBroadcastItem
     {
         $item = new TelegramChatBroadcastItem;
