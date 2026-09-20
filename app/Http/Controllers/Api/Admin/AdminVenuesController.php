@@ -6,10 +6,12 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Services\Text\TextLock;
+use App\Support\VenueKindLabel;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\Rule;
 
 /**
  * Админ-каталог площадок (venues, суперадмин). Каталог само-наполняется
@@ -78,6 +80,14 @@ class AdminVenuesController extends Controller
             // тексты площадки, которые пишет LLM: ручная правка перекрывает генерацию
             'description' => ['sometimes', 'nullable', 'string', 'max:2000'],
             'tg_portrait' => ['sometimes', 'nullable', 'string', 'max:2000'],
+            // Категория каталога. Поля тут не было вовсе, поэтому исправить тип
+            // площадки было нельзя ничем: инференс по имени стоит вне расписания
+            // и без --overwrite трогает только пустые, а форма его не отдавала.
+            // Замер прода 20.09.2026: у 70 площадок из 125 тип пуст, а у всех трёх
+            // кинотеатров неверен — «Синема Парк Галерея Чижова» числился музеем
+            // (правило «галере» стоит раньше), «Спартак» и «Юность» сценами
+            // (правило «театр» ловит подстроку в слове «кинотеатр»).
+            'kind' => ['sometimes', 'nullable', Rule::in(VenueKindLabel::CANONICAL)],
             // Точка на карте. Резолверы ошибаются целыми классами — «Парковая, 3»
             // находится в черте города вместо посёлка, OSM отдаёт тёзку, у дома
             // может не быть своих координат. Человеку нужен способ поставить
@@ -98,6 +108,20 @@ class AdminVenuesController extends Controller
         unset($data['lat'], $data['lon']);
 
         $update = $data + ['updated_at' => now()];
+
+        // Метка «тип поставлен руками» — по образцу manual_point выше. Сегодня
+        // venues:infer-kind без --overwrite трогает только пустые и ручной тип не
+        // затрёт, но команда переживёт эту правку: пусть признак лежит заранее.
+        if (array_key_exists('kind', $data)) {
+            $update['source_meta'] = DB::raw(sprintf(
+                "COALESCE(source_meta, '{}'::jsonb) || '%s'::jsonb",
+                json_encode([
+                    'manual_kind' => true,
+                    'manual_kind_at' => now()->toIso8601String(),
+                    'manual_kind_by' => $request->user()?->id,
+                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            ));
+        }
 
         if ($lat !== null && $lon !== null) {
             $update['location'] = DB::raw(sprintf('ST_SetSRID(ST_Point(%F,%F),4326)', $lon, $lat));
@@ -129,7 +153,7 @@ class AdminVenuesController extends Controller
         ]);
 
         return response()->json(['data' => DB::table('venues')->where('id', $id)
-            ->first(['id', 'name', 'address', 'description', 'tg_portrait', 'latitude', 'longitude'])]);
+            ->first(['id', 'name', 'kind', 'address', 'description', 'tg_portrait', 'latitude', 'longitude'])]);
     }
 
     /**
