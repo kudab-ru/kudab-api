@@ -92,6 +92,9 @@ final class VenueDuplicateFinder
             }
             for ($i = 0; $i < count($group); $i++) {
                 for ($j = $i + 1; $j < count($group); $j++) {
+                    if (self::dismissed($group[$i], $group[$j])) {
+                        continue;
+                    }
                     $out[] = self::pair($group[$i], $group[$j], 'same_name');
                 }
             }
@@ -111,6 +114,9 @@ final class VenueDuplicateFinder
             }
             foreach (array_slice($list, $i + 1) as $b) {
                 if ($a->city_id !== $b->city_id || isset($seen[self::key((int) $a->id, (int) $b->id)])) {
+                    continue;
+                }
+                if (self::dismissed($a, $b)) {
                     continue;
                 }
                 $bTokens = self::significantTokens((string) $b->name);
@@ -143,6 +149,28 @@ final class VenueDuplicateFinder
         });
 
         return $out;
+    }
+
+    /**
+     * Пара снята человеком или объяснена вложенностью — не кандидат.
+     *
+     * Вложенность отсекаем здесь же, а не отдельной кнопкой: «Зелёный театр»
+     * внутри «Парка Динамо» — это именно та пара, которая выглядит дублем и
+     * им не является. Проставив родителя, человек уже ответил на вопрос.
+     */
+    private static function dismissed(object $a, object $b): bool
+    {
+        if (($a->parent_id ?? null) !== null && (int) $a->parent_id === (int) $b->id) {
+            return true;
+        }
+        if (($b->parent_id ?? null) !== null && (int) $b->parent_id === (int) $a->id) {
+            return true;
+        }
+
+        $aList = array_map('intval', self::meta($a)['not_duplicate_of'] ?? []);
+        $bList = array_map('intval', self::meta($b)['not_duplicate_of'] ?? []);
+
+        return in_array((int) $b->id, $aList, true) || in_array((int) $a->id, $bList, true);
     }
 
     private static function key(int $a, int $b): string

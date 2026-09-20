@@ -37,6 +37,7 @@ class AdminVenuesController extends Controller
             ->get([
                 'v.id', 'v.name', 'v.slug', 'v.kind', 'v.address', 'v.latitude', 'v.longitude',
                 'v.house_fias_id', 'v.source_meta', 'v.created_at', 'c.name as city_name', 'v.city_id',
+                'v.parent_id', 'v.description', 'v.avatar_url',
             ]);
 
         $ids = $venues->pluck('id');
@@ -50,7 +51,16 @@ class AdminVenuesController extends Controller
             ->groupBy('venue_id')->selectRaw('venue_id, count(*) c')
             ->get()->keyBy('venue_id');
 
-        return response()->json(['data' => $venues->map(function ($v) use ($eventCounts, $communityCounts) {
+        // Имя родителя и число вложенных: оба берутся по ВСЕМУ каталогу, а не по
+        // текущей странице — иначе при поиске родитель «пропадал» бы из карточки
+        // только потому, что сам не совпал с запросом.
+        $parentNames = DB::table('venues')->whereNull('deleted_at')
+            ->pluck('name', 'id')->all();
+        $childCounts = DB::table('venues')->whereNull('deleted_at')->whereNotNull('parent_id')
+            ->groupBy('parent_id')->selectRaw('parent_id, count(*) c')
+            ->pluck('c', 'parent_id')->all();
+
+        return response()->json(['data' => $venues->map(function ($v) use ($eventCounts, $communityCounts, $parentNames, $childCounts) {
             $meta = is_string($v->source_meta) ? json_decode($v->source_meta, true) : (array) $v->source_meta;
 
             return [
@@ -61,6 +71,13 @@ class AdminVenuesController extends Controller
                 // площадок он пуст» из админки было нельзя — а пуст он у 70 из 125.
                 'kind' => $v->kind,
                 'kind_manual' => (bool) ($meta['manual_kind'] ?? false),
+                // Родитель — физическое вложение (сцена в парке). События не
+                // поднимаются, это только факт «внутри».
+                'parent_id' => $v->parent_id !== null ? (int) $v->parent_id : null,
+                'parent_name' => $v->parent_id !== null ? ($parentNames[(int) $v->parent_id] ?? null) : null,
+                'children_count' => (int) ($childCounts[$v->id] ?? 0),
+                'has_description' => $v->description !== null && trim((string) $v->description) !== '',
+                'avatar_url' => $v->avatar_url,
                 'address' => $v->address,
                 'lat' => $v->latitude !== null ? (float) $v->latitude : null,
                 'lon' => $v->longitude !== null ? (float) $v->longitude : null,
@@ -85,6 +102,48 @@ class AdminVenuesController extends Controller
      * `parser:venues:duplicates`; здесь они нужны экраном, чтобы не искать пары
      * глазами по всему каталогу (на проде 20.09.2026 это 125 карточек).
      */
+    /**
+     * «Это разные площадки» — снять пару из кандидатов навсегда.
+     *
+     * Пишем в source_meta ОБЕИМ сторонам: находилка не знает, с какой стороны
+     * её позовут, а пара симметрична. Колонки под это не завожу — признак
+     * редкий, живёт в jsonb рядом с остальными пометками и снимается так же.
+     */
+    public function notDuplicate(Request $request, int $id): JsonResponse
+    {
+        $otherId = (int) $request->validate([
+            'other_id' => ['required', 'integer'],
+        ])['other_id'];
+        abort_if($otherId === $id, 422, 'Нужны две разные площадки');
+
+        $pair = DB::table('venues')->whereIn('id', [$id, $otherId])->whereNull('deleted_at')
+            ->get(['id', 'name', 'source_meta'])->keyBy('id');
+        abort_if($pair->count() !== 2, 404, 'Одна из площадок не найдена');
+
+        foreach ([[$id, $otherId], [$otherId, $id]] as [$self, $other]) {
+            $meta = json_decode((string) ($pair[$self]->source_meta ?? ''), true);
+            $meta = is_array($meta) ? $meta : [];
+            $list = array_values(array_unique(array_map('intval', $meta['not_duplicate_of'] ?? [])));
+            if (! in_array($other, $list, true)) {
+                $list[] = $other;
+            }
+            $meta['not_duplicate_of'] = $list;
+            DB::table('venues')->where('id', $self)
+                ->update(['source_meta' => json_encode($meta, JSON_UNESCAPED_UNICODE), 'updated_at' => now()]);
+        }
+
+        Log::info('admin:venues:not-duplicate', [
+            'actor_id' => $request->user()?->id,
+            'venue_id' => $id,
+            'other_id' => $otherId,
+        ]);
+
+        return response()->json(['data' => [
+            'a' => $pair[$id]->name,
+            'b' => $pair[$otherId]->name,
+        ]]);
+    }
+
     public function duplicates(): JsonResponse
     {
         $venues = DB::table('venues as v')
@@ -93,7 +152,7 @@ class AdminVenuesController extends Controller
                 'ec.venue_id', '=', 'v.id')
             ->get([
                 'v.id', 'v.city_id', 'v.name', 'v.kind', 'v.address', 'v.latitude', 'v.longitude',
-                'v.house_fias_id', 'v.source_meta', DB::raw('coalesce(ec.c, 0) as events_count'),
+                'v.house_fias_id', 'v.source_meta', 'v.parent_id', DB::raw('coalesce(ec.c, 0) as events_count'),
             ]);
 
         $pairs = VenueDuplicateFinder::pairs($venues);
@@ -121,6 +180,9 @@ class AdminVenuesController extends Controller
             // (правило «галере» стоит раньше), «Спартак» и «Юность» сценами
             // (правило «театр» ловит подстроку в слове «кинотеатр»).
             'kind' => ['sometimes', 'nullable', Rule::in(VenueKindLabel::CANONICAL)],
+            // Физическое вложение: сцена в парке, зал во дворце. Проверки ниже —
+            // сам себе не родитель, тот же город, без циклов.
+            'parent_id' => ['sometimes', 'nullable', 'integer'],
             // Точка на карте. Резолверы ошибаются целыми классами — «Парковая, 3»
             // находится в черте города вместо посёлка, OSM отдаёт тёзку, у дома
             // может не быть своих координат. Человеку нужен способ поставить
@@ -135,6 +197,30 @@ class AdminVenuesController extends Controller
 
         $venue = DB::table('venues')->where('id', $id)->whereNull('deleted_at')->first();
         abort_if($venue === null, 404);
+
+        if (array_key_exists('parent_id', $data) && $data['parent_id'] !== null) {
+            $parentId = (int) $data['parent_id'];
+            abort_if($parentId === $id, 422, 'Площадка не может быть внутри самой себя');
+
+            $parent = DB::table('venues')->where('id', $parentId)->whereNull('deleted_at')
+                ->first(['id', 'city_id', 'parent_id', 'name']);
+            abort_if($parent === null, 422, 'Родительская площадка не найдена');
+            abort_if((int) $parent->city_id !== (int) $venue->city_id, 422,
+                'Родитель должен быть в том же городе');
+
+            // Цикл: поднимаемся по цепочке от предполагаемого родителя вверх.
+            // Глубина каталога мала, но без гарда пара «A внутри B, B внутри A»
+            // подвесила бы любой обход дерева.
+            $cursor = $parent;
+            $guard = 0;
+            while ($cursor?->parent_id !== null && $guard++ < 32) {
+                abort_if((int) $cursor->parent_id === $id, 422,
+                    'Так получится кольцо: «'.$parent->name.'» уже находится внутри этой площадки');
+                $cursor = DB::table('venues')->where('id', $cursor->parent_id)->first(['id', 'parent_id', 'name']);
+            }
+
+            $data['parent_id'] = $parentId;
+        }
 
         $lat = isset($data['lat']) ? (float) $data['lat'] : null;
         $lon = isset($data['lon']) ? (float) $data['lon'] : null;

@@ -160,6 +160,7 @@ Route::prefix('admin/venues')
         Route::get('duplicates', [\App\Http\Controllers\Api\Admin\AdminVenuesController::class, 'duplicates']);
         Route::patch('{id}', [\App\Http\Controllers\Api\Admin\AdminVenuesController::class, 'update'])->whereNumber('id');
         Route::post('{id}/merge', [\App\Http\Controllers\Api\Admin\AdminVenuesController::class, 'merge'])->whereNumber('id');
+        Route::post('{id}/not-duplicate', [\App\Http\Controllers\Api\Admin\AdminVenuesController::class, 'notDuplicate'])->whereNumber('id');
     });
 
 Route::prefix('admin/sources/yandex-afisha')

@@ -132,7 +132,14 @@ class VenueDuplicateFinderTest extends TestCase
         string $address,
         int $events,
         bool $legal = false,
+        ?int $parentId = null,
+        array $notDuplicateOf = [],
     ): object {
+        $meta = $legal ? ['legal_address' => true] : ['origin' => 'osm'];
+        if ($notDuplicateOf !== []) {
+            $meta['not_duplicate_of'] = $notDuplicateOf;
+        }
+
         return (object) [
             'id' => $id,
             'city_id' => 1,
@@ -142,8 +149,41 @@ class VenueDuplicateFinderTest extends TestCase
             'latitude' => $lat,
             'longitude' => $lon,
             'house_fias_id' => null,
-            'source_meta' => json_encode($legal ? ['legal_address' => true] : ['origin' => 'osm']),
+            'parent_id' => $parentId,
+            'source_meta' => json_encode($meta, JSON_UNESCAPED_UNICODE),
             'events_count' => $events,
         ];
+    }
+
+    /** Пара, снятая человеком, больше не кандидат — и неважно, с какой стороны помечена. */
+    public function test_dismissed_pair_disappears(): void
+    {
+        $before = collect([
+            $this->v(1, 'Дом культуры «Заря»', 51.60, 39.20, 'ул. А', 5),
+            $this->v(2, 'Дом культуры «Заря»', 51.6001, 39.2001, 'ул. Б', 3),
+        ]);
+        $this->assertCount(1, VenueDuplicateFinder::pairs($before));
+
+        $after = collect([
+            $this->v(1, 'Дом культуры «Заря»', 51.60, 39.20, 'ул. А', 5, notDuplicateOf: [2]),
+            $this->v(2, 'Дом культуры «Заря»', 51.6001, 39.2001, 'ул. Б', 3),
+        ]);
+        $this->assertSame([], VenueDuplicateFinder::pairs($after));
+    }
+
+    /** Сцена внутри парка — не дубль парка: проставленный родитель снимает пару сам. */
+    public function test_child_venue_is_not_a_duplicate_of_its_parent(): void
+    {
+        $flat = collect([
+            $this->v(10, 'Зелёный театр', 51.6700, 39.1800, 'Парк Динамо', 12),
+            $this->v(11, 'Зелёный театр Динамо', 51.6701, 39.1801, 'Парк Динамо', 4),
+        ]);
+        $this->assertCount(1, VenueDuplicateFinder::pairs($flat), 'до иерархии это выглядит дублем');
+
+        $nested = collect([
+            $this->v(10, 'Зелёный театр', 51.6700, 39.1800, 'Парк Динамо', 12),
+            $this->v(11, 'Зелёный театр Динамо', 51.6701, 39.1801, 'Парк Динамо', 4, parentId: 10),
+        ]);
+        $this->assertSame([], VenueDuplicateFinder::pairs($nested));
     }
 }
