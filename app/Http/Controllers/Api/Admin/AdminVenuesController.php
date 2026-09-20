@@ -34,7 +34,7 @@ class AdminVenuesController extends Controller
             ->orderBy('v.name')
             ->limit(200)
             ->get([
-                'v.id', 'v.name', 'v.slug', 'v.address', 'v.latitude', 'v.longitude',
+                'v.id', 'v.name', 'v.slug', 'v.kind', 'v.address', 'v.latitude', 'v.longitude',
                 'v.house_fias_id', 'v.source_meta', 'v.created_at', 'c.name as city_name', 'v.city_id',
             ]);
 
@@ -56,6 +56,10 @@ class AdminVenuesController extends Controller
                 'id' => (int) $v->id,
                 'name' => $v->name,
                 'slug' => $v->slug,
+                // Тип каталога: список его не отдавал, поэтому увидеть «у скольких
+                // площадок он пуст» из админки было нельзя — а пуст он у 70 из 125.
+                'kind' => $v->kind,
+                'kind_manual' => (bool) ($meta['manual_kind'] ?? false),
                 'address' => $v->address,
                 'lat' => $v->latitude !== null ? (float) $v->latitude : null,
                 'lon' => $v->longitude !== null ? (float) $v->longitude : null,
@@ -68,7 +72,11 @@ class AdminVenuesController extends Controller
                 'communities' => (int) ($communityCounts[$v->id]->c ?? 0),
                 'created_at' => $v->created_at,
             ];
-        })->values()]);
+        })->values(), 'meta' => [
+            // Белый список видов едет вместе со списком — чтобы админка не держала
+            // свою копию и не разъезжалась с сервером при добавлении вида.
+            'kinds' => VenueKindLabel::CANONICAL,
+        ]]);
     }
 
     public function update(Request $request, int $id): JsonResponse
