@@ -22,11 +22,12 @@ class BroadcastEnqueueDueCommand extends Command
         $s = $service->enqueueDueForAllChannels(now(), $dryRun);
 
         $this->info(sprintf(
-            'broadcast:enqueue-due%s — checked=%d due=%d enqueued=%d (no_city=%d queue_busy=%d no_candidate=%d no_reviewer=%d not_allowed=%d)',
+            'broadcast:enqueue-due%s — checked=%d due=%d enqueued=%d (on_slots=%d no_city=%d queue_busy=%d no_candidate=%d no_reviewer=%d not_allowed=%d)',
             $dryRun ? ' [dry-run]' : '',
             $s['checked'],
             $s['due'],
             $s['enqueued'],
+            $s['skipped_slots'],
             $s['skipped_no_city'],
             $s['skipped_queue_busy'],
             $s['no_candidate'],

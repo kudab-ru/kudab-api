@@ -752,6 +752,17 @@ class TelegramChatBroadcastService
                     }
                 }
 
+                // Портрет площадки — по той же причине: он собран на
+                // постановке и пролежал в очереди до недели, а «ближайшее тут»
+                // к этому моменту зовёт на прошедшее. Здесь же в подпись
+                // попадает переписанный портрет: его пишут по заявке из
+                // админки, и без пересборки новый текст до канала не доедет.
+                if ($item->kind === TelegramChatBroadcastItem::KIND_VENUE) {
+                    $this->ensureVenueCaption($item, $now);
+                }
+
+                // Готовый текст + НЕСКОЛЬКО обложек-прокси (альбом).
+                // Портрет площадки: картинки берутся у площадки.
                 // Ручной выбор сильнее автоподбора — как у событий. Без этой
                 // ветки состав альбома, собранный в админке, до канала не
                 // доезжал: выдача каждый раз пересобирала набор по площадке.
@@ -926,7 +937,9 @@ class TelegramChatBroadcastService
      * Идёт из Laravel scheduler (broadcast:enqueue-due, withoutOverlapping). last_run_at
      * НЕ трогаем здесь — его двигает фактический пост.
      *
-     * @return array{checked:int,due:int,enqueued:int,skipped_no_city:int,skipped_queue_busy:int,no_candidate:int,skipped_no_reviewer:int}
+     * Каналы со слотами сюда не заходят: их ведёт fillFeedDays (broadcast:fill-feed).
+     *
+     * @return array{checked:int,due:int,enqueued:int,skipped_slots:int,skipped_no_city:int,skipped_queue_busy:int,no_candidate:int,skipped_no_reviewer:int}
      */
     public function enqueueDueForAllChannels(Carbon $now, bool $dryRun = false): array
     {
@@ -934,6 +947,7 @@ class TelegramChatBroadcastService
             'checked' => 0,
             'due' => 0,
             'enqueued' => 0,
+            'skipped_slots' => 0,
             'skipped_no_city' => 0,
             'skipped_queue_busy' => 0,
             'no_candidate' => 0,
@@ -945,6 +959,18 @@ class TelegramChatBroadcastService
 
         foreach ($broadcasts as $broadcast) {
             $summary['checked']++;
+
+            // Канал со слотами ведёт наполнитель ленты, а не этот автомат.
+            // Здешняя запись дня не получает вовсе и уходит ближайшим тиком —
+            // рядом со слотами это лишний пост посреди дня, да ещё через ревью
+            // в ЛС. Раньше их разводил кап feed_limit, но он считает только
+            // события, а ячейки занимают ещё подборка и портрет площадки: на
+            // полной ленте кап недостижим, и автомат ожил сам собой.
+            if ($broadcast->slots !== []) {
+                $summary['skipped_slots']++;
+
+                continue;
+            }
 
             if (! $this->isSingleRunDue($broadcast, $now)) {
                 continue;
@@ -1997,6 +2023,36 @@ class TelegramChatBroadcastService
      * @param  Event|null  $event  уже загруженное событие — чтобы не ходить в базу второй раз
      * @param  \Carbon\CarbonImmutable|null  $sendingAt  момент отправки: задан только на пути доставки
      */
+    /**
+     * Подпись портрета площадки — заново, из свежего текста площадки.
+     *
+     * Пустую подпись не сохраняем и старую в этом случае не стираем: бот на
+     * пустом тексте бросает задачу, не помечая её ничем, и «один портрет в
+     * полёте» после этого закрывает постановку следующего навсегда. Поэтому
+     * площадка без текста оставляет пост с прежней подписью.
+     *
+     * Сборка бесплатная — подстановка в шаблон, модель здесь не участвует.
+     */
+    private function ensureVenueCaption(TelegramChatBroadcastItem $item, Carbon $now): void
+    {
+        if ($item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            return;
+        }
+
+        $venue = $item->venue_id ? Venue::query()->find($item->venue_id) : null;
+        if (! $venue || trim((string) $venue->tg_portrait) === '') {
+            return;
+        }
+
+        $item->caption = $this->venuePortraitService->buildVenueCaption(
+            $venue,
+            $item->publish_at ? Carbon::parse($item->publish_at) : $now,
+            (int) $item->id,
+        );
+        $item->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
+        $item->save();
+    }
+
     private function ensureEventCaption(
         TelegramChatBroadcastItem $item,
         TelegramChatBroadcast $broadcast,

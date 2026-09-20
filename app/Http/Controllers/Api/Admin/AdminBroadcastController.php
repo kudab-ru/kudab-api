@@ -217,7 +217,9 @@ class AdminBroadcastController extends Controller
         // только из события, а у портрета события нет.
         $venues = \App\Models\Venue::query()
             ->whereIn('id', $items->pluck('venue_id')->filter()->all())
-            ->get(['id', 'name'])
+            // tg_portrait — тот самый текст, который пишет модель по заявке:
+            // без него плашка «текст пишет ИИ» у портрета врала бы всегда.
+            ->get(['id', 'name', 'tg_portrait'])
             ->keyBy('id');
 
         // Картинки — одним запросом на всю ленту. Без этого itemPayload звал
@@ -253,13 +255,24 @@ class AdminBroadcastController extends Controller
         // текст действительно изменился. Свой текст не трогаем: его писал
         // человек.
         foreach ($items as $i) {
-            if ($i->kind !== TelegramChatBroadcastItem::KIND_EVENT || ! $i->event_id) {
-                continue;
-            }
             if ($i->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
                 continue;
             }
             if (! in_array($i->status, $this->openStatuses(), true)) {
+                continue;
+            }
+
+            // Портрет собирается на постановке и лежит в очереди неделю: к
+            // этому моменту «ближайшее тут» зовёт на прошедшее, а переписанный
+            // по заявке tg_portrait в подпись не попадает вовсе. Ровно та же
+            // причина, что у событий абзацем выше.
+            if ($i->kind === TelegramChatBroadcastItem::KIND_VENUE) {
+                $this->buildCaptionFor($i, $broadcast);
+
+                continue;
+            }
+
+            if ($i->kind !== TelegramChatBroadcastItem::KIND_EVENT || ! $i->event_id) {
                 continue;
             }
             $event = $events->get($i->event_id);
@@ -2547,10 +2560,14 @@ class AdminBroadcastController extends Controller
             return $this->describeDigest($item, trim((string) ($data['hint'] ?? '')));
         }
 
+        if ($item->kind === TelegramChatBroadcastItem::KIND_VENUE) {
+            return $this->describeVenue($item, trim((string) ($data['hint'] ?? '')));
+        }
+
         if ($item->kind !== TelegramChatBroadcastItem::KIND_EVENT || ! $item->event_id) {
             return response()->json([
                 'ok' => false,
-                'error' => 'Текст пишется событиям и подборкам. У портрета площадки свой текст — правьте его вручную.',
+                'error' => 'Текст пишется событиям, подборкам и портретам площадок.',
             ], 422);
         }
 
@@ -2568,6 +2585,35 @@ class AdminBroadcastController extends Controller
         return response()->json([
             'ok' => true,
             'data' => $this->itemPayload($item->fresh(), $event, null),
+        ]);
+    }
+
+    /**
+     * Заказать портрет площадки заново — той же заявкой, что у событий.
+     *
+     * Текст портрета живёт не на записи, а на площадке (`venues.tg_portrait`),
+     * и второго текста у места нет: переписанный портрет меняет заодно карточку
+     * площадки на сайте. Говорим об этом в интерфейсе, а не здесь — отказывать
+     * незачем, портрет для того и переписывают, что он устарел.
+     *
+     * Подпись поста не трогаем. Её пересоберут чтение ленты и отправка, когда
+     * текст будет готов, а до тех пор стоит прежняя: пустая подпись у портрета
+     * — авария, бот бросает такую задачу, не помечая её ничем.
+     */
+    private function describeVenue(TelegramChatBroadcastItem $item, string $hint): JsonResponse
+    {
+        $venue = $item->venue_id ? \App\Models\Venue::query()->find($item->venue_id) : null;
+        if (! $venue) {
+            return response()->json(['ok' => false, 'error' => 'Площадка не найдена.'], 404);
+        }
+
+        $item->text_requested_at = Carbon::now();
+        $item->text_hint = $hint !== '' ? $hint : null;
+        $item->save();
+
+        return response()->json([
+            'ok' => true,
+            'data' => $this->itemPayload($item->fresh(), null, $venue),
         ]);
     }
 
@@ -3513,6 +3559,9 @@ class AdminBroadcastController extends Controller
             // «напишет ИИ», даже когда текст уже написан и стоит в посте.
             'has_ai_text' => match (true) {
                 $i->kind === TelegramChatBroadcastItem::KIND_DIGEST => $i->hasDigestText(),
+                $i->kind === TelegramChatBroadcastItem::KIND_VENUE => $venue !== null
+                    ? trim((string) $venue->tg_portrait) !== ''
+                    : null,
                 $event !== null => trim((string) $event->tg_description) !== '',
                 default => null,
             },
