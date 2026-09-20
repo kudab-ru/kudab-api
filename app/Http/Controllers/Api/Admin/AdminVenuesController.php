@@ -94,6 +94,12 @@ class AdminVenuesController extends Controller
             // Белый список видов едет вместе со списком — чтобы админка не держала
             // свою копию и не разъезжалась с сервером при добавлении вида.
             'kinds' => VenueKindLabel::CANONICAL,
+            // Кандидаты в родители: ВЕСЬ каталог, а не текущая страница. Список
+            // режется поиском, и без этого при активном поиске выбрать родителя
+            // было бы не из чего. 125 строк по три поля — дешевле второго запроса.
+            'parent_options' => DB::table('venues')->whereNull('deleted_at')
+                ->orderBy('name')->get(['id', 'name', 'city_id'])
+                ->map(fn ($p) => ['id' => (int) $p->id, 'name' => $p->name, 'city_id' => (int) $p->city_id]),
         ]]);
     }
 
