@@ -6,6 +6,7 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Services\Text\TextLock;
+use App\Support\FuzzySearch;
 use App\Support\VenueDuplicateFinder;
 use App\Support\VenueKindLabel;
 use Illuminate\Http\JsonResponse;
@@ -28,10 +29,33 @@ class AdminVenuesController extends Controller
         $venues = DB::table('venues as v')
             ->leftJoin('cities as c', 'c.id', '=', 'v.city_id')
             ->whereNull('v.deleted_at')
-            ->when($q !== '', fn ($query) => $query->where(function ($w) use ($q) {
-                $term = '%'.str_replace(['%', '_'], '', $q).'%';
-                $w->where('v.name', 'ILIKE', $term)->orWhere('v.address', 'ILIKE', $term);
-            }))
+            // Поиск нестрогий — тот же рецепт, что у поиска событий на сайте:
+            // подстрока плюс триграммы. Строгий ILIKE не прощал ни опечатки, ни
+            // другого падежа: «дивнагорье» и «никитинског» не находили ничего.
+            ->when($q !== '', function ($query) use ($q) {
+                $like = FuzzySearch::like($q);
+                $token = FuzzySearch::token($q);
+                $fuzzy = FuzzySearch::applicable($token);
+
+                $query->where(function ($w) use ($like, $token, $fuzzy) {
+                    $w->whereRaw('public.ru_normalize(v.name) LIKE ?', [$like])
+                        ->orWhereRaw('public.ru_normalize(coalesce(v.address, \'\')) LIKE ?', [$like]);
+
+                    if ($fuzzy) {
+                        $thr = FuzzySearch::threshold($token);
+                        $w->orWhereRaw('word_similarity(?, public.ru_normalize(v.name)) >= ?', [$token, $thr]);
+                    }
+                });
+
+                // Точные совпадения выше похожих, иначе опечатка-сосед лезет
+                // вперёд буквального попадания.
+                if ($fuzzy) {
+                    $query->orderByRaw(
+                        'CASE WHEN public.ru_normalize(v.name) LIKE ? THEN 0 ELSE 1 END',
+                        [$like]
+                    )->orderByRaw('word_similarity(?, public.ru_normalize(v.name)) DESC', [$token]);
+                }
+            })
             ->orderBy('v.name')
             ->limit(200)
             ->get([
@@ -97,9 +121,17 @@ class AdminVenuesController extends Controller
             // Кандидаты в родители: ВЕСЬ каталог, а не текущая страница. Список
             // режется поиском, и без этого при активном поиске выбрать родителя
             // было бы не из чего. 125 строк по три поля — дешевле второго запроса.
+            // parent_id тут нужен клиенту, чтобы вычеркнуть потомков из выбора:
+            // считать их по видимому списку нельзя — он режется поиском, и при
+            // активном поиске потомок не нашёлся бы, а кольцо предложилось бы.
             'parent_options' => DB::table('venues')->whereNull('deleted_at')
-                ->orderBy('name')->get(['id', 'name', 'city_id'])
-                ->map(fn ($p) => ['id' => (int) $p->id, 'name' => $p->name, 'city_id' => (int) $p->city_id]),
+                ->orderBy('name')->get(['id', 'name', 'city_id', 'parent_id'])
+                ->map(fn ($p) => [
+                    'id' => (int) $p->id,
+                    'name' => $p->name,
+                    'city_id' => (int) $p->city_id,
+                    'parent_id' => $p->parent_id !== null ? (int) $p->parent_id : null,
+                ]),
         ]]);
     }
 
