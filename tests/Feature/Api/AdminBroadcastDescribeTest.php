@@ -78,17 +78,51 @@ class AdminBroadcastDescribeTest extends TestCase
         $this->assertNull($item->fresh()->text_hint);
     }
 
-    /** У портрета площадки текста от модели нет — его правят руками. */
-    public function test_venue_portrait_cannot_be_described(): void
+    /**
+     * Портрет площадки текст ЗАКАЗЫВАЕТ — правило поменялось 18.09.2026 вместе
+     * с кнопкой «Переписать портрет» (коммит 1cc21a5). Тест до сих пор утверждал
+     * обратное («портрет описывать нельзя, 422») и падал на 404: контроллер
+     * теперь уводит портрет в describeVenue, а тот ищет площадку. Переписан под
+     * действующее поведение.
+     */
+    public function test_venue_portrait_can_be_described(): void
+    {
+        $broadcast = $this->makeChannel();
+        $item = $this->makeItem($broadcast->id);
+
+        $venueId = DB::table('venues')->insertGetId([
+            'city_id' => $this->city()->id,
+            'name' => 'Площадка '.uniqid(),
+            'slug' => 'venue-'.uniqid(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $item->kind = TelegramChatBroadcastItem::KIND_VENUE;
+        $item->event_id = null;
+        $item->venue_id = $venueId;
+        $item->save();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/describe", ['hint' => 'про парк'])
+            ->assertOk();
+
+        $fresh = $item->fresh();
+        $this->assertNotNull($fresh->text_requested_at);
+        $this->assertSame('про парк', $fresh->text_hint);
+    }
+
+    /** Портрет без площадки заказать нельзя — писать нечего и не о чем. */
+    public function test_venue_portrait_without_venue_is_rejected(): void
     {
         $broadcast = $this->makeChannel();
         $item = $this->makeItem($broadcast->id);
         $item->kind = TelegramChatBroadcastItem::KIND_VENUE;
         $item->event_id = null;
+        $item->venue_id = null;
         $item->save();
 
         $this->postJson("/api/admin/broadcast/items/{$item->id}/describe")
-            ->assertStatus(422);
+            ->assertStatus(404);
 
         $this->assertNull($item->fresh()->text_requested_at);
     }
