@@ -156,6 +156,8 @@ Route::prefix('admin/venues')
     ->middleware(['auth:sanctum', 'role:superadmin'])
     ->group(function () {
         Route::get('/', [\App\Http\Controllers\Api\Admin\AdminVenuesController::class, 'index']);
+        // Строго ДО '{id}': иначе «duplicates» уедет в параметр маршрута.
+        Route::get('duplicates', [\App\Http\Controllers\Api\Admin\AdminVenuesController::class, 'duplicates']);
         Route::patch('{id}', [\App\Http\Controllers\Api\Admin\AdminVenuesController::class, 'update'])->whereNumber('id');
         Route::post('{id}/merge', [\App\Http\Controllers\Api\Admin\AdminVenuesController::class, 'merge'])->whereNumber('id');
     });

@@ -6,6 +6,7 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Services\Text\TextLock;
+use App\Support\VenueDuplicateFinder;
 use App\Support\VenueKindLabel;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -76,6 +77,30 @@ class AdminVenuesController extends Controller
             // Белый список видов едет вместе со списком — чтобы админка не держала
             // свою копию и не разъезжалась с сервером при добавлении вида.
             'kinds' => VenueKindLabel::CANONICAL,
+        ]]);
+    }
+
+    /**
+     * Кандидаты на слияние. Правила — VenueDuplicateFinder, то же, что показывает
+     * `parser:venues:duplicates`; здесь они нужны экраном, чтобы не искать пары
+     * глазами по всему каталогу (на проде 20.09.2026 это 125 карточек).
+     */
+    public function duplicates(): JsonResponse
+    {
+        $venues = DB::table('venues as v')
+            ->whereNull('v.deleted_at')
+            ->leftJoin(DB::raw('(select venue_id, count(*) c from events where deleted_at is null group by venue_id) ec'),
+                'ec.venue_id', '=', 'v.id')
+            ->get([
+                'v.id', 'v.city_id', 'v.name', 'v.kind', 'v.address', 'v.latitude', 'v.longitude',
+                'v.house_fias_id', 'v.source_meta', DB::raw('coalesce(ec.c, 0) as events_count'),
+            ]);
+
+        $pairs = VenueDuplicateFinder::pairs($venues);
+
+        return response()->json(['data' => $pairs, 'meta' => [
+            'venues_total' => $venues->count(),
+            'pairs_total' => count($pairs),
         ]]);
     }
 
