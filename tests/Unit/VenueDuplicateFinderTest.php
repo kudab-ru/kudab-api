@@ -171,6 +171,62 @@ class VenueDuplicateFinderTest extends TestCase
         $this->assertSame([], VenueDuplicateFinder::pairs($after));
     }
 
+    /**
+     * Одна точка при совсем разных именах — третья корзина.
+     *
+     * Живой случай прода: «Воронежский Академический Театр Драмы» (29 событий) и
+     * «Театр драмы имени А. Кольцова» (2) стоят на одной координате, но их имена
+     * не пересекаются ни одним значимым словом, и обе корзины выше их не видели.
+     * Такой дубль незаметен вообще ничем, кроме совпадения места.
+     */
+    public function test_same_point_different_names_is_paired(): void
+    {
+        $pairs = VenueDuplicateFinder::pairs(collect([
+            $this->v(32, 'Воронежский Академический Театр Драмы', 51.6637, 39.2048, 'пр-кт Революции, 55', 29),
+            $this->v(64, 'Театр драмы имени А. Кольцова', 51.6637, 39.2048, 'пр-кт Революции, 55', 2),
+        ]));
+
+        $this->assertCount(1, $pairs);
+        $this->assertSame('same_point', $pairs[0]['reason']);
+        $this->assertSame(0, $pairs[0]['distance_m']);
+    }
+
+    /** Дальше тридцати метров — уже соседи, а не одно место. */
+    public function test_far_apart_different_names_are_not_paired(): void
+    {
+        $pairs = VenueDuplicateFinder::pairs(collect([
+            $this->v(1, 'Первое место', 51.6600, 39.2000, 'ул. А', 5),
+            $this->v(2, 'Второе место', 51.6610, 39.2000, 'ул. Б', 5), // ~111 м
+        ]));
+
+        $this->assertSame([], $pairs);
+    }
+
+    /** Порядок корзин: уверенное имя выше вложенного, вложенное выше просто точки. */
+    public function test_buckets_are_ordered_by_confidence(): void
+    {
+        $pairs = VenueDuplicateFinder::pairs(collect([
+            $this->v(1, 'Дом культуры «Заря»', 51.60, 39.20, 'ул. А', 1),
+            $this->v(2, 'Дом культуры «Заря»', 51.6001, 39.2001, 'ул. Б', 1),
+            $this->v(3, 'Совсем другое имя', 51.60, 39.20, 'ул. А', 99),
+        ]));
+
+        $this->assertSame('same_name', $pairs[0]['reason']);
+        $this->assertSame('same_point', end($pairs)['reason']);
+    }
+
+    /** Пара не должна попасть в две корзины разом. */
+    public function test_pair_appears_once(): void
+    {
+        $pairs = VenueDuplicateFinder::pairs(collect([
+            $this->v(1, 'Попкорн Драма', 51.6685, 39.2099, 'ул. Пятницкого', 10),
+            $this->v(2, 'Попкорн Драма на Пятницкого', 51.6685, 39.2099, 'Пятницкого, 52', 4),
+        ]));
+
+        $this->assertCount(1, $pairs);
+        $this->assertSame('nested_name', $pairs[0]['reason'], 'вложенное имя точнее, чем просто точка');
+    }
+
     /** Сцена внутри парка — не дубль парка: проставленный родитель снимает пару сам. */
     public function test_child_venue_is_not_a_duplicate_of_its_parent(): void
     {

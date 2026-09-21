@@ -32,6 +32,24 @@ final class VenueDuplicateFinder
     private const NEAR_POINT_M = 150.0;
 
     /**
+     * Одна точка при СОВСЕМ разных именах. Порог жёстче обычного: 150 метров
+     * для похожих имён — подсказка, а тут имена не помогают вовсе, и единственный
+     * аргумент — что места физически совпали.
+     *
+     * Замер прода 21.09.2026: в пределах 30 метров одиннадцать пар, и это не шум.
+     * Четыре — настоящие дубли («Воронежский Академический Театр Драмы» и «Театр
+     * драмы имени А. Кольцова» на одной точке; три карточки библиотеки Никитина:
+     * «Никитинка», «Библиотека имени И.С. Никитина», «Центр экологической
+     * информации»). Две — вложенность (Океанариум внутри Сити-парка «Град»).
+     * Остальные — настоящие соседи по дому.
+     *
+     * Имена там не пересекаются ни одним словом, поэтому обе корзины выше их
+     * не видели: библиотека с 51 событием и её же карточка с четырьмя стояли
+     * в каталоге порознь, и находилка молчала.
+     */
+    private const SAME_POINT_M = 30.0;
+
+    /**
      * Категорийные токены: не считаются различающим сигналом при сравнении имён.
      * Дословно из VenueNameNormalizer::TYPE_STOPWORDS.
      *
@@ -135,17 +153,37 @@ final class VenueDuplicateFinder
                     continue;
                 }
 
+                $seen[self::key((int) $a->id, (int) $b->id)] = true;
                 $out[] = self::pair($a, $b, 'nested_name');
             }
         }
 
-        // Сначала уверенные, внутри — где больше событий на кону.
-        usort($out, function (array $x, array $y): int {
-            if ($x['reason'] !== $y['reason']) {
-                return $x['reason'] === 'same_name' ? -1 : 1;
-            }
+        // 3) Одна точка при разных именах — самая слабая корзина, и потому последняя.
+        // Дом ФИАС сюда НЕ годится признаком: дом — это здание, а не площадка,
+        // и в «Граде» на одном доме три арендатора. Только физическое расстояние.
+        foreach ($list as $i => $a) {
+            foreach (array_slice($list, $i + 1) as $b) {
+                if ($a->city_id !== $b->city_id || isset($seen[self::key((int) $a->id, (int) $b->id)])) {
+                    continue;
+                }
+                if (self::dismissed($a, $b)) {
+                    continue;
+                }
+                $d = self::distanceM($a, $b);
+                if ($d === null || $d > self::SAME_POINT_M) {
+                    continue;
+                }
 
-            return $y['events_at_stake'] <=> $x['events_at_stake'];
+                $seen[self::key((int) $a->id, (int) $b->id)] = true;
+                $out[] = self::pair($a, $b, 'same_point');
+            }
+        }
+
+        // Сначала уверенные, внутри — где больше событий на кону.
+        $rank = ['same_name' => 0, 'nested_name' => 1, 'same_point' => 2];
+        usort($out, function (array $x, array $y) use ($rank): int {
+            return ($rank[$x['reason']] <=> $rank[$y['reason']])
+                ?: ($y['events_at_stake'] <=> $x['events_at_stake']);
         });
 
         return $out;
