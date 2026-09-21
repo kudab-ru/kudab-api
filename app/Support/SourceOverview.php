@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Support;
 
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -27,6 +28,9 @@ use Illuminate\Support\Facades\DB;
  */
 final class SourceOverview
 {
+    /** lastRuns() зовут четыре ветки — считаем один раз. */
+    private ?array $runsCache = null;
+
     /** Сети, где источник — это множество сообществ, а не одна настройка. */
     private const AGGREGATE_NETWORKS = [
         1 => 'ВКонтакте',
@@ -75,7 +79,7 @@ final class SourceOverview
             $out[(int) $r->link_id] = [
                 'ahead' => (int) $r->ahead,
                 'd30' => (int) $r->d30,
-                'last_event_at' => $r->last_event_at,
+                'last_event_at' => self::iso($r->last_event_at),
             ];
         }
 
@@ -85,12 +89,36 @@ final class SourceOverview
     /** Последний ЗАВЕРШЁННЫЙ заход по каждому slug профиля/конфига. */
     private function lastRuns(): array
     {
-        $out = [];
-        foreach (DB::select('SELECT source_slug, MAX(finished_at) AS last FROM source_runs WHERE finished_at IS NOT NULL GROUP BY source_slug') as $r) {
-            $out[(string) $r->source_slug] = $r->last;
+        if ($this->runsCache !== null) {
+            return $this->runsCache;
         }
 
-        return $out;
+        $out = [];
+        foreach (DB::select('SELECT source_slug, MAX(finished_at) AS last FROM source_runs WHERE finished_at IS NOT NULL GROUP BY source_slug') as $r) {
+            $out[(string) $r->source_slug] = self::iso($r->last);
+        }
+
+        return $this->runsCache = $out;
+    }
+
+    /**
+     * Время всегда с зоной. Postgres отдаёт «2026-09-21 09:12:33» без смещения,
+     * и браузер читает это как МЕСТНОЕ время: на странице «3 часа назад»
+     * превращалось в «6 часов назад», а источник, собиравший 47 часов назад,
+     * перескакивал в «молчит». Одна и та же строка, прочитанная сервером и
+     * браузером по-разному, — источник и расхождения при гидратации.
+     */
+    private static function iso(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        try {
+            return Carbon::parse((string) $value, 'UTC')->toIso8601String();
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     /** Сайты-источники: строка на профиль. */
@@ -166,13 +194,17 @@ final class SourceOverview
 
         $c = $cards[$linkId] ?? ['ahead' => 0, 'd30' => 0, 'last_event_at' => null];
 
+        // Журнала заходов у встроенного источника нет: парсер пишет в
+        // source_runs только Я.Афишу и профили сайтов. Без запасного варианта
+        // строка выходила «не запускался» рядом с ненулевым числом карточек —
+        // владелец видит противоречие и перестаёт верить плашкам.
         return [$this->row(
             key: 'qtickets',
             name: 'Qtickets',
             kindLabel: 'Афиша-агрегатор',
             enabled: true,
             cards: $c,
-            lastCollectedAt: $this->lastRuns()['qtickets'] ?? null,
+            lastCollectedAt: $this->lastRuns()['qtickets'] ?? $c['last_event_at'],
             url: null,
             manageable: false,
         )];
@@ -246,9 +278,9 @@ final class SourceOverview
                 }
             }
 
-            $lastPost = DB::table('context_posts')
+            $lastPost = self::iso(DB::table('context_posts')
                 ->whereIn('social_link_id', $links)
-                ->max('created_at');
+                ->max('created_at'));
 
             $out[] = $this->row(
                 key: 'net:'.$netId,
