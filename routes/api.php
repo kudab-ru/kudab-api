@@ -148,6 +148,12 @@ Route::prefix('admin/sources/profiles')
         Route::post('{id}/rebind', [\App\Http\Controllers\Api\Admin\AdminSourceProfilesController::class, 'rebind'])->whereNumber('id');
         Route::post('{id}/venue', [\App\Http\Controllers\Api\Admin\AdminSourceProfilesController::class, 'setVenue'])->whereNumber('id');
         Route::get('venues', [\App\Http\Controllers\Api\Admin\AdminSourceProfilesController::class, 'searchVenues']);
+        // Очередь доменов-кандидатов: первый шаг воронки источников.
+        // Наполняет ночной parser:sources:candidates --save, тут только
+        // просмотр и «скрыть» — профиль обязан родиться через probe.
+        Route::get('candidates', [\App\Http\Controllers\Api\Admin\AdminSourceCandidatesController::class, 'index']);
+        Route::post('candidates/{id}/dismiss', [\App\Http\Controllers\Api\Admin\AdminSourceCandidatesController::class, 'dismiss'])->whereNumber('id');
+        Route::post('candidates/{id}/restore', [\App\Http\Controllers\Api\Admin\AdminSourceCandidatesController::class, 'restore'])->whereNumber('id');
     });
 
 // Каталог площадок (venues) — суперадмин: само-наполняется резолверами,
