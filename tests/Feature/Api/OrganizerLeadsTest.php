@@ -120,18 +120,31 @@ class OrganizerLeadsTest extends TestCase
             ->assertStatus(422);
     }
 
-    /** Повтор той же ссылки не плодит строки — форма публичная. */
-    public function test_repeat_lead_updates_instead_of_duplicating(): void
+    /** Повтор от того же человека не плодит строки — форма публичная. */
+    public function test_repeat_from_same_person_updates(): void
     {
         $this->postJson('/api/web/organizer-leads', $this->lead())->assertCreated();
-        $this->postJson('/api/web/organizer-leads', $this->lead([
-            'contact' => '@другой', 'comment' => 'уточнение',
-        ]))->assertOk();
+        $this->postJson('/api/web/organizer-leads', $this->lead(['comment' => 'уточнение']))->assertOk();
 
         $this->assertSame(1, DB::table('organizer_leads')->count());
-        $row = DB::table('organizer_leads')->first();
-        $this->assertSame('@другой', $row->contact);
-        $this->assertSame('уточнение', $row->comment);
+        $this->assertSame('уточнение', DB::table('organizer_leads')->value('comment'));
+    }
+
+    /**
+     * А вот другой человек с той же ссылкой — отдельная заявка. Иначе
+     * администратор площадки затёр бы контакт посетителя, приславшего её
+     * первым, и тот пропал бы молча.
+     */
+    public function test_another_person_with_same_link_is_a_new_lead(): void
+    {
+        $this->postJson('/api/web/organizer-leads', $this->lead(['contact' => '@первый']))->assertCreated();
+        $this->postJson('/api/web/organizer-leads', $this->lead(['contact' => '@второй']))->assertCreated();
+
+        $this->assertSame(2, DB::table('organizer_leads')->count());
+        $this->assertSame(
+            ['@второй', '@первый'],
+            DB::table('organizer_leads')->orderBy('contact')->pluck('contact')->all(),
+        );
     }
 
     /** Схема, www, хвостовой слэш и query — одна и та же ссылка. */
@@ -145,6 +158,7 @@ class OrganizerLeadsTest extends TestCase
             $this->postJson('/api/web/organizer-leads', $this->lead(['source_url' => $url]));
         }
 
+        // Один контакт во всех трёх — значит, один человек и одна заявка.
         $this->assertSame(1, DB::table('organizer_leads')->where('source_key', 'teatr-vrn.ru/afisha')->count());
     }
 
@@ -167,6 +181,40 @@ class OrganizerLeadsTest extends TestCase
         DB::table('organizer_leads')->update(['resolved_at' => now(), 'resolution' => 'declined']);
 
         $this->postJson('/api/web/organizer-leads', $this->lead())->assertCreated();
+
+        $this->assertSame(2, DB::table('organizer_leads')->count());
+        $this->assertSame(1, DB::table('organizer_leads')->whereNull('resolved_at')->count());
+    }
+
+    /**
+     * Ради этого кнопка «Спам» и существует: помеченный отправитель больше
+     * не попадает в список. Раньше она была «Не берём» с другой подписью, и
+     * тот же человек возвращался на следующий день.
+     */
+    public function test_spam_marked_sender_is_silently_dropped(): void
+    {
+        $this->postJson('/api/web/organizer-leads', $this->lead(['source_url' => 'https://spam.ru/a']))
+            ->assertCreated();
+        DB::table('organizer_leads')->update(['resolved_at' => now(), 'resolution' => 'spam']);
+
+        // Другая ссылка, но тот же отправитель — ответ обычный, записи нет.
+        $this->postJson('/api/web/organizer-leads', $this->lead([
+            'source_url' => 'https://spam.ru/b', 'contact' => '@другой',
+        ]))->assertCreated();
+
+        $this->assertSame(1, DB::table('organizer_leads')->count());
+        $this->assertSame(0, DB::table('organizer_leads')->whereNull('resolved_at')->count());
+    }
+
+    /** «Не берём» так не работает: человек может вернуться с другим источником. */
+    public function test_declined_sender_can_come_back(): void
+    {
+        $this->postJson('/api/web/organizer-leads', $this->lead(['source_url' => 'https://a.ru/x']))
+            ->assertCreated();
+        DB::table('organizer_leads')->update(['resolved_at' => now(), 'resolution' => 'declined']);
+
+        $this->postJson('/api/web/organizer-leads', $this->lead(['source_url' => 'https://b.ru/y']))
+            ->assertCreated();
 
         $this->assertSame(2, DB::table('organizer_leads')->count());
         $this->assertSame(1, DB::table('organizer_leads')->whereNull('resolved_at')->count());

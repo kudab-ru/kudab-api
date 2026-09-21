@@ -50,6 +50,36 @@ class OrganizerLeadController extends Controller
         return mb_substr(rtrim(mb_strtolower($url), '/'), 0, 300) ?: null;
     }
 
+    /**
+     * Отправитель или источник уже помечены спамом.
+     *
+     * По адресу — чтобы один и тот же человек не возвращался каждый день;
+     * по ссылке — чтобы он же не возвращался с другого адреса с той же
+     * рекламой. Оба признака грубые, поэтому смотрим только на помеченное
+     * руками: автоматических пометок тут нет.
+     */
+    private static function looksLikeKnownSpam(?string $ip, ?string $sourceKey): bool
+    {
+        $q = DB::table('organizer_leads')->where('resolution', 'spam');
+
+        $q->where(function ($w) use ($ip, $sourceKey) {
+            $matched = false;
+            if ($ip !== null && $ip !== '') {
+                $w->orWhere('ip', $ip);
+                $matched = true;
+            }
+            if ($sourceKey !== null) {
+                $w->orWhere('source_key', $sourceKey);
+                $matched = true;
+            }
+            if (! $matched) {
+                $w->whereRaw('1 = 0');
+            }
+        });
+
+        return $q->exists();
+    }
+
     public function store(Request $request): JsonResponse
     {
         $data = $request->validate([
@@ -74,6 +104,20 @@ class OrganizerLeadController extends Controller
 
         $sourceKey = self::sourceKey($data['source_url'] ?? null);
 
+        // Помеченное спамом больше не доходит до списка. Без этого кнопка
+        // «Спам» в админке была просто «Не берём» с другой подписью: тот же
+        // отправитель возвращался на следующий день, и владелец разбирал его
+        // заново. Отвечаем как обычно — по ответу нельзя понять, что запись
+        // отброшена, иначе подбирать обход становится легко.
+        if (self::looksLikeKnownSpam($request->ip(), $sourceKey)) {
+            Log::info('organizer-lead:dropped-known-spam', [
+                'ip' => $request->ip(),
+                'source_key' => $sourceKey,
+            ]);
+
+            return response()->json(['ok' => true], 201);
+        }
+
         $row = [
             'kind' => $kind,
             'source_url' => $data['source_url'] ?? null,
@@ -87,12 +131,19 @@ class OrganizerLeadController extends Controller
             'updated_at' => now(),
         ];
 
-        // Повторная заявка на тот же источник обновляет прежнюю, а не плодит
-        // строки: форма публичная, и один человек легко отправит её дважды.
-        // Разобранные заявки не трогаем — если владелец уже сказал «не берём»,
-        // а источник прислали снова, это новое обращение и его надо увидеть.
+        // Повтор от ТОГО ЖЕ человека обновляет прежнюю заявку, а не плодит
+        // строки: форма публичная, и один отправитель легко пришлёт её дважды.
+        //
+        // Но склеивать по одной только ссылке нельзя: один и тот же сайт могут
+        // прислать двое — администратор площадки и её посетитель. Тогда вторая
+        // заявка затёрла бы контакт первого, и человек, пришедший первым,
+        // пропал бы молча. Поэтому ключ склейки — ссылка И контакт.
+        //
+        // Разобранные заявки не трогаем: если владелец сказал «не берём», а
+        // источник прислали снова, это новое обращение и его надо увидеть.
         $existingId = $sourceKey === null ? null : DB::table('organizer_leads')
             ->where('source_key', $sourceKey)
+            ->where('contact', $row['contact'])
             ->whereNull('resolved_at')
             ->value('id');
 
