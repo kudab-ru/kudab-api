@@ -31,6 +31,25 @@ use Illuminate\Validation\Rule;
  */
 class OrganizerLeadController extends Controller
 {
+    /**
+     * Ключ для склейки повторов: без схемы, www, хвостового слэша, query и
+     * якоря, в нижнем регистре. «https://VK.com/Paradice/» и
+     * «vk.com/paradice?from=feed» дают одно и то же.
+     */
+    private static function sourceKey(?string $url): ?string
+    {
+        $url = trim((string) $url);
+        if ($url === '') {
+            return null;
+        }
+
+        $url = (string) preg_replace('~[#?].*$~', '', $url);
+        $url = (string) preg_replace('~^https?://~i', '', $url);
+        $url = (string) preg_replace('~^www\.~i', '', $url);
+
+        return mb_substr(rtrim(mb_strtolower($url), '/'), 0, 300) ?: null;
+    }
+
     public function store(Request $request): JsonResponse
     {
         $data = $request->validate([
@@ -53,18 +72,39 @@ class OrganizerLeadController extends Controller
             ], 422);
         }
 
-        $id = DB::table('organizer_leads')->insertGetId([
+        $sourceKey = self::sourceKey($data['source_url'] ?? null);
+
+        $row = [
             'kind' => $kind,
             'source_url' => $data['source_url'] ?? null,
+            'source_key' => $sourceKey,
             'contact' => trim((string) $data['contact']),
             'city' => $data['city'] ?? null,
             'comment' => $data['comment'] ?? null,
             'page_path' => $data['page_path'] ?? null,
             'ip' => $request->ip(),
             'user_agent' => mb_substr((string) $request->userAgent(), 0, 300),
-            'created_at' => now(),
             'updated_at' => now(),
-        ]);
+        ];
+
+        // Повторная заявка на тот же источник обновляет прежнюю, а не плодит
+        // строки: форма публичная, и один человек легко отправит её дважды.
+        // Разобранные заявки не трогаем — если владелец уже сказал «не берём»,
+        // а источник прислали снова, это новое обращение и его надо увидеть.
+        $existingId = $sourceKey === null ? null : DB::table('organizer_leads')
+            ->where('source_key', $sourceKey)
+            ->whereNull('resolved_at')
+            ->value('id');
+
+        if ($existingId !== null) {
+            DB::table('organizer_leads')->where('id', $existingId)->update($row);
+
+            Log::info('organizer-lead:updated', ['id' => $existingId, 'source_key' => $sourceKey]);
+
+            return response()->json(['ok' => true], 200);
+        }
+
+        $id = DB::table('organizer_leads')->insertGetId($row + ['created_at' => now()]);
 
         Log::info('organizer-lead:received', [
             'id' => $id,

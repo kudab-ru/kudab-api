@@ -120,6 +120,58 @@ class OrganizerLeadsTest extends TestCase
             ->assertStatus(422);
     }
 
+    /** Повтор той же ссылки не плодит строки — форма публичная. */
+    public function test_repeat_lead_updates_instead_of_duplicating(): void
+    {
+        $this->postJson('/api/web/organizer-leads', $this->lead())->assertCreated();
+        $this->postJson('/api/web/organizer-leads', $this->lead([
+            'contact' => '@другой', 'comment' => 'уточнение',
+        ]))->assertOk();
+
+        $this->assertSame(1, DB::table('organizer_leads')->count());
+        $row = DB::table('organizer_leads')->first();
+        $this->assertSame('@другой', $row->contact);
+        $this->assertSame('уточнение', $row->comment);
+    }
+
+    /** Схема, www, хвостовой слэш и query — одна и та же ссылка. */
+    public function test_url_variants_are_one_lead(): void
+    {
+        foreach ([
+            'https://teatr-vrn.ru/afisha',
+            'https://WWW.teatr-vrn.ru/afisha/',
+            'https://teatr-vrn.ru/afisha?from=vk',
+        ] as $url) {
+            $this->postJson('/api/web/organizer-leads', $this->lead(['source_url' => $url]));
+        }
+
+        $this->assertSame(1, DB::table('organizer_leads')->where('source_key', 'teatr-vrn.ru/afisha')->count());
+    }
+
+    /** Разные источники остаются разными заявками. */
+    public function test_different_sources_stay_separate(): void
+    {
+        $this->postJson('/api/web/organizer-leads', $this->lead(['source_url' => 'https://a.ru/afisha']));
+        $this->postJson('/api/web/organizer-leads', $this->lead(['source_url' => 'https://b.ru/afisha']));
+
+        $this->assertSame(2, DB::table('organizer_leads')->count());
+    }
+
+    /**
+     * А вот после разбора та же ссылка заводит НОВУЮ заявку: если владелец
+     * сказал «не берём», а источник прислали снова — это новое обращение.
+     */
+    public function test_after_resolving_the_same_source_comes_back_as_new(): void
+    {
+        $this->postJson('/api/web/organizer-leads', $this->lead())->assertCreated();
+        DB::table('organizer_leads')->update(['resolved_at' => now(), 'resolution' => 'declined']);
+
+        $this->postJson('/api/web/organizer-leads', $this->lead())->assertCreated();
+
+        $this->assertSame(2, DB::table('organizer_leads')->count());
+        $this->assertSame(1, DB::table('organizer_leads')->whereNull('resolved_at')->count());
+    }
+
     public function test_admin_list_requires_superadmin(): void
     {
         $this->getJson('/api/admin/organizer-leads')->assertUnauthorized();
