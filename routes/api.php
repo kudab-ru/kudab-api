@@ -134,6 +134,14 @@ Route::prefix('admin')
 // role:admin|superadmin выше). Пишет source_configs, parser читает свежим.
 // Профильные сайты-источники (source_profiles само-строящегося парсера) —
 // тумблер/лимиты действуют со следующего цикла парсера, re-probe через метку.
+// Единый список источников: по строке на источник, с карточками и состоянием.
+// Только чтение — управление осталось в ручках ниже.
+Route::prefix('admin/sources')
+    ->middleware(['auth:sanctum', 'role:superadmin'])
+    ->group(function () {
+        Route::get('overview', [\App\Http\Controllers\Api\Admin\AdminSourcesController::class, 'index']);
+    });
+
 Route::prefix('admin/sources/profiles')
     ->middleware(['auth:sanctum', 'role:superadmin'])
     ->group(function () {
