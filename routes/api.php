@@ -136,6 +136,14 @@ Route::prefix('admin')
 // тумблер/лимиты действуют со следующего цикла парсера, re-probe через метку.
 // Единый список источников: по строке на источник, с карточками и состоянием.
 // Только чтение — управление осталось в ручках ниже.
+// Заявки организаторов: разбор того, что пришло с публичной формы.
+Route::prefix('admin/organizer-leads')
+    ->middleware(['auth:sanctum', 'role:superadmin'])
+    ->group(function () {
+        Route::get('/', [\App\Http\Controllers\Api\Admin\AdminOrganizerLeadsController::class, 'index']);
+        Route::post('{id}/resolve', [\App\Http\Controllers\Api\Admin\AdminOrganizerLeadsController::class, 'resolve'])->whereNumber('id');
+    });
+
 Route::prefix('admin/sources')
     ->middleware(['auth:sanctum', 'role:superadmin'])
     ->group(function () {
@@ -219,6 +227,12 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('events/{id}', [WebEventsController::class, 'show'])->whereNumber('id');
     Route::get('events/{id}/related', [WebEventsController::class, 'related'])->whereNumber('id');
     Route::get('events/{id}/companions', [WebEventsController::class, 'companions'])->whereNumber('id');
+
+    // Приём заявок от организаторов: «подключите мой источник» / «хочу
+    // поддержать». Публично и без авторизации, поэтому отдельный жёсткий
+    // лимит частоты поверх общего throttle:web.
+    Route::post('organizer-leads', [\App\Http\Controllers\Api\Web\OrganizerLeadController::class, 'store'])
+        ->middleware('throttle:5,1');
 
     Route::get('cities', [CitiesController::class, 'index']);
     Route::get('telegram/resolve', [TelegramResolveController::class, 'show']);
