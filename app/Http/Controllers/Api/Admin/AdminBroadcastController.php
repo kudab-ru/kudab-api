@@ -6,16 +6,16 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Contracts\Telegram\TelegramChatBroadcastRepositoryInterface;
 use App\Contracts\Telegram\TelegramChatRepositoryInterface;
+use App\Exceptions\DigestRecomposeFailed;
 use App\Http\Controllers\Controller;
 use App\Models\Event;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Repositories\EventRepository;
-use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\BroadcastDigestComposer;
+use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\PostTiming;
-use App\Exceptions\DigestRecomposeFailed;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Support\BroadcastSafety;
 use App\Support\Telegram\CaptionLength;
@@ -438,31 +438,31 @@ class AdminBroadcastController extends Controller
         }
 
         $rows = collect($ordered)->map(function (array $pair) use ($feedVenueIds, $chainSizes, $feedThemeIds) {
-                [$e, $key] = $pair;
+            [$e, $key] = $pair;
 
-                return [
-                    'kind' => 'event',
-                    'event_id' => (int) $e->id,
-                    'title' => (string) $e->title,
-                    'venue' => VenueName::label($e->venue?->name) ?: null,
-                    'chain' => $key,
-                    // Сколько ещё событий той же сети в пуле — по этому числу
-                    // интерфейс сворачивает сеть в одну строку.
-                    'chain_size' => $chainSizes[$key] ?? 1,
-                    'start_time' => optional($e->start_time)?->toIso8601String(),
-                    'price_status' => $e->price_status,
-                    'theme' => $this->themePayload($e),
-                    'reasons' => $this->reasons($e, $feedVenueIds, $feedThemeIds),
-                    'event_url' => $this->siteUrl().'/events/'.$e->id,
-                    // Источник, из которого событие пришло: в посте на него
-                    // ведёт «Открыть оригинал», а в админке открыть было нечем.
-                    'original_url' => $this->originalUrl($e),
-                    'cover' => (is_array($e->getAttribute('images')) ? ($e->getAttribute('images')[0] ?? null) : null),
-                    'end_time' => optional($e->end_time)?->toIso8601String(),
-                    'price_min' => $e->price_min,
-                    'price_max' => $e->price_max,
-                ];
-            })->values();
+            return [
+                'kind' => 'event',
+                'event_id' => (int) $e->id,
+                'title' => (string) $e->title,
+                'venue' => VenueName::label($e->venue?->name) ?: null,
+                'chain' => $key,
+                // Сколько ещё событий той же сети в пуле — по этому числу
+                // интерфейс сворачивает сеть в одну строку.
+                'chain_size' => $chainSizes[$key] ?? 1,
+                'start_time' => optional($e->start_time)?->toIso8601String(),
+                'price_status' => $e->price_status,
+                'theme' => $this->themePayload($e),
+                'reasons' => $this->reasons($e, $feedVenueIds, $feedThemeIds),
+                'event_url' => $this->siteUrl().'/events/'.$e->id,
+                // Источник, из которого событие пришло: в посте на него
+                // ведёт «Открыть оригинал», а в админке открыть было нечем.
+                'original_url' => $this->originalUrl($e),
+                'cover' => (is_array($e->getAttribute('images')) ? ($e->getAttribute('images')[0] ?? null) : null),
+                'end_time' => optional($e->end_time)?->toIso8601String(),
+                'price_min' => $e->price_min,
+                'price_max' => $e->price_max,
+            ];
+        })->values();
 
         // Портрет площадки — такой же кандидат на пустой слот, как событие.
         // В макете он третьей карточкой: «Портрет: бар «Архив» · площадка · не
@@ -917,17 +917,14 @@ class AdminBroadcastController extends Controller
                 // можно было бы отправить в канал любую чужую ссылку, а
                 // ошибка в адресе всплыла бы уже при публикации.
                 $available = match (true) {
-                    $item->kind === TelegramChatBroadcastItem::KIND_VENUE && $item->venue_id !== null
-                        => $this->venuePortraits->venuePhotoUrls((int) $item->venue_id, self::PHOTO_CANDIDATES),
+                    $item->kind === TelegramChatBroadcastItem::KIND_VENUE && $item->venue_id !== null => $this->venuePortraits->venuePhotoUrls((int) $item->venue_id, self::PHOTO_CANDIDATES),
                     // У подборки своего события нет: её картинки — обложки
                     // названных событий. Без этой ветки список разрешённых
                     // оставался пустым, и любой выбор человека отбивался
                     // ошибкой «среди выбранных есть чужие» — при том, что
                     // сами картинки лента ему показывала.
-                    $item->kind === TelegramChatBroadcastItem::KIND_DIGEST
-                        => $this->broadcasts->digestPhotoUrls((int) $item->id, self::PHOTO_CANDIDATES),
-                    $item->event_id !== null
-                        => $this->broadcasts->eventPhotos((int) $item->event_id, self::PHOTO_CANDIDATES),
+                    $item->kind === TelegramChatBroadcastItem::KIND_DIGEST => $this->broadcasts->digestPhotoUrls((int) $item->id, self::PHOTO_CANDIDATES),
+                    $item->event_id !== null => $this->broadcasts->eventPhotos((int) $item->event_id, self::PHOTO_CANDIDATES),
                     default => [],
                 };
 
@@ -1762,12 +1759,12 @@ class AdminBroadcastController extends Controller
         if ($taken->posted_at !== null) {
             return $when
                 ? "Это событие уже называл {$what}, вышедший {$when}."
-                : "Это событие уже публиковалось в канале.";
+                : 'Это событие уже публиковалось в канале.';
         }
 
         return $when
             ? "Это событие уже называет {$what} на {$when} — в канале оно выйдет дважды."
-            : "Это событие уже стоит в ленте канала.";
+            : 'Это событие уже стоит в ленте канала.';
     }
 
     /**
@@ -3503,8 +3500,7 @@ class AdminBroadcastController extends Controller
         ?Event $event,
         ?\App\Models\Venue $venue = null,
         ?int $repeats = null,
-    ): array
-    {
+    ): array {
         return [
             'id' => (int) $i->id,
             'kind' => $i->kind ?? 'event',
@@ -3625,8 +3621,7 @@ class AdminBroadcastController extends Controller
             // площадки: раньше здесь был пустой список, и любой выбор состава
             // упирался в 422 — белый список был пуст по определению.
             'photo_candidates' => match (true) {
-                $i->kind === TelegramChatBroadcastItem::KIND_VENUE && $i->venue_id !== null
-                    => $this->venuePortraits->venuePhotoUrls((int) $i->venue_id, self::PHOTO_CANDIDATES),
+                $i->kind === TelegramChatBroadcastItem::KIND_VENUE && $i->venue_id !== null => $this->venuePortraits->venuePhotoUrls((int) $i->venue_id, self::PHOTO_CANDIDATES),
                 $i->kind === TelegramChatBroadcastItem::KIND_DIGEST => $this->broadcasts->digestPhotoUrls((int) $i->id, self::PHOTO_CANDIDATES),
                 $i->event_id !== null => $this->candidatePhotos($i, $event),
                 default => [],
