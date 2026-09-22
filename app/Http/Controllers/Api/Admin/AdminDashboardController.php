@@ -25,14 +25,14 @@ class AdminDashboardController extends Controller
         $day = $now->copy()->subDay();
         $week = $now->copy()->subDays(7);
 
-        $eventsTotal     = Event::query()->count();
-        $events24h       = Event::query()->where('created_at', '>=', $day)->count();
-        $events7d        = Event::query()->where('created_at', '>=', $week)->count();
+        $eventsTotal = Event::query()->count();
+        $events24h = Event::query()->where('created_at', '>=', $day)->count();
+        $events7d = Event::query()->where('created_at', '>=', $week)->count();
         $eventsDeleted7d = Event::query()->onlyTrashed()->where('deleted_at', '>=', $week)->count();
 
         $communitiesTotal = Community::query()->count();
-        $linksTotal       = CommunitySocialLink::query()->count();
-        $linksByStatus    = CommunitySocialLink::query()
+        $linksTotal = CommunitySocialLink::query()->count();
+        $linksByStatus = CommunitySocialLink::query()
             ->select('status', DB::raw('count(*) as c'))
             ->groupBy('status')
             ->pluck('c', 'status')
@@ -47,27 +47,32 @@ class AdminDashboardController extends Controller
             ->all();
 
         $failedJobs = DB::table('failed_jobs')->count();
+        // Строка «требует внимания» на главной спрашивает про сегодня, а не
+        // про всю историю: в таблице копятся падения с июля, и накопленная
+        // сотня читалась как сегодняшняя авария.
+        $failedJobs24h = DB::table('failed_jobs')->where('failed_at', '>=', $day)->count();
 
         return response()->json([
             'data' => [
                 'generated_at' => $now->toIso8601String(),
                 'events' => [
-                    'total'          => $eventsTotal,
-                    'created_24h'    => $events24h,
-                    'created_7d'     => $events7d,
+                    'total' => $eventsTotal,
+                    'created_24h' => $events24h,
+                    'created_7d' => $events7d,
                     'soft_deleted_7d' => $eventsDeleted7d,
                 ],
                 'communities' => [
-                    'total'        => $communitiesTotal,
-                    'links_total'  => $linksTotal,
+                    'total' => $communitiesTotal,
+                    'links_total' => $linksTotal,
                     'links_active' => (int) ($linksByStatus['active'] ?? 0),
-                    'links_gray'   => (int) ($linksByStatus['gray'] ?? 0),
-                    'links_black'  => (int) ($linksByStatus['black'] ?? 0),
+                    'links_gray' => (int) ($linksByStatus['gray'] ?? 0),
+                    'links_black' => (int) ($linksByStatus['black'] ?? 0),
                 ],
                 'parsing' => [
-                    'frozen_sources'  => $frozenSources,
+                    'frozen_sources' => $frozenSources,
                     'frozen_by_reason' => $frozenByReason,
-                    'failed_jobs'     => $failedJobs,
+                    'failed_jobs' => $failedJobs,
+                    'failed_jobs_24h' => $failedJobs24h,
                 ],
             ],
         ]);

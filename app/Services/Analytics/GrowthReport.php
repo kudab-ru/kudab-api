@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Analytics;
 
 use App\Models\Event;
+use App\Models\TelegramChatBroadcastItem;
 use App\Repositories\EventRepository;
 use App\Support\SourceOverview;
 use Carbon\CarbonImmutable;
@@ -50,6 +51,18 @@ final class GrowthReport
         625513999 => 'Открыл второе событие',
     ];
 
+    /**
+     * Цели, которыми меряются уходы в телеграм.
+     *
+     * Своя цель «Переход в Telegram» (604001234) даёт ноль и будет давать:
+     * из пяти входов в канал размечен один, а внутренний /telegram отвечает
+     * редиректом, на котором хит не уходит. Поэтому считаем автоцелью
+     * мессенджера — она ловит прямые t.me-ссылки — и отдельной целью бота.
+     */
+    private const TG_OUT_MESSENGER = 512237598;
+
+    private const TG_OUT_BOT = 625515760;
+
     /** Карточка = группа сеансов; у одиночного события группы нет, ключ строим от id. */
     private const CARD = "COALESCE(events.event_group_id::text, 'e' || events.id)";
 
@@ -90,6 +103,7 @@ final class GrowthReport
         $queries = $this->guard('blind', fn () => $this->webmaster->searchQueriesSummary($from, $to), null);
         $goals = $this->guard('goals', fn () => $this->goals($from, $to), null);
         $cards = $this->guard('chain', fn () => $this->cards(), null);
+        $telegram = $this->guard('telegram', fn () => $this->telegram($from, $to), null);
 
         return [
             'data' => [
@@ -102,6 +116,7 @@ final class GrowthReport
                 'landing' => $paths === null ? null : $this->landing($paths),
                 'card_sources' => $this->guard('card_sources', fn () => $this->cardSources($paths), null),
                 'goals' => $goals,
+                'telegram' => $telegram,
                 'blind' => $this->blind($engines, $queries),
             ],
             'meta' => [
@@ -325,8 +340,12 @@ final class GrowthReport
         $ids = array_keys(self::GOALS);
         $metrics = implode(',', array_map(static fn ($id) => 'ym:s:goal'.$id.'visits', $ids));
 
+        // Тот же фильтр, что у всей страницы. Без него цели считали ВЕСЬ
+        // трафик: «874 просмотра события» стояло под «851 визитом из поиска»
+        // и читалось как ошибка счёта.
         $res = $this->metrika->visits([
             'metrics' => $metrics,
+            'filters' => self::ORGANIC,
             'date1' => $from,
             'date2' => $to,
         ]);
@@ -341,6 +360,51 @@ final class GrowthReport
         }
 
         return $out;
+    }
+
+    /**
+     * Телеграм в обе стороны: сколько пришло по нашим меткам и сколько ушло
+     * отсюда в канал и бота.
+     *
+     * Приток ловим по `utm_source=tg` — метку ставит наш же постинг
+     * ([[EventCaptionBuilder]]), так что считаются именно переходы из канала,
+     * а не любые заходы из мессенджера.
+     */
+    private function telegram(string $from, string $to): array
+    {
+        $in = $this->metrika->visits([
+            'metrics' => 'ym:s:visits,ym:s:users',
+            'filters' => "ym:s:UTMSource=='tg'",
+            'date1' => $from,
+            'date2' => $to,
+        ]);
+
+        $out = $this->metrika->visits([
+            'metrics' => 'ym:s:goal'.self::TG_OUT_MESSENGER.'visits,ym:s:goal'.self::TG_OUT_BOT.'visits',
+            'date1' => $from,
+            'date2' => $to,
+        ]);
+
+        $since = CarbonImmutable::parse($from);
+        $posts = TelegramChatBroadcastItem::query()
+            ->where('status', 'sent')
+            ->where('posted_at', '>=', $since)
+            ->selectRaw('count(*) as sent')
+            ->selectRaw('count(*) filter (where clicks is not null) as measured')
+            ->selectRaw('count(*) filter (where coalesce(clicks, 0) > 0) as with_clicks')
+            ->selectRaw('coalesce(sum(clicks), 0) as clicks')
+            ->first();
+
+        return [
+            'in_visits' => (int) round((float) ($in['totals'][0] ?? 0)),
+            'in_users' => (int) round((float) ($in['totals'][1] ?? 0)),
+            'out_messenger' => (int) round((float) ($out['totals'][0] ?? 0)),
+            'out_bot' => (int) round((float) ($out['totals'][1] ?? 0)),
+            'posts_sent' => (int) ($posts->sent ?? 0),
+            'posts_measured' => (int) ($posts->measured ?? 0),
+            'posts_with_clicks' => (int) ($posts->with_clicks ?? 0),
+            'post_clicks' => (int) ($posts->clicks ?? 0),
+        ];
     }
 
     // -------------------------------------------------------------- Вебмастер
@@ -519,6 +583,7 @@ final class GrowthReport
             'cards_horizon' => $cards['horizon'] ?? null,
             'cards_expiring_7d' => $cards['expiring_7d'] ?? null,
             'cards_in_feed' => $cards['in_feed'] ?? null,
+            'cards_added_30d' => $cards['added_30d'] ?? null,
             'index_pages' => $index['pages'] ?? null,
             'index_prev' => $index['prev'] ?? null,
             'index_delta' => $index['delta'] ?? null,
@@ -692,7 +757,24 @@ final class GrowthReport
             'horizon' => $horizon,
             'expiring_7d' => $expiring,
             'in_feed' => $this->cardsInFeed(),
+            'added_30d' => $this->cardsAdded30d(),
         ];
+    }
+
+    /**
+     * Сколько карточек из нынешнего запаса заведено за последний месяц.
+     *
+     * Считаем именно пересечение «впереди И заведено недавно», а не весь
+     * приток: за 30 дней заводится под полторы тысячи карточек, но почти все
+     * они к сегодняшнему дню уже состоялись, и рядом со строкой «за неделю
+     * уйдёт 133» такое число обещало бы рост запаса, которого нет.
+     */
+    private function cardsAdded30d(): int
+    {
+        return (int) $this->futureEvents()
+            ->where('events.created_at', '>=', CarbonImmutable::now()->subDays(30))
+            ->distinct()
+            ->count(DB::raw(self::CARD));
     }
 
     private function cardsInFeed(): int

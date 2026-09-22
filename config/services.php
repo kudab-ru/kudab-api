@@ -90,4 +90,17 @@ return [
         'counter' => env('YANDEX_METRIKA_COUNTER'),
         'token' => env('YANDEX_OAUTH_TOKEN'),
     ],
+
+    /*
+     * Яндекс.Вебмастер — единственный источник числа страниц в индексе.
+     * Токен тот же, что у Метрики. Дефолты проставлены боевыми значениями
+     * намеренно: без них ручка роста молчала бы на любой машине, где .env не
+     * дописали, а два этих идентификатора не секрет — они публично выводятся
+     * в адресе кабинета.
+     */
+    'webmaster' => [
+        'user_id' => env('YANDEX_WEBMASTER_USER_ID', '1478644357'),
+        'host_id' => env('YANDEX_WEBMASTER_HOST_ID', 'https:kudab.ru:443'),
+        'token' => env('YANDEX_OAUTH_TOKEN'),
+    ],
 ];

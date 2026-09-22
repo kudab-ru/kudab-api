@@ -72,3 +72,20 @@ Schedule::command('broadcast:enqueue-digests')
     ->hourly()
     ->onOneServer()
     ->withoutOverlapping(10);
+
+// Отчёт страницы «Аналитика». Считается заранее: сборка стоит восьми
+// обращений к чужим API и тянется около минуты, а nginx рвёт запрос раньше.
+// Каждые три часа при сроке жизни кэша в шесть — чтобы протухший отчёт
+// пережил один пропущенный запуск.
+Schedule::command('analytics:warm')
+    ->everyThreeHours()
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
+// Кнопка «Обновить» в админке только оставляет флажок — считает его этот тик.
+// Очередь тут не годится: у kudab-api её никто не разбирает, Horizon в этой
+// сборке крутит парсер.
+Schedule::command('analytics:warm --requested-only')
+    ->everyMinute()
+    ->onOneServer()
+    ->withoutOverlapping(10);

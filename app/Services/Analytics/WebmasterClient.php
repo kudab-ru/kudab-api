@@ -146,7 +146,14 @@ final class WebmasterClient
         $url = self::BASE.'/user/'.$this->user.'/hosts/'.$this->host.'/'.$path;
 
         try {
+            // Повтор с паузой: обрыв соединения к чужому API — обычное дело,
+            // а одна такая осечка занулила бы главное число страницы на шесть
+            // часов, до следующего прогрева.
             $response = Http::timeout(self::TIMEOUT)
+                // Предел на само СОЕДИНЕНИЕ по умолчанию десять секунд, и
+                // обрыв на нём приходил чаще, чем медленный ответ.
+                ->connectTimeout(self::TIMEOUT)
+                ->retry(2, 800, throw: false)
                 ->withHeaders(['Authorization' => 'OAuth '.$this->token])
                 ->get($url.self::queryString($query));
         } catch (\Throwable $e) {

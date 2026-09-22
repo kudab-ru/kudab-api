@@ -128,6 +128,9 @@ Route::prefix('admin')
 
         // dashboard
         Route::get('/dashboard/stats', [AdminDashboardController::class, 'stats']);
+
+        // Аналитика роста: поиск, индекс и живые карточки одним ответом.
+        Route::get('/analytics/growth', [\App\Http\Controllers\Api\Admin\AdminAnalyticsController::class, 'growth']);
     });
 
 // Управление источником Я.Афиша — ТОЛЬКО суперадмин (отдельная группа, НЕ
