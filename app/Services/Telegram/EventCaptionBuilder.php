@@ -115,21 +115,90 @@ final class EventCaptionBuilder
             $raw['venue_name'] = '';
         }
 
+        try {
+            // Связь отсортирована по rank: нулевой — главная тема, её и
+            // покажет значок. Лишний запрос на пост — та же цена, что у
+            // площадки выше, и по той же причине: сборщиков подписи шесть, и
+            // седьмой забыл бы сделать with().
+            $raw['interest_slugs'] = $event->interests->pluck('slug')->filter()->values()->all();
+        } catch (\Throwable $e) {
+            Log::warning('caption.interests_unavailable', [
+                'event_id' => $event->id,
+                'error' => $e->getMessage(),
+            ]);
+            $raw['interest_slugs'] = [];
+        }
+
         return $raw;
     }
+
+    /**
+     * Тема интереса → значок. Порядок = узость: узкое раньше широкого.
+     *
+     * Широких всего две — `music` и `education`; остальные слаги справочника
+     * называют тему прямо, и между ними порядок не важен. Значки выбраны так,
+     * чтобы различаться в ленте на телефоне: 🎷 и 🎸 видно с первого взгляда,
+     * а 🎵 и 🎶 рядом уже сливаются — поэтому 🎶 (эстрада) и 🎵 (просто
+     * музыка) не могут выпасть на одно событие: `pop` перебивает `music`.
+     */
+    private const INTEREST_EMOJI = [
+        // Узкие музыкальные жанры — раньше общего `music`.
+        'jazz' => '🎷',
+        'rock' => '🎸',
+        'classical' => '🎻',
+        'opera-ballet' => '🩰',
+        'electronic' => '🎧',
+        'hip-hop' => '🎙',
+        'pop' => '🎶',
+        // Всё остальное — уже конкретные темы.
+        'theatre' => '🎭',
+        'standup' => '🎤',
+        'cinema' => '🎬',
+        'exhibitions' => '🖼',
+        'literature' => '📖',
+        'quiz-games' => '🧩',
+        'parties' => '🪩',
+        'circus-show' => '🎪',
+        'festival' => '🎊',
+        'excursions' => '🚶',
+        'kids' => '🧸',
+        'sport' => '🏃',
+        'science' => '🔬',
+        'workshops' => '🎨',
+        'yoga-wellness' => '🧘',
+        'city' => '🏛',
+        // Широкие — в самом низу, как запасной вариант.
+        'education' => '🎓',
+        'music' => '🎵',
+    ];
 
     /**
      * Эмодзи по теме события — как у московского агрегатора, где значок
      * поддерживает название («Фонтаны на ВДНХ ⛲»).
      *
-     * Никакой модели: сначала смотрим слова в названии (они точнее), потом
-     * падаем на content_kind. Незнакомая тема остаётся БЕЗ значка — лучше
-     * пусто, чем случайный: ✨ у панихиды читается издевательством.
+     * ГЛАВНЫЙ СИГНАЛ — ИНТЕРЕСЫ, а не слова в названии. Словарь по названию
+     * стоял первым и покрывал 209 событий из 400: «Побег из тюрьмы» и
+     * «Припять 36» — квесты, но слова «квест» в названии нет, и полторы сотни
+     * постов уходили без значка. Интересы проставлены у 439 событий из 449,
+     * справочник курируется руками, и тема в нём названа прямо.
+     *
+     * Внутри интересов побеждает УЗКИЙ над широким: у события часто стоят
+     * сразу `music` и `jazz`, и 🎷 говорит больше, чем 🎵. Слова названия и
+     * content_kind остались запасными путями — для тех десяти событий, что
+     * пришли без тем вовсе.
+     *
+     * Незнакомая тема остаётся БЕЗ значка — лучше пусто, чем случайный:
+     * ✨ у панихиды читается издевательством.
      *
      * @param  array<string, mixed>  $raw
      */
     private static function kindEmoji(array $raw): string
     {
+        $byInterest = self::interestEmoji($raw['interest_slugs'] ?? null);
+        if ($byInterest !== '') {
+            return $byInterest;
+        }
+
         $title = mb_strtolower((string) ($raw['title'] ?? $raw['name'] ?? ''));
 
         $byWord = [
@@ -141,9 +210,9 @@ final class EventCaptionBuilder
             '🧩' => ['квест', 'игротек', 'настолк', 'квиз'],
             '🏃' => ['забег', 'марафон', 'турнир', 'матч', 'чемпионат'],
             '🛍' => ['маркет', 'ярмарк', 'барахолк', 'своп'],
-            '🌳' => ['экскурс', 'прогулк', 'парк'],
+            '🚶' => ['экскурс', 'прогулк'],
             '🧸' => ['для детей', 'детск', 'малыш'],
-            '💬' => ['лекци', 'встреч', 'дискусс', 'мастер-класс'],
+            '🎓' => ['лекци', 'дискусс', 'мастер-класс'],
         ];
 
         foreach ($byWord as $emoji => $words) {
@@ -156,10 +225,61 @@ final class EventCaptionBuilder
 
         return match ((string) ($raw['content_kind'] ?? '')) {
             'culture' => '🎭',
-            'education' => '💬',
+            'education' => '🎓',
             'sport' => '🏃',
             'civic' => '🏛',
             default => '',
+        };
+    }
+
+    /**
+     * Значок по слагам интересов.
+     *
+     * Порядок в `INTEREST_EMOJI` — это порядок УЗОСТИ, а не алфавит: `jazz`
+     * стоит выше `music` намеренно. Перебираем словарь, а не слаги события,
+     * поэтому узкая тема выигрывает независимо от того, в каком порядке её
+     * проставил тэггер.
+     *
+     * Слаги сверяются со справочником `interests` руками при его правке: новый
+     * интерес без значка просто не получит эмодзи, и пост от этого не сломается.
+     */
+    private static function interestEmoji(mixed $slugs): string
+    {
+        if (! is_array($slugs) || $slugs === []) {
+            return '';
+        }
+
+        $have = [];
+        foreach ($slugs as $slug) {
+            if (is_string($slug) && $slug !== '') {
+                $have[mb_strtolower(trim($slug))] = true;
+            }
+        }
+
+        foreach (self::INTEREST_EMOJI as $slug => $emoji) {
+            if (isset($have[$slug])) {
+                return $emoji;
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * Значок для строки цены.
+     *
+     * Бесплатное — самый сильный крючок в афише, и 💸 у него читается как
+     * ошибка: значок денег стоит там, где денег не надо. 🆓 выхватывается
+     * взглядом при листании, а это ровно то, ради чего значки и заводились.
+     *
+     * @param  array<string, mixed>  $raw
+     */
+    private static function priceEmoji(array $raw): string
+    {
+        return match (mb_strtolower(trim((string) ($raw['price_status'] ?? '')))) {
+            'free' => '🆓',
+            'donation' => '🤝',
+            default => '💸',
         };
     }
 
@@ -266,12 +386,26 @@ final class EventCaptionBuilder
             'description' => $this->firstNonEmpty($raw, ['tg_description', 'description', 'short_description', 'excerpt', 'body', 'text']),
             'lead' => $lead,
             'about' => $about,
+            // Один ключ на оба текста. Шаблону почти всегда нужно «текст
+            // события», а не «фраза модели ИЛИ пресс-релиз»: писать в теле
+            // {lead}{about} подряд читается как опечатка, а забыть второй —
+            // как раз то, из-за чего формы basic и lead-below давали
+            // ОДИНАКОВЫЙ пост у 434 предстоящих событий из 449. Фраза модели
+            // есть всего у 15, и в обеих формах текст оседал внизу.
+            'text' => $lead !== '' ? $lead : $about,
+            // Готовая цитата — по той же причине, что и готовые ссылки ниже.
+            // Голый <blockquote>{lead}</blockquote> в шаблоне давал ПУСТУЮ
+            // цитату там, где фразы модели нет, то есть у 97% постов: текст
+            // пропадал целиком, а полоска цитаты оставалась. Здесь ключ
+            // рендерится либо в цитату с текстом, либо в пустоту.
+            'quote' => self::quoteBlock($lead !== '' ? $lead : $about),
             'address' => $locSafe,
             'place' => $locSafe,
             'location' => $locSafe,
             'start_time' => $this->startHuman($raw, $asOf),
             'kind_emoji' => self::kindEmoji($raw),
             'price_label' => $this->priceLabel($raw, $canonicalUrl),
+            'price_emoji' => self::priceEmoji($raw),
             'price_url' => trim((string) ($raw['price_url'] ?? '')),
             'price_status' => trim((string) ($raw['price_status'] ?? '')),
             'price_text' => trim((string) ($raw['price_text'] ?? '')),
@@ -287,6 +421,25 @@ final class EventCaptionBuilder
             // «🏷 …» не печаталась ни разу. Сохраняем это поведение явно.
             'tags' => '',
         ];
+    }
+
+    /**
+     * Текст в цитату — или пустая строка, если текста нет.
+     *
+     * Срез и экранирование здесь, а не фильтрами шаблона: фильтр применился бы
+     * и к самим тегам <blockquote>, и разметка уехала бы в текст поста.
+     */
+    private static function quoteBlock(string $text): string
+    {
+        $text = trim($text);
+        if ($text === '') {
+            return '';
+        }
+
+        $text = CaptionTemplate::slice($text, '0..400');
+        $safe = htmlspecialchars($text, ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+        return '<blockquote>'.$safe.'</blockquote>';
     }
 
     /**

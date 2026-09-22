@@ -6,110 +6,135 @@ use Carbon\Carbon;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
 
+/**
+ * Тела шаблонов поста — в том виде, в каком они уходят в канал.
+ *
+ * ЭТОТ ФАЙЛ ОБЯЗАН СОВПАДАТЬ С ПОСЛЕДНЕЙ МИГРАЦИЕЙ ПО ШАБЛОНАМ. Тесты сидятся
+ * им поверх миграций, то есть проверяют ИМЕННО эти строки. Пока он отставал,
+ * тесты подтверждали текст, которого в канале уже не было: здесь ещё стоял
+ * значок 🎟, убранный из всех форм, не было ни lead-below, ни quote, зато был
+ * выключенный promo.
+ */
 class TelegramMessageTemplatesSeeder extends Seeder
 {
+    /**
+     * A — текст НАД строками фактов.
+     *
+     * {text} — фраза модели, а если её нет, описание источника. Раньше здесь
+     * стоял {lead}, а описание уезжало в подвал отдельным ключом, и форма A
+     * совпадала с формой B байт в байт у 434 предстоящих событий из 449:
+     * фраза модели есть всего у 15.
+     */
+    private const BASIC_BODY = <<<'TXT'
+<b>{title}</b> {kind_emoji}
+{text|slice:0..400|escape_html}
+
+📍 {address}
+🗓 {start_time|human}
+{price_emoji} {price_label}
+
+{more_link}          {original_link}
+TXT;
+
+    /** B — текст ПОД строками фактов. */
+    private const LEAD_BELOW_BODY = <<<'TXT'
+<b>{title}</b> {kind_emoji}
+
+📍 {address}
+🗓 {start_time|human}
+{price_emoji} {price_label}
+
+{text|slice:0..400|escape_html}
+
+{more_link}          {original_link}
+TXT;
+
+    /**
+     * C — текст в цитате.
+     *
+     * {quote} рендерится в целую цитату или в пустоту. Голый
+     * <blockquote>{lead}</blockquote> давал ПУСТУЮ цитату у 97% событий:
+     * полоска оставалась, текст пропадал.
+     */
+    private const QUOTE_BODY = <<<'TXT'
+<b>{title}</b> {kind_emoji}
+
+📍 {address}
+🗓 {start_time|human}
+{price_emoji} {price_label}
+
+{quote}
+
+{more_link}          {original_link}
+TXT;
+
+    /**
+     * Краткий: прозы нет ВООБЩЕ — короткий формат выбирают ровно за это.
+     *
+     * В чередование не входит, остаётся на случай, когда нужен голый анонс.
+     */
+    private const SHORT_BODY = <<<'TXT'
+<b>{title}</b> {kind_emoji}
+
+📍 {address}
+🗓 {start_time|human}
+{price_emoji} {price_label}
+
+{more_link}          {original_link}
+TXT;
+
     public function run(): void
     {
         $now = Carbon::now();
 
-        // --- Тела шаблонов ---------------------------------------------------
-
-        // Базовый: заголовок, живая фраза, адрес/дата/цена, описание, ссылка.
-        //
-        // {lead} — анонс, написанный моделью, и он стоит ВТОРОЙ строкой, а не
-        // в подвале: это единственное в посте, что написано словами. Пуст,
-        // когда анонса нет, и тогда пост выглядит ровно как раньше. {about} —
-        // пресс-релиз источника, и он зеркально молчит, когда анонс есть:
-        // иначе один текст ушёл бы в пост дважды. Разводит их
-        // [[EventCaptionBuilder]].
-        //
-        // Строки тегов здесь нет: ключ `tags` пуст всегда, и строка «🏷 …» не
-        // напечаталась ни в одном посте за всё время.
-        $basicBody = implode("\n", [
-            '🎟 <b>{title}</b>',
-            '{lead|slice:0..400|escape_html}',
-            '',
-            '📍 {address}',
-            '🗓 {start_time|human}',
-            '💸 {price_label}',
-            '',
-            '{about|slice:0..400|escape_html}',
-            '',
-            // Ссылки — плейсхолдерами, а не тегом руками: {original_link} исчезает
-            // целиком у события без источника, а голый {canonical_url} в теге
-            // оставил бы пустой href. И редактор шаблонов теперь показывает
-            // ровно то, что уйдёт в канал: раньше вторую ссылку дописывал код
-            // уже после рендера, и в шаблоне её не было видно.
-            '{more_link}          {original_link}',
-        ]);
-
-        // Краткий: заголовок, адрес/дата/цена, ссылка. Прозы нет ВООБЩЕ —
-        // ни анонса, ни описания: короткий формат выбирают ровно за это,
-        // поэтому {lead} сюда не добавлен.
-        $shortBody = implode("\n", [
-            '🎟 <b>{title}</b>',
-            '',
-            '📍 {address}',
-            '🗓 {start_time|human}',
-            '💸 {price_label}',
-            '',
-            // Ссылки — плейсхолдерами; почему — у шаблона basic выше.
-            '{more_link}          {original_link}',
-        ]);
-
-        // Промо: то же, что базовый, но короче — 280 знаков вместо 400.
-        $promoBody = implode("\n", [
-            '🎟 <b>{title}</b>',
-            '{lead|slice:0..280|escape_html}',
-            '',
-            '📍 {address}',
-            '🗓 {start_time|human}',
-            '💸 {price_label}',
-            '',
-            '{about|slice:0..280|escape_html}',
-            '',
-            // Ссылки — плейсхолдерами; почему — у шаблона basic выше.
-            '{more_link}          {original_link}',
-        ]);
-
-        // --- Набор строк для upsert -----------------------------------------
-
         $rows = [
             [
-                'code'        => 'basic',
-                'locale'      => 'ru',
-                'name'        => 'Базовый анонс',
-                'description' => 'Полная карточка события: заголовок, живая фраза под ним, адрес, дата/время, цена, описание и ссылка.',
-                'body'        => $basicBody,
+                'code' => 'basic',
+                'locale' => 'ru',
+                'name' => 'Анонс с текстом сверху',
+                'description' => 'Описание над строками места, времени и цены.',
+                'body' => self::BASIC_BODY,
                 'show_images' => true,
-                'max_images'  => 3,
-                'is_active'   => true,
-                'created_at'  => $now,
-                'updated_at'  => $now,
+                'max_images' => 3,
+                'is_active' => true,
+                'created_at' => $now,
+                'updated_at' => $now,
             ],
             [
-                'code'        => 'short',
-                'locale'      => 'ru',
-                'name'        => 'Краткий анонс',
+                'code' => 'lead-below',
+                'locale' => 'ru',
+                'name' => 'Анонс с текстом снизу',
+                'description' => 'Описание под строками места, времени и цены.',
+                'body' => self::LEAD_BELOW_BODY,
+                'show_images' => true,
+                'max_images' => 3,
+                'is_active' => true,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ],
+            [
+                'code' => 'quote',
+                'locale' => 'ru',
+                'name' => 'Анонс цитатой',
+                'description' => 'Описание в цитате — отделяет чужой голос от наших строк.',
+                'body' => self::QUOTE_BODY,
+                'show_images' => true,
+                'max_images' => 1,
+                'is_active' => true,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ],
+            [
+                'code' => 'short',
+                'locale' => 'ru',
+                'name' => 'Краткий анонс',
                 'description' => 'Компактный формат: заголовок, адрес, дата/время, цена и ссылка. Без прозы вовсе.',
-                'body'        => $shortBody,
+                'body' => self::SHORT_BODY,
                 'show_images' => true,
-                'max_images'  => 1,
-                'is_active'   => true,
-                'created_at'  => $now,
-                'updated_at'  => $now,
-            ],
-            [
-                'code'        => 'promo',
-                'locale'      => 'ru',
-                'name'        => 'Промо-анонс',
-                'description' => 'Промо-формат: то же, что базовый, но проза обрезается на 280 знаках.',
-                'body'        => $promoBody,
-                'show_images' => true,
-                'max_images'  => 3,
-                'is_active'   => true,
-                'created_at'  => $now,
-                'updated_at'  => $now,
+                'max_images' => 1,
+                'is_active' => true,
+                'created_at' => $now,
+                'updated_at' => $now,
             ],
         ];
 

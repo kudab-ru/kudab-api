@@ -95,7 +95,7 @@ final class CaptionTemplate
      * ещё не заканчивается многоточием. Ровно 400 символов — без многоточия,
      * 401 — обрезка и «…».
      */
-    private static function slice(string $value, string $arg): string
+    public static function slice(string $value, string $arg): string
     {
         if (! preg_match('/^(\d*)\.\.(\d*)$/', $arg, $m)) {
             return $value;

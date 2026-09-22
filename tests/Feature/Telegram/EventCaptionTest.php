@@ -136,18 +136,28 @@ class EventCaptionTest extends TestCase
 
         $lines = explode("\n", $this->builder()->build($event, 'basic', $this->asOf()));
 
-        $this->assertStringContainsString('🎟', $lines[0]);
+        // 🎟 из первой строки убран: билет к содержанию отношения не имеет и
+        // стоял у каждого поста одинаково. Вместо него значок по теме.
+        $this->assertStringContainsString('<b>Концерт «Лики эпохи»</b>', $lines[0]);
+        $this->assertStringNotContainsString('🎟', $lines[0]);
         $this->assertSame('Фатальное танго и молитва — всё в один вечер.', $lines[1]);
     }
 
     /**
-     * Анонса нет — наверх не поднимается НИЧЕГО.
+     * Анонса нет — наверх поднимается пресс-релиз.
      *
-     * Иначе первой строкой встало бы «Приглашаем вас на…» из пресс-релиза:
-     * в июле анонс был у одного события из восьми, и правило «крючок первой
-     * строкой» без этого различения сделало бы посты хуже, а не лучше.
+     * ПРАВИЛО ПЕРЕВЁРНУТО НАМЕРЕННО. Раньше здесь стояло «наверх не
+     * поднимается НИЧЕГО»: считалось, что пресс-релиз начинается с «Приглашаем
+     * вас на…» и крючка из него не выйдет. Посылку проверили на живых данных —
+     * из 432 предстоящих событий с описанием и без фразы модели дежурным
+     * оборотом начинаются 32, то есть 7%. Остальные 93% открываются по делу:
+     * «Готэм в панике. Бэтмен исчез три дня назад…».
+     *
+     * Цена старого правила была высокой: фраза модели есть у 15 событий из
+     * 449, поэтому «текст сверху» и «текст снизу» давали ОДИН И ТОТ ЖЕ пост у
+     * 434 из них, и чередование форм по дням крутило одно и то же.
      */
-    public function test_press_release_never_rises_to_the_top(): void
+    public function test_press_release_rises_when_there_is_no_model_phrase(): void
     {
         $event = $this->makeEvent(
             venueName: 'Марьяж',
@@ -156,12 +166,65 @@ class EventCaptionTest extends TestCase
             description: 'Приглашаем вас на ток-шоу с участием известных гостей.',
         );
 
-        $caption = $this->builder()->build($event, 'basic', $this->asOf());
-        $lines = explode("\n", $caption);
+        $lines = explode("\n", $this->builder()->build($event, 'basic', $this->asOf()));
 
-        $this->assertStringContainsString('🎟', $lines[0]);
-        $this->assertStringContainsString('📍', $lines[2], 'между названием и местом ничего не встало');
-        $this->assertStringContainsString('Приглашаем вас на ток-шоу', $caption, 'пресс-релиз остался внизу');
+        $this->assertStringContainsString('<b>Концерт «Лики эпохи»</b>', $lines[0]);
+        $this->assertSame('Приглашаем вас на ток-шоу с участием известных гостей.', $lines[1]);
+    }
+
+    /**
+     * Формы «текст сверху» и «текст снизу» обязаны различаться на ОБЫЧНОМ
+     * событии — без фразы модели. Ради этого всё и переписывалось.
+     */
+    public function test_two_forms_differ_without_a_model_phrase(): void
+    {
+        $event = $this->makeEvent(
+            venueName: 'Марьяж',
+            address: 'г Воронеж, ул Мира, д 1',
+            tgDescription: null,
+            description: 'Приглашаем вас на ток-шоу с участием известных гостей.',
+        );
+
+        $above = $this->builder()->build($event, 'basic', $this->asOf());
+        $below = $this->builder()->build($event, 'lead-below', $this->asOf());
+
+        $this->assertNotSame($above, $below);
+        $this->assertStringContainsString('ток-шоу', $above);
+        $this->assertStringContainsString('ток-шоу', $below);
+    }
+
+    /**
+     * Цитата без фразы модели обязана нести описание источника, а не остаться
+     * пустой полоской. Именно пустую цитату и получали 97% постов.
+     */
+    public function test_quote_is_never_empty_when_there_is_any_text(): void
+    {
+        $event = $this->makeEvent(
+            venueName: 'Марьяж',
+            address: 'г Воронеж, ул Мира, д 1',
+            tgDescription: null,
+            description: 'Приглашаем вас на ток-шоу с участием известных гостей.',
+        );
+
+        $caption = $this->builder()->build($event, 'quote', $this->asOf());
+
+        $this->assertStringNotContainsString('<blockquote></blockquote>', $caption);
+        $this->assertStringContainsString('<blockquote>Приглашаем вас на ток-шоу', $caption);
+    }
+
+    /** Текста нет вовсе — цитаты нет тоже, пустой полоски не остаётся. */
+    public function test_quote_disappears_without_any_text(): void
+    {
+        $event = $this->makeEvent(
+            venueName: 'Марьяж',
+            address: 'г Воронеж, ул Мира, д 1',
+            tgDescription: null,
+            description: null,
+        );
+
+        $caption = $this->builder()->build($event, 'quote', $this->asOf());
+
+        $this->assertStringNotContainsString('blockquote', $caption);
     }
 
     /** Анонс модели печатается ОДИН раз, а не дважды. */
