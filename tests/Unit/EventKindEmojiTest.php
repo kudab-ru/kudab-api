@@ -106,12 +106,41 @@ class EventKindEmojiTest extends TestCase
         ]));
     }
 
-    /** Узкая тема бьёт широкую независимо от порядка слагов у события. */
-    public function test_narrow_interest_wins_over_broad(): void
+    /**
+     * ГЛАВНАЯ ТЕМА РЕШАЕТ. Слаги приходят в порядке rank, нулевой — главная.
+     *
+     * Первая версия перебирала свой словарь, а не темы события, и главную
+     * теряла: из 77 названий, где тема прямо названа словом, значок
+     * противоречил названию у 21. Тэггер при этом был прав во всех случаях.
+     */
+    public function test_primary_interest_wins_over_secondary(): void
+    {
+        // Экскурсия в театре — экскурсия, а не спектакль.
+        $this->assertSame('🚶', $this->emoji(['interest_slugs' => ['excursions', 'theatre']]));
+        // Ток-шоу: тэггер поставил главной education, quiz-games вторым.
+        $this->assertSame('🎓', $this->emoji(['interest_slugs' => ['education', 'quiz-games']]));
+        // Квест по мультфильму — квест, а не кино.
+        $this->assertSame('🧩', $this->emoji(['interest_slugs' => ['quiz-games', 'cinema']]));
+    }
+
+    /**
+     * Единственное исключение — музыкальные жанры: `music` им НАДТЕМА, и 🎷
+     * говорит больше, чем 🎵. Для прочих пар такого отношения нет, поэтому
+     * подмена работает только здесь.
+     */
+    public function test_music_genre_replaces_the_broad_music(): void
     {
         $this->assertSame('🎸', $this->emoji(['interest_slugs' => ['music', 'rock']]));
         $this->assertSame('🎸', $this->emoji(['interest_slugs' => ['rock', 'music']]));
         $this->assertSame('🎻', $this->emoji(['interest_slugs' => ['music', 'classical']]));
+        // А немузыкальная тема тему `music` не вытесняет.
+        $this->assertSame('🎵', $this->emoji(['interest_slugs' => ['music', 'kids']]));
+    }
+
+    /** Главная тема без значка — берём следующую по рангу, а не сдаёмся. */
+    public function test_falls_through_to_the_next_ranked_interest(): void
+    {
+        $this->assertSame('🎭', $this->emoji(['interest_slugs' => ['taxidermy', 'theatre']]));
     }
 
     /** Широкая тема всё равно лучше пустоты, если узкой не проставили. */
