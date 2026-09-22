@@ -777,13 +777,11 @@ class TelegramChatBroadcastService
                     // ушла в канал голым текстом: в админке обложки были
                     // видны, а сюда не доезжали.
                     $photoUrls = match (true) {
-                        $item->kind === TelegramChatBroadcastItem::KIND_DIGEST
-                            => $this->digestPhotoUrls((int) $item->id, TelegramVenuePortraitService::ALBUM_LIMIT),
-                        $item->venue_id !== null
-                            => $this->venuePortraitService->venuePhotoUrls(
-                                (int) $item->venue_id,
-                                TelegramVenuePortraitService::ALBUM_LIMIT,
-                            ),
+                        $item->kind === TelegramChatBroadcastItem::KIND_DIGEST => $this->digestPhotoUrls((int) $item->id, TelegramVenuePortraitService::ALBUM_LIMIT),
+                        $item->venue_id !== null => $this->venuePortraitService->venuePhotoUrls(
+                            (int) $item->venue_id,
+                            TelegramVenuePortraitService::ALBUM_LIMIT,
+                        ),
                         default => [],
                     };
                     if ($photoUrls === [] && $item->photo_url) {
@@ -2098,7 +2096,7 @@ class TelegramChatBroadcastService
         try {
             $item->caption = $this->captionBuilder->build(
                 $event,
-                (string) $broadcast->template_code,
+                $broadcast->templateCodeForItem((int) $item->id),
                 $showDay,
                 (int) $item->id,
             );

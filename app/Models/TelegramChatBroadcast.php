@@ -377,6 +377,48 @@ class TelegramChatBroadcast extends Model
         $this->settings = $settings;
     }
 
+    /**
+     * Формы поста, которые канал чередует. Пусто — форма одна, как раньше.
+     *
+     * Владелец захотел разнообразия: «описание сверху» и «описание после
+     * сведений» — это два разных способа чтения, а не косметика. Список, а не
+     * флаг: завтра форм станет три.
+     *
+     * @return list<string>
+     */
+    public function getTemplateRotationAttribute(): array
+    {
+        $settings = $this->settings ?? [];
+        $codes = $settings['template_rotation'] ?? [];
+
+        if (! is_array($codes)) {
+            return [];
+        }
+
+        return array_values(array_filter(array_map(
+            static fn ($c) => trim((string) $c),
+            $codes,
+        ), static fn ($c) => $c !== ''));
+    }
+
+    /**
+     * Форма для конкретного поста.
+     *
+     * Выбираем по НОМЕРУ ПОСТА, а не случайно и не по порядку в очереди:
+     * пересборка подписи (правка текста, перенос на другой день) не должна
+     * менять форму — иначе владелец видит, как пост «прыгает» между видами,
+     * и не понимает, от чего это.
+     */
+    public function templateCodeForItem(?int $itemId): string
+    {
+        $rotation = $this->template_rotation;
+        if ($rotation === [] || $itemId === null) {
+            return $this->template_code;
+        }
+
+        return $rotation[$itemId % count($rotation)];
+    }
+
     public function items()
     {
         return $this->hasMany(TelegramChatBroadcastItem::class, 'broadcast_id');

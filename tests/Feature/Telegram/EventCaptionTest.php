@@ -204,12 +204,80 @@ class EventCaptionTest extends TestCase
         return CarbonImmutable::parse('2026-09-15 06:00:00', 'Europe/Moscow');
     }
 
+    // ------------------------------------------------------------------
+    // Цена со ссылкой: где она встаёт в разных формах поста
+    // ------------------------------------------------------------------
+
+    private function paidEvent(): Event
+    {
+        return $this->makeEvent(
+            tgDescription: 'Бим ждёт и верит, пока люди решают свои дела.',
+            priceStatus: 'external',
+            priceUrl: 'https://tickets.example/bim',
+            priceText: 'Билеты уже в продаже',
+        );
+    }
+
+    /** Цена отдельной строкой — как в нынешних шаблонах. */
+    public function test_price_line_becomes_a_link(): void
+    {
+        $body = "🎟 <b>{title}</b>\n{lead}\n\n📍 {address}\n🗓 {start_time|human}\n💸 {price_label}";
+
+        $caption = $this->builder()->buildWithBody($this->paidEvent(), $body, $this->asOf());
+
+        $this->assertStringContainsString('💸 <a href="https://tickets.example/bim">Билеты уже в продаже</a>', $caption);
+    }
+
+    /**
+     * Цена ВНУТРИ строки — форма с заходом фразой, где место, время и цена
+     * идут одной строкой через точку.
+     *
+     * Раньше ссылка не подставлялась, а дописывалась отдельной строкой В САМОМ
+     * КОНЦЕ, после ссылок на сайт: форма выглядела сломанной, и завести её было
+     * нельзя. Проверено на живом событии 22.09.2026.
+     */
+    public function test_inline_price_stays_in_place(): void
+    {
+        $body = "{lead}\n\n🎟 <b>{title}</b>\n📍 {address} · 🗓 {start_time|human} · 💸 {price_label}";
+
+        $caption = $this->builder()->buildWithBody($this->paidEvent(), $body, $this->asOf());
+        $lines = explode("\n", $caption);
+
+        $this->assertStringContainsString('💸 <a href="https://tickets.example/bim">', $caption);
+        // Ссылка осталась в своей строке, а не уехала в хвост.
+        $this->assertStringContainsString('📍', $lines[3] ?? '');
+        $this->assertStringContainsString('tickets.example', $lines[3] ?? '');
+    }
+
+    /** Эмодзи не дублируется: в шаблоне оно уже стоит перед подписью. */
+    public function test_inline_price_does_not_double_the_emoji(): void
+    {
+        $body = "🎟 <b>{title}</b>\n📍 {address} · 💸 {price_label}";
+
+        $caption = $this->builder()->buildWithBody($this->paidEvent(), $body, $this->asOf());
+
+        $this->assertSame(1, mb_substr_count($caption, '💸'));
+    }
+
+    /** Подписи цены в шаблоне нет вовсе — ссылка всё равно не теряется. */
+    public function test_price_link_is_not_lost_when_template_has_no_price(): void
+    {
+        $body = "🎟 <b>{title}</b>\n📍 {address}";
+
+        $caption = $this->builder()->buildWithBody($this->paidEvent(), $body, $this->asOf());
+
+        $this->assertStringContainsString('tickets.example', $caption);
+    }
+
     private function makeEvent(
         ?string $venueName = null,
         string $address = 'г Воронеж, ул Мира, д 1',
         string $city = 'Воронеж',
         ?string $tgDescription = null,
         ?string $description = null,
+        ?string $priceStatus = null,
+        ?string $priceUrl = null,
+        ?string $priceText = null,
     ): Event {
         $cityRow = City::query()->where('slug', 'voronezh')->first();
         if ($cityRow === null) {
@@ -249,6 +317,11 @@ class EventCaptionTest extends TestCase
         $event->start_date = '2026-09-16';
         $event->tg_description = $tgDescription;
         $event->description = $description;
+        if ($priceStatus !== null) {
+            $event->price_status = $priceStatus;
+            $event->price_url = $priceUrl;
+            $event->price_text = $priceText;
+        }
         $event->save();
 
         return $event->fresh();

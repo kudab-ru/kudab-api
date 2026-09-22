@@ -564,19 +564,37 @@ final class EventCaptionBuilder
             $text = rtrim(mb_substr($text, 0, 119))."\u{2026}";
         }
 
-        $anchor = '💸 <a href="'.htmlspecialchars($href, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'">'
+        $anchor = '<a href="'.htmlspecialchars($href, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'">'
             .htmlspecialchars($text, ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8').'</a>';
 
+        // 1. Цена отдельной строкой «💸 {price_label}» — заменяем строку целиком.
         $lines = explode("\n", $caption);
         foreach ($lines as $i => $line) {
             if (str_starts_with(ltrim($line), '💸')) {
-                $lines[$i] = $anchor;
+                $lines[$i] = '💸 '.$anchor;
 
                 return trim(implode("\n", $lines));
             }
         }
 
-        return trim($caption."\n".$anchor);
+        // 2. Цена стоит ВНУТРИ строки — например «📍 место · 🗓 время · 💸 {price_label}»
+        // или вовсе без эмодзи. Раньше такие шаблоны молча получали ссылку
+        // отдельной строкой В САМОМ КОНЦЕ, после ссылок на сайт: форма с заходом
+        // фразой выглядела сломанной. Подставляем на место самой подписи, ничего
+        // вокруг не трогая, — эмодзи в шаблоне уже стоит, свой не добавляем.
+        $label = trim((string) ($ctx['price_label'] ?? ''));
+        if ($label !== '' && str_contains($caption, $label)) {
+            $pos = mb_strpos($caption, $label);
+
+            return trim(
+                mb_substr($caption, 0, $pos)
+                .$anchor
+                .mb_substr($caption, $pos + mb_strlen($label))
+            );
+        }
+
+        // 3. Подписи в шаблоне нет вовсе — дописываем, чтобы ссылка не пропала.
+        return trim($caption."\n".'💸 '.$anchor);
     }
 
     /**

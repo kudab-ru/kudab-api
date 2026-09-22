@@ -163,9 +163,18 @@ final class SourceOverview
         $out = [];
         foreach (DB::table('source_configs')->orderBy('source_slug')->get() as $cfg) {
             $slug = (string) $cfg->source_slug;
-            $linkId = (int) DB::table('community_social_links')
-                ->where('social_network_id', $netBySlug[$slug] ?? 0)
-                ->value('id');
+            // Ссылку ищем по внешнему идентификатору, если он совпадает со
+            // слагом источника, и только потом — по номеру соцсети. Поиск по ВК
+            // живёт в сети «ВКонтакте» вместе с сотней пабликов, и по номеру
+            // сети находилась бы ЧУЖАЯ ссылка; без записи в карте слагов не
+            // находилось вовсе — строка всегда показывала ноль событий,
+            // сколько бы их ни пришло.
+            $linkId = (int) (DB::table('community_social_links')
+                ->where('external_community_id', $slug)
+                ->value('id')
+                ?? DB::table('community_social_links')
+                    ->where('social_network_id', $netBySlug[$slug] ?? 0)
+                    ->value('id'));
             $c = $cards[$linkId] ?? ['ahead' => 0, 'd30' => 0, 'last_event_at' => null];
 
             $sections = $this->sections($cfg);
@@ -183,7 +192,11 @@ final class SourceOverview
                 kindLabel: $slug === 'vk_search' ? 'Поиск' : 'Афиша-агрегатор',
                 enabled: (bool) $cfg->enabled,
                 cards: $c,
-                lastCollectedAt: $runs[$slug] ?? null,
+                // Журнала заходов может не быть вовсе: поиск по ВК не пишет
+                // source_runs. Без запасного варианта строка говорила «не
+                // запускался» рядом с ненулевым числом карточек — то же
+                // противоречие, что было у Qtickets.
+                lastCollectedAt: $runs[$slug] ?? $c['last_event_at'],
                 url: null,
                 sections: $sections,
                 extraNote: $note,
