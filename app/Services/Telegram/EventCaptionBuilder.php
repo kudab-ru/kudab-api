@@ -119,6 +119,51 @@ final class EventCaptionBuilder
     }
 
     /**
+     * Эмодзи по теме события — как у московского агрегатора, где значок
+     * поддерживает название («Фонтаны на ВДНХ ⛲»).
+     *
+     * Никакой модели: сначала смотрим слова в названии (они точнее), потом
+     * падаем на content_kind. Незнакомая тема остаётся БЕЗ значка — лучше
+     * пусто, чем случайный: ✨ у панихиды читается издевательством.
+     *
+     * @param  array<string, mixed>  $raw
+     */
+    private static function kindEmoji(array $raw): string
+    {
+        $title = mb_strtolower((string) ($raw['title'] ?? $raw['name'] ?? ''));
+
+        $byWord = [
+            '🎭' => ['спектакл', 'театр', 'моноспектакл', 'премьер'],
+            '🎵' => ['концерт', 'джаз', 'рок-', 'симфон', 'оркестр', 'квартирник'],
+            '🎤' => ['стендап', 'открытый микрофон', 'караоке'],
+            '🖼' => ['выставк', 'экспозиц', 'галере', 'вернисаж'],
+            '🎬' => ['кинопоказ', 'киноклуб', 'фильм', 'кино'],
+            '🧩' => ['квест', 'игротек', 'настолк', 'квиз'],
+            '🏃' => ['забег', 'марафон', 'турнир', 'матч', 'чемпионат'],
+            '🛍' => ['маркет', 'ярмарк', 'барахолк', 'своп'],
+            '🌳' => ['экскурс', 'прогулк', 'парк'],
+            '🧸' => ['для детей', 'детск', 'малыш'],
+            '💬' => ['лекци', 'встреч', 'дискусс', 'мастер-класс'],
+        ];
+
+        foreach ($byWord as $emoji => $words) {
+            foreach ($words as $word) {
+                if ($word !== '' && mb_strpos($title, $word) !== false) {
+                    return $emoji;
+                }
+            }
+        }
+
+        return match ((string) ($raw['content_kind'] ?? '')) {
+            'culture' => '🎭',
+            'education' => '💬',
+            'sport' => '🏃',
+            'civic' => '🏛',
+            default => '',
+        };
+    }
+
+    /**
      * @param  array<string, mixed>  $raw
      */
     private function assemble(
@@ -225,6 +270,7 @@ final class EventCaptionBuilder
             'place' => $locSafe,
             'location' => $locSafe,
             'start_time' => $this->startHuman($raw, $asOf),
+            'kind_emoji' => self::kindEmoji($raw),
             'price_label' => $this->priceLabel($raw, $canonicalUrl),
             'price_url' => trim((string) ($raw['price_url'] ?? '')),
             'price_status' => trim((string) ($raw['price_status'] ?? '')),
