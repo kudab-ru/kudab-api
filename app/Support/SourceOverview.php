@@ -86,6 +86,107 @@ final class SourceOverview
         return $out;
     }
 
+    /**
+     * Ссылка-источник → к какому источнику она относится.
+     *
+     * Та же раскладка, что и у строк списка, только вывернутая наизнанку: там
+     * источник ищет свои ссылки, здесь ссылка ищет свой источник. Нужна
+     * аналитике роста, которая идёт от события (а значит, от ссылки) к
+     * источнику, и обязана раскладывать их ровно так же, как страница
+     * источников, — иначе два экрана начнут называть одно и то же разными
+     * словами.
+     *
+     * Ключ сети — «vk»/«tg», а не «net:1»: числовой номер соцсети наружу не
+     * выходит, а подпись читает человек.
+     *
+     * @return array<int,array{key:string,label:string}>
+     */
+    public function sourceByLink(): array
+    {
+        $out = [];
+
+        $siteLinks = $this->siteLinkIds();
+        foreach (DB::table('source_profiles')->get() as $p) {
+            $linkId = (int) ($siteLinks[$p->slug] ?? 0);
+            if ($linkId !== 0) {
+                $out[$linkId] = ['key' => 'site:'.$p->slug, 'label' => (string) $p->name];
+            }
+        }
+
+        $names = [
+            'yandex_afisha' => 'Яндекс.Афиша',
+            'qtickets' => 'Qtickets',
+            'vk_search' => 'Поиск по ВКонтакте',
+        ];
+        $netBySlug = ['yandex_afisha' => 4, 'qtickets' => 5];
+        foreach (DB::table('source_configs')->get() as $cfg) {
+            $slug = (string) $cfg->source_slug;
+            $linkId = $this->configLinkId($slug, $netBySlug[$slug] ?? 0);
+            if ($linkId !== 0) {
+                $out[$linkId] = ['key' => $slug, 'label' => $names[$slug] ?? $slug];
+            }
+        }
+
+        $builtin = $this->builtinLinkId();
+        if ($builtin !== 0 && ! isset($out[$builtin])) {
+            $out[$builtin] = ['key' => 'qtickets', 'label' => 'Qtickets'];
+        }
+
+        // Сети идут последними и переписывают всё, что совпало: сообщество ВК
+        // — это всегда ВК, чем бы ещё ни оказалась его ссылка.
+        $netKeys = [1 => 'vk', 2 => 'tg'];
+        foreach (self::AGGREGATE_NETWORKS as $netId => $label) {
+            foreach ($this->networkLinkIds($netId) as $linkId) {
+                $out[(int) $linkId] = ['key' => $netKeys[$netId] ?? 'net:'.$netId, 'label' => $label];
+            }
+        }
+
+        return $out;
+    }
+
+    /** Сайты-источники: слаг профиля → ссылка. @return array<string,int> */
+    private function siteLinkIds(): array
+    {
+        return DB::table('community_social_links')
+            ->where('social_network_id', 3)
+            ->pluck('id', 'external_community_id')
+            ->all();
+    }
+
+    /**
+     * Ссылку ищем по внешнему идентификатору, если он совпадает со слагом
+     * источника, и только потом — по номеру соцсети. Поиск по ВК живёт в сети
+     * «ВКонтакте» вместе с сотней пабликов, и по номеру сети находилась бы
+     * ЧУЖАЯ ссылка; без записи в карте слагов не находилось вовсе — строка
+     * всегда показывала ноль событий, сколько бы их ни пришло.
+     */
+    private function configLinkId(string $slug, int $networkId): int
+    {
+        return (int) (DB::table('community_social_links')
+            ->where('external_community_id', $slug)
+            ->value('id')
+            ?? DB::table('community_social_links')
+                ->where('social_network_id', $networkId)
+                ->value('id'));
+    }
+
+    /** Qtickets: встроенный источник, своей строки в source_configs нет. */
+    private function builtinLinkId(): int
+    {
+        return (int) DB::table('community_social_links')->where('social_network_id', 5)->value('id');
+    }
+
+    /** Ссылки сети, у которых сообщество стоит в активном городе. @return list<int> */
+    private function networkLinkIds(int $netId): array
+    {
+        return array_map('intval', DB::table('community_social_links as l')
+            ->join('communities as c', 'c.id', '=', 'l.community_id')
+            ->join('cities as ci', 'ci.id', '=', 'c.city_id')
+            ->where('l.social_network_id', $netId)
+            ->where('ci.status', 'active')
+            ->pluck('l.id')->all());
+    }
+
     /** Последний ЗАВЕРШЁННЫЙ заход по каждому slug профиля/конфига. */
     private function lastRuns(): array
     {
@@ -125,9 +226,7 @@ final class SourceOverview
     private function siteRows(array $cards): array
     {
         $runs = $this->lastRuns();
-        $links = DB::table('community_social_links')
-            ->where('social_network_id', 3)
-            ->pluck('id', 'external_community_id');
+        $links = $this->siteLinkIds();
 
         $out = [];
         foreach (DB::table('source_profiles')->orderBy('name')->get() as $p) {
@@ -163,18 +262,7 @@ final class SourceOverview
         $out = [];
         foreach (DB::table('source_configs')->orderBy('source_slug')->get() as $cfg) {
             $slug = (string) $cfg->source_slug;
-            // Ссылку ищем по внешнему идентификатору, если он совпадает со
-            // слагом источника, и только потом — по номеру соцсети. Поиск по ВК
-            // живёт в сети «ВКонтакте» вместе с сотней пабликов, и по номеру
-            // сети находилась бы ЧУЖАЯ ссылка; без записи в карте слагов не
-            // находилось вовсе — строка всегда показывала ноль событий,
-            // сколько бы их ни пришло.
-            $linkId = (int) (DB::table('community_social_links')
-                ->where('external_community_id', $slug)
-                ->value('id')
-                ?? DB::table('community_social_links')
-                    ->where('social_network_id', $netBySlug[$slug] ?? 0)
-                    ->value('id'));
+            $linkId = $this->configLinkId($slug, $netBySlug[$slug] ?? 0);
             $c = $cards[$linkId] ?? ['ahead' => 0, 'd30' => 0, 'last_event_at' => null];
 
             $sections = $this->sections($cfg);
@@ -212,7 +300,7 @@ final class SourceOverview
      */
     private function builtinRows(array $cards): array
     {
-        $linkId = (int) DB::table('community_social_links')->where('social_network_id', 5)->value('id');
+        $linkId = $this->builtinLinkId();
         if ($linkId === 0) {
             return [];
         }
@@ -277,12 +365,7 @@ final class SourceOverview
     {
         $out = [];
         foreach (self::AGGREGATE_NETWORKS as $netId => $label) {
-            $links = DB::table('community_social_links as l')
-                ->join('communities as c', 'c.id', '=', 'l.community_id')
-                ->join('cities as ci', 'ci.id', '=', 'c.city_id')
-                ->where('l.social_network_id', $netId)
-                ->where('ci.status', 'active')
-                ->pluck('l.id')->all();
+            $links = $this->networkLinkIds($netId);
 
             if ($links === []) {
                 continue;

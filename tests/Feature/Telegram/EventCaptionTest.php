@@ -140,7 +140,10 @@ class EventCaptionTest extends TestCase
         // стоял у каждого поста одинаково. Вместо него значок по теме.
         $this->assertStringContainsString('<b>Концерт «Лики эпохи»</b>', $lines[0]);
         $this->assertStringNotContainsString('🎟', $lines[0]);
-        $this->assertSame('Фатальное танго и молитва — всё в один вечер.', $lines[1]);
+        // Под названием пустая строка: название это заголовок, и оно получает
+        // воздух. Все три формы теперь открываются одинаково.
+        $this->assertSame('', $lines[1]);
+        $this->assertSame('Фатальное танго и молитва — всё в один вечер.', $lines[2]);
     }
 
     /**
@@ -169,7 +172,8 @@ class EventCaptionTest extends TestCase
         $lines = explode("\n", $this->builder()->build($event, 'basic', $this->asOf()));
 
         $this->assertStringContainsString('<b>Концерт «Лики эпохи»</b>', $lines[0]);
-        $this->assertSame('Приглашаем вас на ток-шоу с участием известных гостей.', $lines[1]);
+        $this->assertSame('', $lines[1]);
+        $this->assertSame('Приглашаем вас на ток-шоу с участием известных гостей.', $lines[2]);
     }
 
     /**

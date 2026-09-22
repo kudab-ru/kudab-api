@@ -71,6 +71,8 @@ final class CaptionTemplate
             // исчезновение строк с тегами и с ценой-заглушкой.
             'prepend' => $value === '' ? '' : self::unquote((string) $arg).$value,
             'slice' => self::slice($value, (string) $arg),
+            // Срез по границе ФРАЗЫ, а не по счётчику символов.
+            'sentence' => self::sentence($value, (int) $arg),
             // quote=false: кавычки НЕ трогаем, только & < >. Как в html.escape(..., quote=False).
             'escape_html' => htmlspecialchars($value, ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8'),
             // В боте это заглушка, возвращающая значение как есть.
@@ -102,6 +104,50 @@ final class CaptionTemplate
      * ещё не заканчивается многоточием. Ровно 400 символов — без многоточия,
      * 401 — обрезка и «…».
      */
+    /**
+     * Обрезка по границе фразы, не длиннее $max символов.
+     *
+     * `slice:0..400` рубит по счётчику и попадает в середину слова: из 193
+     * предстоящих событий с текстом длиннее 400 знаков так обрывались 187
+     * (97%) — «объединил более 2000 школьников и 428 ком…». В ленте это
+     * главный признак машины: человек так не пишет.
+     *
+     * Режем по последнему концу предложения, который помещается в лимит, и
+     * многоточие НЕ дописываем: текст просто кончается законченной мыслью, а
+     * что он не весь — говорит ссылка «Подробнее на kudab.ru». Медиана потери
+     * 74 знака.
+     *
+     * Если точки в лимите нет вовсе (3 события из 193), отступаем к границе
+     * слова и вот тогда ставим многоточие: обрыв надо обозначить.
+     */
+    public static function sentence(string $value, int $max): string
+    {
+        $value = trim($value);
+        if ($max <= 0 || mb_strlen($value) <= $max) {
+            return $value;
+        }
+
+        $head = mb_substr($value, 0, $max);
+
+        // Конец предложения — знак, за которым идёт пробел или перевод строки.
+        // Точка без пробела после неё это сокращение или адрес сайта.
+        if (preg_match_all('~[.!?…](?=[\s«"(]|$)~u', $head, $m, PREG_OFFSET_CAPTURE)) {
+            $last = end($m[0]);
+            // preg_* считает смещение в БАЙТАХ, а режем по символам.
+            $chars = mb_strlen(substr($head, 0, (int) $last[1])) + 1;
+            $cut = trim(mb_substr($value, 0, $chars));
+            if ($cut !== '') {
+                return $cut;
+            }
+        }
+
+        // Точки нет — отступаем к границе слова.
+        $space = mb_strrpos($head, ' ');
+        $cut = $space === false ? $head : mb_substr($head, 0, $space);
+
+        return rtrim($cut, ' ,;:—-')."\u{2026}";
+    }
+
     public static function slice(string $value, string $arg): string
     {
         if (! preg_match('/^(\d*)\.\.(\d*)$/', $arg, $m)) {

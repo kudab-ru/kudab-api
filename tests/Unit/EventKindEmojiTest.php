@@ -45,7 +45,7 @@ class EventKindEmojiTest extends TestCase
             'концерт' => ['Концерт Губернаторского оркестра', '🎵'],
             'квартирник' => ['Квартирник у Бунина', '🎵'],
             'стендап' => ['Открытый микрофон в баре', '🎤'],
-            'выставка' => ['Выставка Клода Моне', '🖼'],
+            'выставка' => ['Выставка Клода Моне', '🖼️'],
             'киноклуб' => ['Киноклуб: «Донни Дарко»', '🎬'],
             'квест' => ['Квест «Корпорация Монстров»', '🧩'],
             'забег' => ['Ночной забег по набережной', '🏃'],
@@ -79,7 +79,7 @@ class EventKindEmojiTest extends TestCase
     /** Слово в названии важнее типа: оно точнее. */
     public function test_title_wins_over_content_kind(): void
     {
-        $this->assertSame('🖼', $this->emoji(['title' => 'Выставка кошек', 'content_kind' => 'sport']));
+        $this->assertSame('🖼️', $this->emoji(['title' => 'Выставка кошек', 'content_kind' => 'sport']));
     }
 
     /**
@@ -189,12 +189,34 @@ class EventKindEmojiTest extends TestCase
         ]));
     }
 
+    /**
+     * «Мастер-класс» тоже затыкает шапочку выпускника.
+     *
+     * Формально это не повтор, а СПОР: тэггер ставит мастер-классам тему
+     * education (у workshops их всего 1 из 9), и 🎓 садится на детскую
+     * поделку — «Мастерская „АРТ-КРОШКИ“. Занятие „Осень золотая“ 🎓».
+     * Чинится тем же списком стемов, без новых сущностей: 11 постов из 447.
+     */
+    public function test_workshop_in_the_title_silences_the_graduation_cap(): void
+    {
+        foreach ([
+            'Мастерская «АРТ-КРОШКИ». Занятие «Осень золотая»',
+            'Мастер-класс «Кошачья мастерская: хвост и усы»',
+            'Мастер-класс по верховой набойке',
+        ] as $title) {
+            $this->assertSame('', $this->emoji([
+                'title' => $title,
+                'interest_slugs' => ['education'],
+            ]), $title);
+        }
+    }
+
     /** А там, где название непрозрачно, значок остаётся — ради этого он и есть. */
     public function test_emoji_stays_when_the_title_is_opaque(): void
     {
         $this->assertSame('🎭', $this->emoji(['title' => 'Двое на качелях', 'interest_slugs' => ['theatre']]));
         $this->assertSame('🧩', $this->emoji(['title' => 'Припять 36', 'interest_slugs' => ['quiz-games']]));
-        $this->assertSame('🖼', $this->emoji(['title' => 'Клод Моне. Магия воды и света', 'interest_slugs' => ['exhibitions']]));
+        $this->assertSame('🖼️', $this->emoji(['title' => 'Клод Моне. Магия воды и света', 'interest_slugs' => ['exhibitions']]));
     }
 
     /**

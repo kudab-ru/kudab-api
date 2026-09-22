@@ -27,10 +27,11 @@ class TelegramMessageTemplatesSeeder extends Seeder
      */
     private const BASIC_BODY = <<<'TXT'
 <b>{title}</b> {kind_emoji}
-{text|slice:0..400|escape_html}
+
+{text|sentence:400|escape_html}
 
 📍 {address}
-🗓 {start_time|human}
+🗓️ {start_time|human}
 {price_emoji} {price_label}
 
 {more_link}          {original_link}
@@ -41,10 +42,10 @@ TXT;
 <b>{title}</b> {kind_emoji}
 
 📍 {address}
-🗓 {start_time|human}
+🗓️ {start_time|human}
 {price_emoji} {price_label}
 
-{text|slice:0..400|escape_html}
+{text|sentence:400|escape_html}
 
 {more_link}          {original_link}
 TXT;
@@ -60,7 +61,7 @@ TXT;
 <b>{title}</b> {kind_emoji}
 
 📍 {address}
-🗓 {start_time|human}
+🗓️ {start_time|human}
 {price_emoji} {price_label}
 
 {quote}
@@ -77,7 +78,7 @@ TXT;
 <b>{title}</b> {kind_emoji}
 
 📍 {address}
-🗓 {start_time|human}
+🗓️ {start_time|human}
 {price_emoji} {price_label}
 
 {more_link}          {original_link}
