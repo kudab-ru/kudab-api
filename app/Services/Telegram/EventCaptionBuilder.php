@@ -361,24 +361,6 @@ final class EventCaptionBuilder
     }
 
     /**
-     * Значок для строки цены.
-     *
-     * Бесплатное — самый сильный крючок в афише, и 💸 у него читается как
-     * ошибка: значок денег стоит там, где денег не надо. 🆓 выхватывается
-     * взглядом при листании, а это ровно то, ради чего значки и заводились.
-     *
-     * @param  array<string, mixed>  $raw
-     */
-    private static function priceEmoji(array $raw): string
-    {
-        return match (mb_strtolower(trim((string) ($raw['price_status'] ?? '')))) {
-            'free' => '🆓',
-            'donation' => '🤝',
-            default => '💸',
-        };
-    }
-
-    /**
      * @param  array<string, mixed>  $raw
      */
     private function assemble(
@@ -500,7 +482,6 @@ final class EventCaptionBuilder
             'start_time' => $this->startHuman($raw, $asOf),
             'kind_emoji' => self::kindEmoji($raw),
             'price_label' => $this->priceLabel($raw, $canonicalUrl),
-            'price_emoji' => self::priceEmoji($raw),
             'price_url' => trim((string) ($raw['price_url'] ?? '')),
             'price_status' => trim((string) ($raw['price_status'] ?? '')),
             'price_text' => trim((string) ($raw['price_text'] ?? '')),

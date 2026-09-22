@@ -26,24 +26,24 @@ class TelegramMessageTemplatesSeeder extends Seeder
      * фраза модели есть всего у 15.
      */
     private const BASIC_BODY = <<<'TXT'
-<b>{title}</b> {kind_emoji}
+{kind_emoji} <b>{title}</b>
 
 {text|sentence:400|escape_html}
 
 📍 {address}
 🗓️ {start_time|human}
-{price_emoji} {price_label}
+💸 {price_label}
 
 {more_link}          {original_link}
 TXT;
 
     /** B — текст ПОД строками фактов. */
     private const LEAD_BELOW_BODY = <<<'TXT'
-<b>{title}</b> {kind_emoji}
+{kind_emoji} <b>{title}</b>
 
 📍 {address}
 🗓️ {start_time|human}
-{price_emoji} {price_label}
+💸 {price_label}
 
 {text|sentence:400|escape_html}
 
@@ -58,11 +58,11 @@ TXT;
      * полоска оставалась, текст пропадал.
      */
     private const QUOTE_BODY = <<<'TXT'
-<b>{title}</b> {kind_emoji}
+{kind_emoji} <b>{title}</b>
 
 📍 {address}
 🗓️ {start_time|human}
-{price_emoji} {price_label}
+💸 {price_label}
 
 {quote}
 
@@ -75,11 +75,11 @@ TXT;
      * В чередование не входит, остаётся на случай, когда нужен голый анонс.
      */
     private const SHORT_BODY = <<<'TXT'
-<b>{title}</b> {kind_emoji}
+{kind_emoji} <b>{title}</b>
 
 📍 {address}
 🗓️ {start_time|human}
-{price_emoji} {price_label}
+💸 {price_label}
 
 {more_link}          {original_link}
 TXT;

@@ -30,14 +30,6 @@ class EventKindEmojiTest extends TestCase
         return $m->invoke(null, $raw);
     }
 
-    private function priceEmoji(array $raw): string
-    {
-        $m = (new ReflectionClass(EventCaptionBuilder::class))->getMethod('priceEmoji');
-        $m->setAccessible(true);
-
-        return $m->invoke(null, $raw);
-    }
-
     public static function titles(): array
     {
         return [
@@ -231,18 +223,5 @@ class EventKindEmojiTest extends TestCase
             'interest_slugs' => ['music'],
         ]));
         $this->assertSame('🎸', $this->emoji(['title' => 'Урок в стиле барокко', 'interest_slugs' => ['rock']]));
-    }
-
-    /**
-     * 💸 у бесплатного события читается как ошибка — значок денег там, где
-     * денег не надо. А бесплатное это то, что выхватывают взглядом.
-     */
-    public function test_free_events_get_their_own_price_emoji(): void
-    {
-        $this->assertSame('🆓', $this->priceEmoji(['price_status' => 'free']));
-        $this->assertSame('🤝', $this->priceEmoji(['price_status' => 'donation']));
-        $this->assertSame('💸', $this->priceEmoji(['price_status' => 'range']));
-        $this->assertSame('💸', $this->priceEmoji(['price_status' => 'external']));
-        $this->assertSame('💸', $this->priceEmoji([]));
     }
 }
