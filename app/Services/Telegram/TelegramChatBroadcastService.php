@@ -2096,7 +2096,8 @@ class TelegramChatBroadcastService
         try {
             $item->caption = $this->captionBuilder->build(
                 $event,
-                $broadcast->templateCodeForItem((int) $item->id),
+                // Форма — по дню публикации: весь день одной, назавтра другой.
+                $broadcast->templateCodeForDate($item->publish_at ?? $item->planned_at),
                 $showDay,
                 (int) $item->id,
             );

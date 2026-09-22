@@ -109,11 +109,18 @@ class AdminBroadcastController extends Controller
 
         // Шаблоны отдаём вместе с каналами, чтобы админка не зашивала их
         // список у себя: он живёт в telegram.message_templates.
-        $templates = \App\Models\TelegramMessageTemplate::query()
+        // Коды остаются для совместимости (по ним сохраняется выбор), но рядом
+        // едут человеческие имена: в отметках форм владелец не должен читать
+        // «lead-below» — у каждого шаблона есть название.
+        $templateRows = \App\Models\TelegramMessageTemplate::query()
             ->where('locale', 'ru')
             ->where('is_active', true)
             ->orderBy('code')
-            ->pluck('code')
+            ->get(['code', 'name']);
+
+        $templates = $templateRows->pluck('code')->all();
+        $templateNames = $templateRows
+            ->mapWithKeys(fn ($t) => [(string) $t->code => (string) ($t->name ?: $t->code)])
             ->all();
 
         // Города — оттуда же и по тому же правилу, что резолвит их запись:
@@ -129,7 +136,7 @@ class AdminBroadcastController extends Controller
 
         return response()->json([
             'data' => $rows->map(fn (TelegramChatBroadcast $b) => $this->channelPayload($b))->values(),
-            'meta' => ['templates' => $templates, 'cities' => $cities],
+            'meta' => ['templates' => $templates, 'template_names' => $templateNames, 'cities' => $cities],
         ]);
     }
 
@@ -2951,6 +2958,9 @@ class AdminBroadcastController extends Controller
             'enabled' => ['sometimes', 'boolean'],
             'period' => ['sometimes', 'string', 'max:32'],
             'template_code' => ['sometimes', 'string', 'max:32'],
+            // Формы, которые канал чередует по дням. Пустой список — форма одна.
+            'template_rotation' => ['sometimes', 'array', 'max:5'],
+            'template_rotation.*' => ['string', 'max:32'],
             'feed_limit' => ['sometimes', 'integer', 'min:1', 'max:31'],
             'city_id' => ['sometimes', 'nullable', 'integer'],
             'slots' => ['sometimes', 'array', 'max:'.TelegramChatBroadcast::MAX_SLOTS],
@@ -2988,6 +2998,27 @@ class AdminBroadcastController extends Controller
         }
         if ($request->has('template_code')) {
             $broadcast->template_code = (string) $data['template_code'];
+        }
+        if ($request->has('template_rotation')) {
+            $settings = $broadcast->settings ?? [];
+            $codes = array_values(array_filter(array_map(
+                static fn ($c) => trim((string) $c),
+                (array) $data['template_rotation'],
+            ), static fn ($c) => $c !== ''));
+
+            // Одна форма в списке — это не чередование, а обычный выбор:
+            // храним её как основную и список чистим, иначе в настройках
+            // остаётся включённым режим, которого не видно в постах.
+            if (count($codes) < 2) {
+                unset($settings['template_rotation']);
+                if ($codes !== []) {
+                    $settings['template_code'] = $codes[0];
+                }
+            } else {
+                $settings['template_rotation'] = $codes;
+            }
+
+            $broadcast->settings = $settings;
         }
         if ($request->has('feed_limit')) {
             $broadcast->feed_limit = (int) $data['feed_limit'];
@@ -3308,6 +3339,7 @@ class AdminBroadcastController extends Controller
             'enabled' => (bool) $b->enabled,
             'period' => $b->period,
             'template_code' => $b->template_code,
+            'template_rotation' => $b->template_rotation,
             'feed_limit' => $b->feed_limit,
             // Часы публикации внутри дня по Москве. Пустой список — один пост
             // в день, час берётся из расписания.
