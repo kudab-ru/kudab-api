@@ -2777,9 +2777,21 @@ class AdminBroadcastController extends Controller
             'event_id' => ['nullable', 'integer'],
         ]);
 
+        // Для демо берём событие С ЖИВОЙ ФРАЗОЙ, а не просто ближайшее.
+        //
+        // Формы поста отличаются прежде всего тем, ГДЕ стоит фраза модели. У
+        // ближайшего события её часто нет (квесты и билетные карточки приходят
+        // с одним пресс-релизом), а пресс-релиз во всех формах стоит после
+        // сведений — и демо выглядело одинаковым, сколько шаблон ни переключай.
+        // Ровно так владелец и решил, что предпросмотр сломан.
         $event = isset($data['event_id'])
             ? Event::query()->find((int) $data['event_id'])
-            : Event::query()->active()->upcoming()->orderBy('start_time')->first();
+            : Event::query()->active()->upcoming()
+                ->whereNotNull('tg_description')
+                ->where('tg_description', '<>', '')
+                ->orderBy('start_time')
+                ->first()
+                ?? Event::query()->active()->upcoming()->orderBy('start_time')->first();
 
         if (! $event) {
             return response()->json(['ok' => false, 'error' => 'Не нашёл события для превью.'], 404);
