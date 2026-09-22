@@ -153,7 +153,11 @@ final class SourceOverview
     private function configRows(array $cards): array
     {
         $runs = $this->lastRuns();
-        $names = ['yandex_afisha' => 'Яндекс.Афиша', 'qtickets' => 'Qtickets'];
+        $names = [
+            'yandex_afisha' => 'Яндекс.Афиша',
+            'qtickets' => 'Qtickets',
+            'vk_search' => 'Поиск по ВКонтакте',
+        ];
         $netBySlug = ['yandex_afisha' => 4, 'qtickets' => 5];
 
         $out = [];
@@ -166,15 +170,23 @@ final class SourceOverview
 
             $sections = $this->sections($cfg);
 
+            // Потолок показываем ТОЛЬКО там, где он про деньги: у поиска по ВК
+            // каждый найденный пост — обращение к модели, и это единственная
+            // ручка расхода. Прятать её в env значит сделать расход невидимым.
+            $note = $slug === 'vk_search' && $cfg->listing_limit_per_run !== null
+                ? 'не больше '.(int) $cfg->listing_limit_per_run.' новых постов за прогон — каждый стоит обращения к ИИ'
+                : null;
+
             $out[] = $this->row(
                 key: $slug.':'.$cfg->city_slug,
                 name: $names[$slug] ?? $slug,
-                kindLabel: 'Афиша-агрегатор',
+                kindLabel: $slug === 'vk_search' ? 'Поиск' : 'Афиша-агрегатор',
                 enabled: (bool) $cfg->enabled,
                 cards: $c,
                 lastCollectedAt: $runs[$slug] ?? null,
                 url: null,
                 sections: $sections,
+                extraNote: $note,
             );
         }
 
@@ -338,6 +350,7 @@ final class SourceOverview
         array $sections = [],
         bool $manageable = true,
         ?int $communities = null,
+        ?string $extraNote = null,
     ): array {
         [$state, $note] = $this->state($enabled, $cards, $lastCollectedAt);
 
@@ -357,6 +370,7 @@ final class SourceOverview
             'profile_id' => $profileId,
             'sections' => $sections,
             'communities' => $communities,
+            'note' => $extraNote,
         ];
     }
 }
