@@ -216,6 +216,7 @@ Route::prefix('admin/proxy')
 
 Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('sitemap/events', [WebSitemapController::class, 'events']);
+    Route::get('sitemap/venues', [WebSitemapController::class, 'venues']);
 
     Route::get('ping', fn () => ['ok' => true, 'result' => 'pong']);
     Route::get('events', [WebEventsController::class, 'index']);
