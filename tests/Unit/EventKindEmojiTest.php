@@ -166,6 +166,52 @@ class EventKindEmojiTest extends TestCase
     }
 
     /**
+     * ЗНАЧОК МОЛЧИТ, КОГДА ТЕМА УЖЕ НАЗВАНА СЛОВОМ.
+     *
+     * «Спектакль „Весы“ 🎭» — значок пересказывает первое слово названия. Так
+     * было у 135 событий из 449 (30%); после правила осталось 29 (6%).
+     * Освободившийся слот важнее занять нечем, чем украшением: разбор пятью
+     * углами сошёлся на этом единогласно.
+     */
+    public function test_emoji_is_silent_when_the_title_says_the_theme(): void
+    {
+        $this->assertSame('', $this->emoji([
+            'title' => 'Спектакль «Белый Бим Черное Ухо»',
+            'interest_slugs' => ['theatre'],
+        ]));
+        $this->assertSame('', $this->emoji([
+            'title' => 'Экскурсия «Вселенная театра»',
+            'interest_slugs' => ['excursions', 'theatre'],
+        ]));
+        $this->assertSame('', $this->emoji([
+            'title' => 'Выставка Клода Моне',
+            'interest_slugs' => ['exhibitions'],
+        ]));
+    }
+
+    /** А там, где название непрозрачно, значок остаётся — ради этого он и есть. */
+    public function test_emoji_stays_when_the_title_is_opaque(): void
+    {
+        $this->assertSame('🎭', $this->emoji(['title' => 'Двое на качелях', 'interest_slugs' => ['theatre']]));
+        $this->assertSame('🧩', $this->emoji(['title' => 'Припять 36', 'interest_slugs' => ['quiz-games']]));
+        $this->assertSame('🖼', $this->emoji(['title' => 'Клод Моне. Магия воды и света', 'interest_slugs' => ['exhibitions']]));
+    }
+
+    /**
+     * Стем сверяется с границей слова СЛЕВА. Без этого «лекци» находилось
+     * внутри «коллекция», «рок» — внутри «урок» и «барокко»: значок молчал бы
+     * там, где название темы не называет. На этом уже спотыкался замер.
+     */
+    public function test_stem_does_not_match_inside_another_word(): void
+    {
+        $this->assertSame('🎵', $this->emoji([
+            'title' => 'Золотая коллекция Поля Мориа',
+            'interest_slugs' => ['music'],
+        ]));
+        $this->assertSame('🎸', $this->emoji(['title' => 'Урок в стиле барокко', 'interest_slugs' => ['rock']]));
+    }
+
+    /**
      * 💸 у бесплатного события читается как ошибка — значок денег там, где
      * денег не надо. А бесплатное это то, что выхватывают взглядом.
      */
