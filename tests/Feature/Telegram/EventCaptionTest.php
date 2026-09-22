@@ -227,6 +227,28 @@ class EventCaptionTest extends TestCase
         $this->assertStringNotContainsString('blockquote', $caption);
     }
 
+    /**
+     * Пустой плейсхолдер не оставляет после себя висячий пробел.
+     *
+     * Тело шаблона — «<b>{title}</b> {kind_emoji}». Значок молчит, когда тема
+     * уже названа словом в заголовке, и строка оканчивалась пробелом после
+     * закрывающего тега. Невидимо в коде, видно в клиенте.
+     */
+    public function test_empty_placeholder_leaves_no_trailing_space(): void
+    {
+        $event = $this->makeEvent(
+            venueName: 'Марьяж',
+            address: 'г Воронеж, ул Мира, д 1',
+            tgDescription: 'Фатальное танго и молитва — всё в один вечер.',
+        );
+
+        $caption = $this->builder()->build($event, 'basic', $this->asOf());
+
+        foreach (explode("\n", $caption) as $line) {
+            $this->assertSame(rtrim($line), $line, "строка оканчивается пробелом: [$line]");
+        }
+    }
+
     /** Анонс модели печатается ОДИН раз, а не дважды. */
     public function test_lead_is_not_printed_twice(): void
     {
