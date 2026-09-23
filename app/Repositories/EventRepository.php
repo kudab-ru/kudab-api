@@ -2529,10 +2529,19 @@ class EventRepository
                     continue; // предстоящих дней уже набрали лимит
                 }
 
+                // МСК с offset, как у верхнего start_at в WebEventResource, а НЕ
+                // UTC-Z. Фронт местами вырезает часы прямо из строки
+                // (EventFeedSeoList, VenueSchedule, KTicketCard — семь мест), и
+                // у даты серии в UTC это давало время на три часа раньше.
+                // Одна и та же серия отдавалась двумя записями сразу: «Бальзаминов»
+                // представителем 2026-09-23T19:00:00+03:00, а датами серии
+                // 2026-09-24T16:00:00.000000Z — тот же вечер, другая запись.
                 $startAt = null;
                 if (! empty($r->start_time)) {
                     try {
-                        $startAt = CarbonImmutable::parse($r->start_time)->toISOString();
+                        $startAt = CarbonImmutable::parse($r->start_time)
+                            ->setTimezone('Europe/Moscow')
+                            ->toIso8601String();
                     } catch (\Throwable $e) {
                         $startAt = null;
                     }
@@ -2626,8 +2635,14 @@ class EventRepository
                         'stable_time' => $this->stableTimeMsk($meta['stable_time'] ?? null),
                         'dow' => isset($meta['dow']) ? (int) $meta['dow'] : null,
                         'last' => $meta['last'] ?? null,
+                        // МСК с offset — как stable_time выше и как даты серии:
+                        // поле пока не читается фронтом, но отдавать его в UTC
+                        // значит готовить то же «врёт на три часа» следующему,
+                        // кто им воспользуется.
                         'next_at' => $s->next_at !== null
-                            ? CarbonImmutable::parse((string) $s->next_at)->toISOString()
+                            ? CarbonImmutable::parse((string) $s->next_at)
+                                ->setTimezone('Europe/Moscow')
+                                ->toIso8601String()
                             : null,
                     ]);
                 }
@@ -2919,9 +2934,12 @@ class EventRepository
                 }
 
                 $startAt = null;
+                // МСК с offset — по той же причине, что и у дат серии выше.
                 if (! empty($r->start_time)) {
                     try {
-                        $startAt = CarbonImmutable::parse($r->start_time)->toISOString();
+                        $startAt = CarbonImmutable::parse($r->start_time)
+                            ->setTimezone('Europe/Moscow')
+                            ->toIso8601String();
                     } catch (\Throwable $ex) {
                         $startAt = null;
                     }

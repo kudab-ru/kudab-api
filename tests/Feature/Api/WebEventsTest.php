@@ -1067,6 +1067,65 @@ class WebEventsTest extends TestCase
         ]);
     }
 
+    /**
+     * ДАТЫ СЕРИИ ОТДАЮТСЯ В МСК, как и верхний start_at.
+     *
+     * Фронт местами вырезает часы прямо из строки — EventFeedSeoList,
+     * VenueSchedule, KTicketCard, всего семь мест. Даты серии собирались через
+     * toISOString(), то есть в UTC с микросекундами, и одна и та же серия
+     * уезжала двумя записями сразу: «Бальзаминов» представителем
+     * 2026-09-23T19:00:00+03:00, а датами серии 2026-09-24T16:00:00.000000Z —
+     * тот же вечер, другой формат и время на три часа раньше при срезе.
+     */
+    public function test_group_dates_use_moscow_offset_like_the_top_level(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-23 06:00:00', 'Europe/Moscow'));
+
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.20, 51.67);
+        $community = $this->createCommunity($city->id, 'Театр');
+
+        $first = $this->createEvent($city->id, $community->id, 'Бальзаминов', Carbon::parse('2026-09-23 19:00:00', 'Europe/Moscow'));
+        $second = $this->createEvent($city->id, $community->id, 'Бальзаминов', Carbon::parse('2026-09-24 19:00:00', 'Europe/Moscow'));
+
+        $groupId = DB::table('event_groups')->insertGetId([
+            'community_id' => $community->id,
+            'city_id' => $city->id,
+            'group_key' => 'eg:test:balzaminov',
+            'title_norm' => 'бальзаминов',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('events')->whereIn('id', [$first->id, $second->id])->update(['event_group_id' => $groupId]);
+
+        $data = $this->getJson('/api/web/events?city=voronezh&grouped=1')->assertOk()->json('data');
+
+        $row = collect($data)->firstWhere('title', 'Бальзаминов');
+        $this->assertNotNull($row, 'карточка серии не пришла');
+
+        $dates = $row['group']['dates'] ?? [];
+        $this->assertNotEmpty($dates, 'дат серии нет — проверять нечего');
+
+        // Верхний start_at — эталон: фронт читает оба поля одним кодом, и
+        // разойтись они не имеют права.
+        $top = (string) $row['start_at'];
+        $this->assertStringEndsWith('+03:00', $top);
+
+        foreach ($dates as $d) {
+            $startAt = $d['start_at'] ?? null;
+            if ($startAt === null) {
+                continue;
+            }
+
+            $this->assertStringEndsWith('+03:00', $startAt, 'дата серии отдана не в МСК: '.$startAt);
+            $this->assertStringNotContainsString('.000000', $startAt, 'микросекунды в дате серии: '.$startAt);
+            $this->assertSame(
+                substr($top, 11, 5),
+                substr($startAt, 11, 5),
+                'срез часов у даты серии расходится с верхним start_at: '.$startAt.' против '.$top,
+            );
+        }
+    }
+
     private function createEvent(int $cityId, int $communityId, string $title, Carbon $startTime, ?int $venueId = null): Event
     {
         $event = new Event;
