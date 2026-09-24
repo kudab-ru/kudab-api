@@ -581,6 +581,10 @@ class AdminBroadcastController extends Controller
             $item->claimed_at = null;
             $item->claim_token = null;
             $item->publish_at = Carbon::now();
+            // Вне сетки: момент поста — «сейчас», а не слот. Без признака
+            // занятость слота считалась бы по ЧАСУ нажатия, и кнопка,
+            // нажатая в 19:05 при слоте 19:00, съедала бы вечерний пост.
+            $item->is_off_grid = true;
             if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
                 $item->caption = null;
                 $item->caption_source = null;
@@ -2290,6 +2294,9 @@ class AdminBroadcastController extends Controller
 
         $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
         $item->publish_at = Carbon::now();
+        // Вне сетки — как и у публикации предложения выше: пост уходит сейчас,
+        // а слот своего дня остаётся свободным для запланированного.
+        $item->is_off_grid = true;
         $item->planned_at = $waitForText
             ? Carbon::now()->addMinutes($this->textGraceMinutes())
             // Придержку снимаем: она ждала генерации текста, а текст уже есть.
@@ -3597,6 +3604,11 @@ class AdminBroadcastController extends Controller
                 && $i->posted_at === null
                 && $i->publish_at !== null
                 && ! PostTiming::fits($event, Carbon::parse($i->publish_at)),
+            // Пост ушёл кнопкой «сейчас», а не по расписанию. Сетке это нужно,
+            // чтобы НЕ класть его в клетку дня: у него нет слота, у него есть
+            // момент. Без признака такой пост занимал первую свободную клетку
+            // и выглядел запланированным.
+            'is_off_grid' => (bool) $i->is_off_grid,
             'event_address' => $event?->address,
             'event_city' => $event?->city,
             'price_status' => $event?->price_status,

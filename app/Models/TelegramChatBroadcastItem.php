@@ -37,6 +37,7 @@ class TelegramChatBroadcastItem extends Model
         'claim_token',
         'caption_source',
         'is_pinned',
+        'is_off_grid',
         'text_requested_at',
         'text_hint',
         'edited_at',
@@ -68,6 +69,7 @@ class TelegramChatBroadcastItem extends Model
         'reactions_meta' => 'array',
         'reactions_at' => 'datetime',
         'is_pinned' => 'bool',
+        'is_off_grid' => 'bool',
         // NULL = собрать автоматически; массив = ровно эти картинки.
         'photo_urls' => 'array',
     ];

@@ -1010,6 +1010,73 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
+    /**
+     * ПОСТ ВНЕ ОЧЕРЕДИ СЛОТ НЕ ЗАНИМАЕТ.
+     *
+     * Кнопка «отправить сейчас» ставит publish_at = now(), и дальше судьбу
+     * решал ЧАС нажатия: занятость считается ключом «дата + час», поэтому при
+     * слотах 10 и 19 нажатие в 18:37 проходило мимо, а в 19:05 попадало прямо
+     * в вечерний слот — и автонаполнение его пропускало. Пост, отправленный
+     * вне очереди, съедал запланированный, причём через раз, отчего выглядело
+     * это непредсказуемо.
+     */
+    public function test_off_grid_post_does_not_take_a_slot(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 16:05:00', 'UTC')); // 19:05 МСК
+
+        [$broadcast, $events] = $this->channelWithEvents(6);
+        $broadcast->slots = [10, 19];
+        $broadcast->horizon_days = 1;
+        $broadcast->save();
+
+        // Нажали «сейчас» ровно в час вечернего слота.
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $broadcast->id;
+        $item->event_id = $events[0]->id;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = Carbon::now();
+        $item->is_off_grid = true;
+        $item->save();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $hours = $this->publishHours($broadcast->id);
+
+        $this->assertContains(19, $hours, 'вечерний слот обязан быть заполнен: пост вне очереди его не занимает');
+
+        Carbon::setTestNow();
+    }
+
+    /** А запланированный на тот же час — занимает, как и раньше. */
+    public function test_scheduled_post_still_takes_its_slot(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 16:05:00', 'UTC')); // 19:05 МСК
+
+        [$broadcast, $events] = $this->channelWithEvents(6);
+        $broadcast->slots = [10, 19];
+        $broadcast->horizon_days = 1;
+        $broadcast->save();
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $broadcast->id;
+        $item->event_id = $events[0]->id;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = Carbon::now();
+        $item->is_off_grid = false;
+        $item->save();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $occupied = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereRaw("to_char(publish_at at time zone 'Europe/Moscow', 'HH24') = '19'")
+            ->count();
+
+        $this->assertSame(1, $occupied, 'на 19 часов должен остаться ровно один пост — тот, что уже стоял');
+
+        Carbon::setTestNow();
+    }
+
     private function channelWithEvents(int $count): array
     {
         $city = $this->insertCity();
@@ -1206,6 +1273,7 @@ class BroadcastSlotsTest extends TestCase
 
         return City::query()->where('slug', 'voronezh')->firstOrFail();
     }
+
     /**
      * Перетаскивание в вечерний слот не меняется местами с утренним.
      *

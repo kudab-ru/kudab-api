@@ -2190,6 +2190,10 @@ class TelegramChatBroadcastService
                 TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
             ])
             ->whereNotNull('publish_at')
+            // Посты вне сетки слот НЕ занимают. Их publish_at — это «сейчас»,
+            // момент нажатия кнопки, и попадание в час слота случайно:
+            // нажатие в 18:37 безобидно, а в 19:05 отнимало вечерний пост.
+            ->where('is_off_grid', false)
             ->get(['publish_at', 'event_id']) as $row) {
             $taken[$this->slotKey(Carbon::parse($row->publish_at))] = $row->event_id !== null
                 ? (int) $row->event_id
