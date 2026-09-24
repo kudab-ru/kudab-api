@@ -519,6 +519,63 @@ class BroadcastDigestComposerTest extends TestCase
     }
 
     /**
+     * Состав переизбрали в минуту слота — текст просят заново, пост ждёт.
+     *
+     * Если к моменту отправки прежний состав рассыпался (события удалили или
+     * они начались), подборка собирается заново — и тройка получается ДРУГАЯ.
+     * Раньше на этой ветке текст не заказывался вовсе: подборка уходила в
+     * канал с описаниями, взятыми у сайтов-источников, потому что своих фраз
+     * у новых событий не было.
+     */
+    public function test_repicked_roster_asks_for_text_instead_of_sending_raw_descriptions(): void
+    {
+        $broadcast = $this->makeChannel();
+        // Двенадцать, а не шесть: тема живёт, пока в пуле есть min_events = 5.
+        // Из трёх названных сделаем прошедшие, и остаток обязан набрать тему
+        // заново — иначе подборка просто снимется и проверять будет нечего.
+        foreach (range(1, 12) as $n) {
+            $this->themedEvent("Спектакль {$n}", ($n - 1) % 7 + 1);
+        }
+
+        $digest = $this->digestItem($broadcast, Carbon::now()->subMinute());
+        $service = app(\App\Services\Telegram\TelegramChatBroadcastService::class);
+        $draft = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now(), $digest);
+        $service->applyDigestDraft($digest, $draft);
+
+        // Текст написан под прежнюю тройку.
+        $digest->refresh();
+        $meta = (array) $digest->digest_meta;
+        $meta['intro'] = 'Подводка про прежнюю тройку.';
+        $meta['hooks'] = [];
+        foreach ($draft['event_ids'] as $eventId) {
+            $meta['hooks'][(string) $eventId] = 'Строка про событие '.$eventId.'.';
+        }
+        $meta['roster'] = $draft['event_ids'];
+        $meta['text_asked'] = true;
+        $digest->digest_meta = $meta;
+        $digest->save();
+
+        // Прежний состав рассыпался: названные события уже начались, и
+        // recompose честно отказывается выпускать огрызок.
+        DB::table('events')->whereIn('id', $draft['event_ids'])
+            ->update(['start_time' => Carbon::now()->subHours(2), 'end_time' => Carbon::now()->subHour()]);
+
+        $tasks = $service->collectDueSingleRuns(Carbon::now());
+
+        $this->assertNull(collect($tasks)->firstWhere('item_id', $digest->id),
+            'пост не уходит: текста про новую тройку ещё нет');
+
+        $digest->refresh();
+        $this->assertNotNull($digest->text_requested_at, 'текст заказан заново под новый состав');
+        $this->assertNull($digest->digestIntro(), 'подводка про прежнюю тройку снята');
+
+        $roster = DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $digest->id)->pluck('event_id')->map(fn ($v) => (int) $v)->all();
+        $this->assertNotEmpty($roster, 'новый состав выбран');
+        $this->assertEmpty(array_intersect($roster, $draft['event_ids']), 'и он действительно другой');
+    }
+
+    /**
      * Придержка кончилась, текст написан — пост уходит уже с ним.
      */
     public function test_digest_goes_out_with_the_written_text_after_the_hold(): void
@@ -582,11 +639,15 @@ class BroadcastDigestComposerTest extends TestCase
     }
 
     /**
-     * Сменился состав — подводка снимается.
+     * Сменился состав — подводка снимается, сироты уходят, свои остаются.
      *
-     * Она написана про конкретную тройку («а в субботу…»), и с другим составом
-     * ссылается на то, чего в посте уже нет. Строки про события смену
-     * переживают: они привязаны к id.
+     * Подводка написана про конкретную тройку («а в субботу…»), и с другим
+     * составом ссылается на то, чего в посте уже нет.
+     *
+     * Строки привязаны к номеру события, поэтому судьба у них разная: строка
+     * ОСТАВШЕГОСЯ события по-прежнему про него и переживает замену, а строка
+     * УШЕДШЕГО становится сиротой. Сироту не видно в посте, но по ней запись
+     * считается написанной — и заказ текста молчит для нового события.
      */
     public function test_intro_is_dropped_when_the_roster_changes(): void
     {
@@ -603,7 +664,10 @@ class BroadcastDigestComposerTest extends TestCase
         $digest->refresh();
         $meta = (array) $digest->digest_meta;
         $meta['intro'] = 'Подводка про прежнюю тройку.';
-        $meta['hooks'] = [(string) $draft['event_ids'][0] => 'Строка про своё событие.'];
+        $meta['hooks'] = [];
+        foreach ($draft['event_ids'] as $eventId) {
+            $meta['hooks'][(string) $eventId] = 'Строка про событие '.$eventId.'.';
+        }
         $meta['roster'] = $draft['event_ids'];
         $digest->digest_meta = $meta;
         $digest->save();
@@ -625,8 +689,14 @@ class BroadcastDigestComposerTest extends TestCase
 
         $digest->refresh();
         $this->assertNull($digest->digestIntro(), 'подводка про другую тройку снимается');
-        $this->assertSame('Строка про своё событие.', $digest->digestHook($draft['event_ids'][1] === $changed[1] ? $draft['event_ids'][0] : $draft['event_ids'][0]),
-            'строки про события остаются: они привязаны к id');
+
+        $gone = $draft['event_ids'][0];
+        $stayed = $draft['event_ids'][1];
+
+        $this->assertNull($digest->digestHook($gone),
+            'строка ушедшего события не остаётся сиротой в мете');
+        $this->assertSame('Строка про событие '.$stayed.'.', $digest->digestHook($stayed),
+            'строка оставшегося события переживает замену: она привязана к id');
     }
 
     /**

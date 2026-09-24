@@ -296,6 +296,108 @@ class BroadcastDigestPrepareTest extends TestCase
         $this->assertStringNotContainsString($named[1]['title'], $after, 'выброшенного в тексте больше нет');
     }
 
+    /* ──────── правило: текст написан под ТЕКУЩИЙ состав ──────── */
+
+    /**
+     * Подводка про прежнюю тройку не доезжает до подписи.
+     *
+     * Подводка пишется про состав целиком — «Оля прячется в музыке, Леонард в
+     * псевдониме». Сменилось одно событие, и она говорит о том, чего в посте
+     * нет. Снять её МАЛО: подпись собирается композитором ДО того, как мету
+     * чистят, и в базу ложится текст со старой подводкой, а мета — уже без
+     * неё. Админка показывает одно, в канал уезжает другое.
+     */
+    public function test_intro_written_for_another_roster_never_reaches_the_caption(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $intro = 'Подводка про прежнюю тройку.';
+        $this->writeDigestText($item, array_column($named, 'id'), $intro);
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[1]['id'],
+            'in' => $candidate,
+        ])->assertOk();
+
+        $this->assertStringNotContainsString($intro, (string) $item->fresh()->caption,
+            'подводка под другой состав не уходит в подпись');
+    }
+
+    /** Строка про выброшенное событие уезжает вместе с ним. */
+    public function test_orphaned_hook_leaves_with_its_event(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $this->writeDigestText($item, array_column($named, 'id'));
+        $out = (int) $named[1]['id'];
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $out,
+            'in' => $candidate,
+        ])->assertOk();
+
+        $hooks = (array) (($item->fresh()->digest_meta ?? [])['hooks'] ?? []);
+
+        $this->assertArrayNotHasKey((string) $out, $hooks, 'строка ушедшего события не остаётся сиротой');
+        $this->assertArrayHasKey((string) $named[0]['id'], $hooks, 'строки оставшихся событий переживают замену');
+    }
+
+    /**
+     * Сменился состав — текст заказывают заново.
+     *
+     * Иначе у нового события нет своей строки, и подпись берёт запасной путь:
+     * описание с сайта-источника. Так в канал и уехало сырьё. Молчит заказ
+     * ровно из-за осиротевших строк: по ним запись считается «с текстом».
+     */
+    public function test_channel_asks_for_text_again_after_the_roster_changes(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $this->writeDigestText($item, array_column($named, 'id'));
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[1]['id'],
+            'in' => $candidate,
+        ])->assertOk();
+
+        $this->artisan('broadcast:prepare-digests')->assertSuccessful();
+
+        $this->assertNotNull($item->fresh()->text_requested_at,
+            'заявка на текст ставится заново, раз прежний текст не про этот состав');
+    }
+
+    /**
+     * Подборка с заменённым событием не уходит в канал в тот же тик.
+     *
+     * Последняя дверь перед каналом. Замена состава снимает протухший текст —
+     * но пересборка перед отправкой раньше применяла черновик и тут же
+     * отдавала пост боту: у нового события своей строки нет, и в канал
+     * уезжало описание с сайта-источника, рядом с двумя живыми строками.
+     */
+    public function test_digest_with_a_replaced_event_is_held_instead_of_going_out_raw(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $this->writeDigestText($item, array_column($named, 'id'));
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[1]['id'],
+            'in' => $candidate,
+        ])->assertOk();
+
+        // Слот наступил.
+        $item->refresh();
+        $item->publish_at = Carbon::now()->subMinute();
+        $item->planned_at = null;
+        $item->save();
+
+        $tasks = app(\App\Services\Telegram\TelegramChatBroadcastService::class)
+            ->collectDueSingleRuns(Carbon::now());
+
+        $this->assertNull(collect($tasks)->firstWhere('item_id', $item->id),
+            'пост придержан: текста про новый состав ещё нет');
+
+        $item->refresh();
+        $this->assertNotNull($item->text_requested_at, 'текст заказан заново');
+        $this->assertTrue($item->planned_at?->isFuture(), 'и придержка поставлена');
+    }
+
     /** Флаг cool ставит то же тридцатидневное «не предлагать», что кнопка отказа. */
     public function test_cooled_event_stops_coming_back(): void
     {
@@ -509,6 +611,32 @@ class BroadcastDigestPrepareTest extends TestCase
             ->assertOk()->json('data');
 
         return [$item, $data['named'], (int) $data['candidates'][0]['id']];
+    }
+
+    /**
+     * Сделать то, что делает парсер, написав текст подборки.
+     *
+     * Форма меты взята с живой записи 216: подводка, строки по НОМЕРУ события,
+     * состав, под который всё это написано, и поднятая отметка «заказано».
+     *
+     * @param  list<int>  $roster
+     */
+    private function writeDigestText(TelegramChatBroadcastItem $item, array $roster, string $intro = 'Подводка про эту тройку.'): void
+    {
+        $meta = (array) ($item->fresh()->digest_meta ?? []);
+        $meta['intro'] = $intro;
+        $meta['hooks'] = [];
+        foreach ($roster as $eventId) {
+            $meta['hooks'][(string) $eventId] = 'Строка модели про событие '.$eventId.'.';
+        }
+        $meta['roster'] = array_values(array_map('intval', $roster));
+        $meta['model'] = 'claude-sonnet-4-6';
+        $meta['written_at'] = now()->toIso8601String();
+        $meta['text_asked'] = true;
+
+        $item->digest_meta = $meta;
+        $item->text_requested_at = null;
+        $item->save();
     }
 
     /* ───────────────────────── обстановка ───────────────────────── */

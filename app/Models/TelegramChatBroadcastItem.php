@@ -212,6 +212,65 @@ class TelegramChatBroadcastItem extends Model
     }
 
     /**
+     * Состав, ПОД КОТОРЫЙ написан нынешний текст.
+     *
+     * Пишет его тот, кто пишет текст (парсер, DigestDescribeCommand::store).
+     * Пусто — значит текста под какой-либо состав нет.
+     *
+     * @return list<int>
+     */
+    public function digestTextRoster(): array
+    {
+        $ids = array_values(array_map('intval', (array) ($this->digest_meta['roster'] ?? [])));
+        sort($ids);
+
+        return $ids;
+    }
+
+    /**
+     * Текст написан именно под ЭТОТ состав?
+     *
+     * ГЛАВНОЕ ПРАВИЛО ПОДБОРКИ. Текст и состав живут в разных местах: состав —
+     * в связи «пост → события», текст — в digest_meta, и пишет его вообще
+     * другой сервис. Ничто, кроме этой проверки, не мешает подборке уехать в
+     * канал с текстом про другую тройку — так 24 сентября и вышло: подводка
+     * исчезла, вместо фразы модели уехало описание с чужого сайта, а админка
+     * при этом показывала «текст написан ИИ».
+     *
+     * Сравниваем МНОЖЕСТВА, не порядок: порядок строк расставляет сборка по
+     * датам, и он меняется сам по себе, когда подборку переносят на другой
+     * день.
+     *
+     * @param  list<int>  $eventIds  нынешний состав
+     */
+    public function digestTextCoversRoster(array $eventIds): bool
+    {
+        if (! $this->hasDigestText()) {
+            return false;
+        }
+
+        $now = array_values(array_unique(array_map('intval', $eventIds)));
+        sort($now);
+
+        return $now !== [] && $now === $this->digestTextRoster();
+    }
+
+    /**
+     * Подводка — но только если она про этот состав.
+     *
+     * Отдельно от digestIntro(), потому что в сборке подписи нужна именно
+     * проверенная: композитор зовётся ДО того, как мету успевают почистить, и
+     * без проверки старая подводка попадает в подпись, а из меты потом
+     * исчезает. Админка показывает одно, в канал уходит другое.
+     *
+     * @param  list<int>  $eventIds  нынешний состав
+     */
+    public function digestIntroFor(array $eventIds): ?string
+    {
+        return $this->digestTextCoversRoster($eventIds) ? $this->digestIntro() : null;
+    }
+
+    /**
      * Настройки рассылки для чата.
      */
     public function broadcast(): BelongsTo

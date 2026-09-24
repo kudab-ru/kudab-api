@@ -1182,15 +1182,27 @@ class AdminBroadcastController extends Controller
      * Собрать подборку сейчас: записать текст и состав в саму запись.
      *
      * POST /api/admin/broadcast/items/{id}/compose
+     * Тело: keep_roster — не трогать выбор событий, только пересобрать подпись.
      *
      * Обычно подборка собирается перед отправкой — так в неё попадает вся
      * неделя. Эта ручка нужна, когда человек хочет увидеть и ПОПРАВИТЬ текст
      * заранее: после неё запись перестаёт быть пустой, и перед отправкой
      * пересобираться не будет. Состав тоже фиксируется — названные события
      * закрываются для собственных постов сразу.
+     *
+     * ДВЕ РАЗНЫЕ ОПЕРАЦИИ ПОД ОДНОЙ КНОПКОЙ — так было, и так стоило поста.
+     * «Собрать заново» ПЕРЕИЗБИРАЛО тройку, и вместе с ней обнулялся текст, за
+     * который уже заплачено, и ручная правка подписи. Человек же чаще хочет
+     * другого: тех же событий со свежими ценой, временем и диапазоном дат в
+     * шапке. Это `keep_roster`, и он зовёт recompose — состав не трогается,
+     * строки модели остаются на своих событиях.
      */
-    public function composeDigest(int $itemId): JsonResponse
+    public function composeDigest(Request $request, int $itemId): JsonResponse
     {
+        $data = $request->validate([
+            'keep_roster' => ['sometimes', 'boolean'],
+        ]);
+
         $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
 
         if ($item->kind !== TelegramChatBroadcastItem::KIND_DIGEST) {
@@ -1204,16 +1216,27 @@ class AdminBroadcastController extends Controller
         }
 
         $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($item->broadcast_id);
-        // $item третьим аргументом: иначе повторное нажатие выбирает ДРУГУЮ
-        // тройку — состав, записанный первым нажатием, вычитается как «канал
-        // это уже показывает».
-        $draft = $this->digestComposer->compose($broadcast, $item->publish_at ?? Carbon::now(), $item);
+        $at = $item->publish_at ?? Carbon::now();
+
+        // Держать состав можно только если он есть; у пустой брони держать
+        // нечего, и просьба молча превращается в обычную сборку.
+        $keep = (bool) ($data['keep_roster'] ?? false)
+            && DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->exists();
+
+        $draft = $keep
+            ? $this->digestComposer->recompose($item, $broadcast, $at)
+            // $item третьим аргументом: иначе повторное нажатие выбирает ДРУГУЮ
+            // тройку — состав, записанный первым нажатием, вычитается как «канал
+            // это уже показывает».
+            : $this->digestComposer->compose($broadcast, $at, $item);
 
         if ($draft === null) {
-            return response()->json(['ok' => false, 'error' => 'Ни одна тема не набрала состава — собирать нечего.'], 422);
+            return response()->json(['ok' => false, 'error' => $keep
+                ? 'Состав рассыпался: события удалили или они уже начались. Нужен полный перевыбор.'
+                : 'Ни одна тема не набрала состава — собирать нечего.'], 422);
         }
 
-        $this->rememberManualCaption($item, 'текст собран заново');
+        $this->rememberManualCaption($item, $keep ? 'подпись пересобрана по тому же составу' : 'состав перевыбран заново');
         $this->broadcasts->applyDigestDraft($item, $draft);
 
         return response()->json(['data' => $this->itemPayload($item->fresh(), null, null)]);
@@ -2713,14 +2736,33 @@ class AdminBroadcastController extends Controller
         $item->save();
     }
 
-    /** Стоит ли дать модели написать текст подборке перед отправкой. */
+    /**
+     * Стоит ли дать модели написать текст подборке перед отправкой.
+     *
+     * Спрашиваем про ПОКРЫТИЕ состава, а не про наличие текста — тем же
+     * правилом, что и доставка (TelegramChatBroadcastService::digestWantsText).
+     * Разойдись эти двое, и кнопка «отправить сейчас» уводила бы в канал
+     * текст про прежнюю тройку: одной уцелевшей строки хватало, чтобы запись
+     * считалась написанной.
+     */
     private function digestNeedsText(TelegramChatBroadcastItem $item, ?TelegramChatBroadcast $broadcast): bool
     {
-        return $broadcast !== null
-            && $broadcast->ai_text
-            && $item->kind === TelegramChatBroadcastItem::KIND_DIGEST
-            && $item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL
-            && ! $item->hasDigestText();
+        if ($broadcast === null
+            || ! $broadcast->ai_text
+            || $item->kind !== TelegramChatBroadcastItem::KIND_DIGEST
+            || $item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            return false;
+        }
+
+        $roster = DB::table('telegram.chat_broadcast_item_events as l')
+            ->join('events as e', 'e.id', '=', 'l.event_id')
+            ->where('l.item_id', $item->id)
+            ->whereNull('e.deleted_at')
+            ->pluck('l.event_id')
+            ->map(fn ($v) => (int) $v)
+            ->all();
+
+        return ! $item->digestTextCoversRoster($roster);
     }
 
     /** Шаблоны постов: тексты, которыми собираются все неправленые посты. */
@@ -3553,6 +3595,10 @@ class AdminBroadcastController extends Controller
         ?\App\Models\Venue $venue = null,
         ?int $repeats = null,
     ): array {
+        // Состав подборки нужен дважды: показать его человеку и решить, про
+        // ЭТОТ ли состав написан лежащий текст. Читаем один раз.
+        $linked = $i->kind === TelegramChatBroadcastItem::KIND_DIGEST ? $this->linkedEvents($i) : [];
+
         return [
             'id' => (int) $i->id,
             'kind' => $i->kind ?? 'event',
@@ -3626,7 +3672,11 @@ class AdminBroadcastController extends Controller
             // самой записи. Без этой ветки плашка в админке вечно обещала бы
             // «напишет ИИ», даже когда текст уже написан и стоит в посте.
             'has_ai_text' => match (true) {
-                $i->kind === TelegramChatBroadcastItem::KIND_DIGEST => $i->hasDigestText(),
+                // Не «есть ли текст», а «написан ли он про ЭТОТ состав».
+                // Строки лежат по номеру события, и от прежнего состава
+                // остаются сироты: по ним плашка горела «написано ИИ» у
+                // подборки, где текста про её события нет вовсе.
+                $i->kind === TelegramChatBroadcastItem::KIND_DIGEST => $i->digestTextCoversRoster(array_column($linked, 'id')),
                 $i->kind === TelegramChatBroadcastItem::KIND_VENUE => $venue !== null
                     ? trim((string) $venue->tg_portrait) !== ''
                     : null,
@@ -3685,9 +3735,7 @@ class AdminBroadcastController extends Controller
             },
             // Состав подборки: что именно она называет. Без этого в карточке
             // виден текст, но не видно, какие события он закрыл для ленты.
-            'linked_events' => $i->kind === TelegramChatBroadcastItem::KIND_DIGEST
-                ? $this->linkedEvents($i)
-                : [],
+            'linked_events' => $linked,
             // Состав выбран руками — пересборка ленты его не тронет.
             'photos_manual' => is_array($i->photo_urls),
         ];
@@ -3699,12 +3747,12 @@ class AdminBroadcastController extends Controller
      *
      * @return list<array<string, mixed>>
      */
-    private function linkedEvents(TelegramChatBroadcastItem $i): array
+    private function linkedEvents(TelegramChatBroadcastItem $item): array
     {
         $rows = DB::table('telegram.chat_broadcast_item_events as l')
             ->join('events as e', 'e.id', '=', 'l.event_id')
             ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
-            ->where('l.item_id', $i->id)
+            ->where('l.item_id', $item->id)
             ->orderBy('l.position')
             ->get(['e.id', 'e.title', 'e.start_time', 'v.name as venue_name', 'l.position']);
 
@@ -3718,6 +3766,11 @@ class AdminBroadcastController extends Controller
             'position' => (int) $r->position,
             'id' => (int) $r->id,
             'title' => (string) $r->title,
+            // Есть ли у этой строки фраза модели. Без неё подпись берёт
+            // описание с сайта-источника, и в посте рядом с двумя живыми
+            // строками встаёт пресс-релиз. Глазами это видно только в
+            // превью и только если знать, что искать.
+            'has_hook' => $item->digestHook((int) $r->id) !== null,
             'venue' => VenueName::label($r->venue_name) ?: null,
             'start_time' => $r->start_time ? Carbon::parse($r->start_time)->toIso8601String() : null,
             'url' => $this->siteUrl().'/events/'.$r->id,

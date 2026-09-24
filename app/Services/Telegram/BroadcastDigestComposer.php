@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Services\Telegram;
 
-use App\Models\Event;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Support\Telegram\VenueName;
@@ -52,7 +51,7 @@ final class BroadcastDigestComposer
      * Собрать подборку для канала на момент публикации.
      *
      * @return array{theme: array<string, string>, caption: string, event_ids: list<int>, total: int, venues: int}|null
-     *                                                                                                                 null — ни одна тема не набрала состава; решать, что делать дальше, вызывающему
+     *                                                                                                                  null — ни одна тема не набрала состава; решать, что делать дальше, вызывающему
      */
     public function compose(
         TelegramChatBroadcast $broadcast,
@@ -109,7 +108,7 @@ final class BroadcastDigestComposer
      * именно потому, что текст собрали под один день, а отправили в другой.
      *
      * @return array{theme: array<string, string>, theme_slug: string, caption: string, event_ids: list<int>, total: int, venues: int}|null
-     *                                                                                                                                     null — состав рассыпался (события удалены или прошли) либо темы больше нет: решать вызывающему
+     *                                                                                                                                      null — состав рассыпался (события удалены или прошли) либо темы больше нет: решать вызывающему
      */
     public function recompose(
         TelegramChatBroadcastItem $item,
@@ -832,7 +831,12 @@ final class BroadcastDigestComposer
         // в разные дни»), и та говорила две вещи, которых читатель не просил:
         // хвасталась охватом и пересказывала внутреннее правило отбора. Счёт
         // переехал в подвал, где он работает поводом нажать.
-        $lead = $item?->digestIntro();
+        // ПРОВЕРЕННАЯ подводка, а не любая. Сборка зовётся ДО того, как мету
+        // почистят от текста под прежний состав, — без проверки старая
+        // подводка уходит в подпись, а из меты потом исчезает: в админке
+        // видно одно, в канал уезжает другое.
+        $namedIds = array_map(fn ($r) => (int) $r->id, $picked['named']);
+        $lead = $item?->digestIntroFor($namedIds);
 
         $lines = [];
         $rich = [];
@@ -1134,7 +1138,7 @@ final class BroadcastDigestComposer
             return '';
         }
 
-        return rtrim(mb_substr($sentence, 0, $at), " ,;:—–-").'.';
+        return rtrim(mb_substr($sentence, 0, $at), ' ,;:—–-').'.';
     }
 
     /**
@@ -1161,7 +1165,7 @@ final class BroadcastDigestComposer
             'по', 'за', 'из', 'у', 'к', 'о', 'об', 'для', 'при', 'про', 'что', 'как'];
 
         while (true) {
-            $cut = rtrim($cut, " ,;:—–-");
+            $cut = rtrim($cut, ' ,;:—–-');
             $lastSpace = mb_strrpos($cut, ' ');
             if ($lastSpace === false) {
                 break;
@@ -1173,7 +1177,7 @@ final class BroadcastDigestComposer
             $cut = mb_substr($cut, 0, $lastSpace);
         }
 
-        return rtrim($cut, " ,;:—–-").'…';
+        return rtrim($cut, ' ,;:—–-').'…';
     }
 
     private function priceLabel(object $row): string

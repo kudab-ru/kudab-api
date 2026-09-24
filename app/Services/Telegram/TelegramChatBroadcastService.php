@@ -1218,7 +1218,23 @@ class TelegramChatBroadcastService
         if ($draft === null) {
             // Состав рассыпался (события удалили или они уже начались) — это
             // не повод молчать: собираем заново, как в первый раз.
-            return $this->composeDigest($item, $broadcast, $now);
+            //
+            // «Как в первый раз» — значит и про текст тоже. Состав здесь
+            // ПЕРЕИЗБИРАЕТСЯ, тройка получается другая, и прежний текст про
+            // неё ничего не говорит; без заявки подборка уходила в канал с
+            // описаниями, взятыми у источников. Придержка та же, что на
+            // первом шаге: не успеет парсер — уйдёт из фактов.
+            if (! $this->composeDigest($item, $broadcast, $now)) {
+                return false;
+            }
+
+            if ($this->digestWantsText($item, $broadcast)) {
+                $this->requestDigestText($item, $now);
+
+                return false;
+            }
+
+            return true;
         }
 
         $this->applyDigestDraft($item, $draft);
@@ -1229,6 +1245,29 @@ class TelegramChatBroadcastService
             'named' => count($draft['event_ids']),
             'with_text' => $item->hasDigestText(),
         ]);
+
+        // ПОСЛЕДНЯЯ ДВЕРЬ ПЕРЕД КАНАЛОМ. applyDigestDraft выше мог признать
+        // текст протухшим — состав сменили руками, и подводка с сиротами
+        // только что снята. Без этой ветки пост уходил бы в тот же тик: у
+        // нового события своей строки нет, и подпись подставляет ему описание
+        // с сайта-источника. Придержка та же, что в двух соседних ветках.
+        //
+        // Спрашиваем ровно один раз — по тем же двум отметкам, что и
+        // почасовой прогон. Обе снимаются только вместе с протухшим текстом,
+        // поэтому вечного ожидания не выйдет: не успеет парсер — на
+        // следующем тике подборка уедет из фактов.
+        $meta = (array) ($item->digest_meta ?? []);
+        if ($this->digestWantsText($item, $broadcast)
+            && $item->text_requested_at === null
+            && empty($meta['text_asked'])) {
+            $meta['text_asked'] = true;
+            $item->digest_meta = $meta;
+            $item->save();
+
+            $this->requestDigestText($item, $now);
+
+            return false;
+        }
 
         return true;
     }
@@ -1252,7 +1291,36 @@ class TelegramChatBroadcastService
     {
         return $broadcast->ai_text
             && $item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL
-            && ! $item->hasDigestText();
+            // Не «есть ли текст», а «есть ли текст ПРО ЭТОТ состав». Разница в
+            // одном случае, и он стоил поста: после замены события строки
+            // прежних остаются, запись выглядит написанной — и новое событие
+            // уходит в канал с описанием, взятым у источника.
+            && ! $item->digestTextCoversRoster($this->digestRosterIds($item));
+    }
+
+    /**
+     * Нынешний состав подборки — номера событий.
+     *
+     * Удалённые события вычитаем: композитор их тоже не называет
+     * (namedFromLinks), и без этого фильтра на вопрос «какой сейчас состав»
+     * было бы два разных ответа — а кормят они одну проверку покрытия.
+     *
+     * Начавшиеся НЕ вычитаем, хотя композитор вычитает и их: этот ответ
+     * зависит от минуты вызова, и правило «текст про этот состав» начало бы
+     * мигать само по себе.
+     *
+     * @return list<int>
+     */
+    private function digestRosterIds(TelegramChatBroadcastItem $item): array
+    {
+        return DB::table('telegram.chat_broadcast_item_events as l')
+            ->join('events as e', 'e.id', '=', 'l.event_id')
+            ->where('l.item_id', $item->id)
+            ->whereNull('e.deleted_at')
+            ->orderBy('l.position')
+            ->pluck('l.event_id')
+            ->map(fn ($v) => (int) $v)
+            ->all();
     }
 
     /**
@@ -1391,18 +1459,39 @@ class TelegramChatBroadcastService
         $theme = (string) ($draft['theme_slug'] ?? ($draft['theme']['slug'] ?? ''));
         $meta = (array) ($item->digest_meta ?? []);
 
+        // ПРАВИЛО: текст всегда написан под ТЕКУЩИЙ состав.
+        //
         // Подводка написана про КОНКРЕТНУЮ тройку и тему: «в субботу», «эта же
         // сцена» — всё это про соседей по посту. Сменились тема или состав —
-        // подводка врёт, и её надо снять. Строки про события смену переживают:
-        // они привязаны к id и уезжают вместе со своим событием.
+        // текст про прежний состав больше не текст этой подборки, и держать
+        // его нельзя ни в подписи, ни в мете.
+        //
+        // Снять одну подводку МАЛО, и 24 сентября это стоило поста в канале.
+        // Строки лежат по НОМЕРУ события, и от прежнего состава остаются
+        // сироты — строки про события, которых в посте уже нет. Увидеть их
+        // негде, но по ним запись считается «с текстом»: заказ текста молчит
+        // (digestWantsText), у нового события своей строки нет, и подпись
+        // берёт запасной путь — описание с сайта-источника. Админка при этом
+        // честно показывает «написано ИИ», потому что строки-то есть.
         $roster = array_values(array_map('intval', (array) ($draft['event_ids'] ?? [])));
-        $writtenFor = array_values(array_map('intval', (array) ($meta['roster'] ?? [])));
-        sort($roster);
-        sort($writtenFor);
+        $themeChanged = $theme !== '' && ($meta['theme'] ?? null) !== $theme;
 
-        if (($theme !== '' && ($meta['theme'] ?? null) !== $theme) || $writtenFor !== $roster) {
-            unset($meta['intro']);
+        if ($item->hasDigestText() && ($themeChanged || ! $item->digestTextCoversRoster($roster))) {
+            $meta = self::withoutStaleDigestText($meta, $roster);
+
+            // Заявку на текст открываем заново: обе отметки заведены, чтобы
+            // не переспрашивать модель каждый час, и обе глушат повторный
+            // заказ намертво. Сменился состав — спросить обязаны ещё раз,
+            // ровно один.
+            $item->text_requested_at = null;
+
+            Log::info('broadcast.digest.text_invalidated', [
+                'item_id' => $item->id,
+                'theme_changed' => $themeChanged,
+                'roster' => $roster,
+            ]);
         }
+
         if ($theme !== '') {
             $meta['theme'] = $theme;
             // Человеческое имя темы — для того, кто пишет текст: реестр тем
@@ -1416,6 +1505,37 @@ class TelegramChatBroadcastService
         $item->save();
 
         $this->syncDigestEvents($item, $draft['event_ids']);
+    }
+
+    /**
+     * Мета без текста, написанного под прежний состав.
+     *
+     * Строки про события, ОСТАВШИЕСЯ в составе, переживают замену: они
+     * привязаны к id и говорят про своё событие, а не про соседей. Уходит
+     * подводка (она про тройку целиком), уходят сироты и уходит отметка
+     * «состав, под который написано»: текста под нынешний состав больше нет,
+     * и врать об этом нечем.
+     *
+     * Отметку «заказано» снимаем здесь же — без неё заказ текста не проснётся.
+     *
+     * @param  array<string, mixed>  $meta
+     * @param  list<int>  $roster
+     * @return array<string, mixed>
+     */
+    private static function withoutStaleDigestText(array $meta, array $roster): array
+    {
+        unset($meta['intro'], $meta['roster'], $meta['text_asked']);
+
+        $keep = array_flip(array_map('strval', $roster));
+        $hooks = array_intersect_key((array) ($meta['hooks'] ?? []), $keep);
+
+        if ($hooks === []) {
+            unset($meta['hooks']);
+        } else {
+            $meta['hooks'] = $hooks;
+        }
+
+        return $meta;
     }
 
     /**
