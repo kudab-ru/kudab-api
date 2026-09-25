@@ -8,7 +8,9 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Support\Telegram\VenueName;
 use Carbon\Carbon;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Собрать подборку недели: тему, состав и текст.
@@ -46,6 +48,14 @@ final class BroadcastDigestComposer
 
     /** @var array<int, string> */
     private const WEEKDAYS = [1 => 'пн', 2 => 'вт', 3 => 'ср', 4 => 'чт', 5 => 'пт', 6 => 'сб', 7 => 'вс'];
+
+    /**
+     * Лента нужна ради ОДНОГО числа — того же, что читатель увидит, нажав на
+     * подвал. Своё считать нельзя: пул рубрики уже прошёл стоп-лист, жанровые
+     * отсечки, вычет показанного и схлопывание повторов, и к числу на странице
+     * отношения не имеет.
+     */
+    public function __construct(private readonly \App\Services\EventService $events) {}
 
     /**
      * Собрать подборку для канала на момент публикации.
@@ -990,8 +1000,19 @@ final class BroadcastDigestComposer
         // свой, и задаётся он в конфиге.
         $headline = (string) ($theme['headline'] ?? ($theme['title'].' недели'));
 
+        // Число — из той же выборки, на которую ведёт подвал. У рубрик без
+        // фильтра ленты (тематических) его нет, и шапка остаётся как была.
+        $feedFilters = $this->feedFilters((array) $theme, $broadcast, $from, $to);
+        $total = $this->feedTotal($feedFilters);
+
         $head = trim(($theme['emoji'] ?? '').' <b>'.$this->escape($headline).'</b>')
             .' · '.$this->escape($range);
+
+        if ($total !== null && $total > 0) {
+            $head .= ' · '.$this->escape(
+                $this->plural($total, $forms[0] ?? 'событие', $forms[1] ?? null, $forms[2] ?? null)
+            );
+        }
 
         // Подводка ведущего — про эту неделю и эту тройку. Её место занимала
         // строка счёта («20 концертов на 10 площадках. Три — в разных местах и
@@ -1037,10 +1058,24 @@ final class BroadcastDigestComposer
         // афишу. Обещать «ещё 36 на этой неделе» и привести на страницу, где
         // события другие, — обмануть в мелочи, которую читатель проверит первым
         // же нажатием.
-        $footer = $this->link(
-            $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id, $theme),
-            'Вся афиша '.($forms[2] ?? mb_strtolower((string) $theme['title'])),
+        $label = 'Вся афиша '.($forms[2] ?? mb_strtolower((string) $theme['title']));
+        $link = $this->link(
+            $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id, $theme, $feedFilters),
+            $label,
         );
+
+        // «Остальные N» — только когда N посчитан по той же выборке и правда
+        // остались. Названные входят в total, поэтому вычитаем их.
+        $rest = $total !== null ? $total - count($picked['named']) : 0;
+
+        // Число БЕЗ существительного: рядом стоит подпись ссылки, и «остальные
+        // 23 события — вся афиша событий» повторяет слово дважды в семи словах.
+        $footer = $rest > 0
+            ? 'Остальные '.$rest.' — '.$this->link(
+                $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id, $theme, $feedFilters),
+                (string) ($theme['feed_label'] ?? mb_strtolower($label)),
+            )
+            : $link;
 
         $top = array_values(array_filter([$head, $lead !== null ? $this->escape($lead) : null]));
 
@@ -1490,7 +1525,63 @@ final class BroadcastDigestComposer
     /**
      * @param  array<string, mixed>|null  $theme  рубрика, если у неё своя посадка
      */
-    private function landingUrl(TelegramChatBroadcast $broadcast, string $slug, ?int $itemId = null, ?array $theme = null): string
+    /**
+     * Фильтр ленты рубрики — ОДНО описание и для ссылки, и для числа.
+     *
+     * К фильтру рубрики добавляются границы её окна: без них ссылка ведёт на
+     * всю будущую афишу, и любое число рядом с ней становится враньём.
+     * Рубрика без `feed` (тематические, у них подвал ведёт на страницу
+     * категории) возвращает null — и числа у такой не будет.
+     *
+     * @param  array<string, mixed>  $theme
+     * @return array<string, mixed>|null
+     */
+    private function feedFilters(array $theme, TelegramChatBroadcast $broadcast, Carbon $from, Carbon $to): ?array
+    {
+        $feed = $theme['feed'] ?? null;
+        if (! is_array($feed) || $feed === []) {
+            return null;
+        }
+
+        $cityId = $broadcast->chat?->city_id;
+        if ($cityId === null) {
+            return null;
+        }
+
+        return $feed + [
+            'city_id' => (int) $cityId,
+            'date_from' => $from->copy()->setTimezone(self::TZ)->toDateTimeString(),
+            'date_to' => $to->copy()->setTimezone(self::TZ)->toDateTimeString(),
+        ];
+    }
+
+    /**
+     * Сколько событий покажет страница, на которую ведёт подвал.
+     *
+     * Именно та же выборка, что у ленты, — иначе пост обещает одно, а читатель
+     * по нажатию видит другое. Замер 25.09.2026 на одних выходных: сырой
+     * запрос к базе 150, лента 134. Считать своё нельзя.
+     *
+     * @param  array<string, mixed>|null  $filters
+     */
+    private function feedTotal(?array $filters): ?int
+    {
+        if ($filters === null) {
+            return null;
+        }
+
+        try {
+            return (int) $this->events->listWeb($filters, 1)['page']->total();
+        } catch (\Throwable $e) {
+            // Число — украшение, а пост — нет. Лента упала: выходим без счёта,
+            // как выходили всегда.
+            Log::warning('broadcast.digest.feed_total_failed', ['error' => $e->getMessage()]);
+
+            return null;
+        }
+    }
+
+    private function landingUrl(TelegramChatBroadcast $broadcast, string $slug, ?int $itemId = null, ?array $theme = null, ?array $feedFilters = null): string
     {
         $base = rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/');
         $citySlug = $broadcast->chat?->city?->slug ?? '';
@@ -1503,10 +1594,15 @@ final class BroadcastDigestComposer
         //
         // Зато лента умеет ровно эти фильтры: ?free=1, ?price_max=, ?tod=.
         // Ведём туда — читатель попадает на тот же отбор, что в посте.
-        $landing = (string) ($theme['landing'] ?? '');
+        // Адрес собирается из ТОГО ЖЕ фильтра, по которому посчитано число в
+        // посте. Готовой строки-адреса у рубрики больше нет намеренно: пока
+        // они лежали порознь, число и страница могли разъехаться молча.
+        $query = $feedFilters !== null
+            ? http_build_query(Arr::except($feedFilters, ['city_id']) + ['city' => $citySlug])
+            : '';
 
         $url = match (true) {
-            $landing !== '' => $base.$landing,
+            $query !== '' => $base.'/events?'.$query,
             $citySlug !== '' => $base.'/afisha/'.$citySlug.'/'.$slug,
             default => $base.'/events',
         };

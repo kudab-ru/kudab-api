@@ -417,6 +417,110 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertStringNotContainsString('00:00', $caption);
     }
 
+    /* ──────────────── счёт: число и ссылка из одного фильтра ──────────────── */
+
+    /**
+     * Счёт в шапке и остаток в подвале.
+     *
+     * Раньше числа не было вовсе, и это было верно: подвал вёл на страницу без
+     * фильтра по датам, где лежит вся будущая афиша. Обещание проверялось
+     * первым же нажатием.
+     */
+    #[Test]
+    public function the_header_counts_and_the_footer_names_the_rest(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+
+        $caption = $this->caption();
+
+        $this->assertStringContainsString('6 событий', $caption, 'в шапке весь счёт окна');
+        $this->assertMatchesRegularExpression('/Остальные [1-9]\d* — /u', $caption, 'в подвале остаток');
+        $this->assertStringContainsString('вся бесплатная афиша', $caption);
+    }
+
+    /**
+     * ИНВАРИАНТ: ссылка подвала несёт ровно тот фильтр, по которому посчитано.
+     *
+     * Ради него готовый адрес у рубрики и заменён описанием фильтра. Пока они
+     * лежали порознь, число и страница могли разъехаться молча — и именно
+     * поэтому счёт из поста когда-то убрали целиком.
+     */
+    #[Test]
+    public function the_footer_link_carries_the_very_filter_that_was_counted(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+
+        $caption = $this->caption();
+
+        $this->assertMatchesRegularExpression('/href="[^"]*[?&]free=1/u', $caption, 'фильтр рубрики в ссылке');
+        $this->assertMatchesRegularExpression('/href="[^"]*date_from=/u', $caption, 'нижняя граница окна');
+        $this->assertMatchesRegularExpression('/href="[^"]*date_to=/u', $caption, 'верхняя граница окна');
+
+        // Без дат лента смотрит и назад: замер 25.09.2026 — 52 события против
+        // 26 в окне. Ссылка без границ сделала бы число враньём.
+        preg_match('/href="([^"]*free=1[^"]*)"/u', $caption, $m);
+        $url = html_entity_decode($m[1] ?? '');
+        parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+        $to = Carbon::parse((string) ($query['date_to'] ?? ''));
+        $this->assertSame(
+            Carbon::now('Europe/Moscow')->addDays(5)->toDateString(),
+            $to->toDateString(),
+            'верхняя граница ссылки — окно рубрики, пять дней',
+        );
+    }
+
+    /**
+     * У тематической рубрики счёта нет, и это не недоделка.
+     *
+     * Её подвал ведёт на страницу категории, а там нет фильтра по датам:
+     * число окна рядом с такой ссылкой обещало бы не тот список.
+     */
+    #[Test]
+    public function a_themed_rubric_stays_without_a_count(): void
+    {
+        $this->onlyRubric('spektakli');
+        $this->fill('Спектакль', free: false, priceMin: 700);
+
+        $caption = $this->caption();
+
+        $this->assertStringNotContainsString('Остальные', $caption);
+        $this->assertDoesNotMatchRegularExpression('/· \d+ спектакл/u', $caption, 'счёта в шапке нет');
+        $this->assertStringContainsString('Вся афиша спектаклей', $caption);
+    }
+
+    /**
+     * Лента упала — пост всё равно выходит, просто без числа.
+     *
+     * Счёт это украшение, а подборка — нет: канал не должен молчать из-за
+     * того, что не посчиталась строка в шапке.
+     */
+    #[Test]
+    public function a_broken_feed_costs_the_count_but_not_the_post(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+
+        $this->app->bind(\App\Services\EventService::class, function () {
+            return new class extends \App\Services\EventService
+            {
+                public function __construct() {}
+
+                public function listWeb(array $filters, int $perPage = 20): array
+                {
+                    throw new \RuntimeException('лента недоступна');
+                }
+            };
+        });
+
+        $caption = $this->caption();
+
+        $this->assertStringNotContainsString('Остальные', $caption);
+        $this->assertStringContainsString('Бесплатно в эти дни', $caption, 'пост собрался');
+    }
+
     /** Подпись собранной подборки — тем же путём, что и в жизни. */
     private function caption(): string
     {
