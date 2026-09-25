@@ -63,17 +63,43 @@ final class BroadcastDigestComposer
             return null;
         }
 
+        // Рубрики, выходившие недавно, уходят в конец очереди: канал с одной
+        // и той же «неделей спектаклей» читается как заевшая пластинка. Это и
+        // есть «ориентироваться по постам на неделе».
+        $recent = $this->recentThemeSlugs($broadcast);
+
         $best = null;
+        $bestRank = null;
+
+        $gathered = [];
 
         foreach ((array) config('broadcast_digest.themes', []) as $theme) {
             $picked = $this->pickForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $forItem?->id);
-            if ($picked === null) {
+            if ($picked !== null) {
+                $gathered[(string) ($theme['slug'] ?? '')] = [$theme, $picked];
+            }
+        }
+
+        foreach ($gathered as $slug => [$theme, $picked]) {
+            // ЗАПАСНАЯ РУБРИКА ждёт своего часа. «Дешевле 500» выходит только
+            // в неделю, где даром нечего: прямая просьба владельца —
+            // бесплатное первым, платное запасным.
+            $insteadOf = (string) ($theme['only_if_missing'] ?? '');
+            if ($insteadOf !== '' && isset($gathered[$insteadOf])) {
                 continue;
             }
 
-            // Тему выбираем по числу РАЗНЫХ площадок, а не событий: пять
-            // концертов в одном баре — это афиша бара, а не тема недели.
-            if ($best === null || $picked['venues'] > $best['venues']) {
+            // Старшинство: сперва свежесть рубрики (канал с одной и той же
+            // «неделей спектаклей» читается как заевшая пластинка), потом
+            // число РАЗНЫХ площадок — пять концертов в одном баре это афиша
+            // бара, а не тема недели.
+            $rank = [
+                array_search($slug, $recent, true) === false ? 0 : 1,
+                -$picked['venues'],
+            ];
+
+            if ($bestRank === null || $rank < $bestRank) {
+                $bestRank = $rank;
                 $best = $picked;
             }
         }
@@ -90,6 +116,39 @@ final class BroadcastDigestComposer
             'total' => $best['total'],
             'venues' => $best['venues'],
         ];
+    }
+
+    /**
+     * Слаги рубрик, выходивших в этом канале последними.
+     *
+     * Смотрим на посты, а не на календарь: подборку могли снять, перенести
+     * или выпустить руками, и «что выходило» знает только лента.
+     *
+     * @return list<string>
+     */
+    private function recentThemeSlugs(TelegramChatBroadcast $broadcast): array
+    {
+        $depth = (int) config('broadcast_digest.rotation_depth', 4);
+        if ($depth <= 0) {
+            return [];
+        }
+
+        return DB::table('telegram.chat_broadcast_items')
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->whereNotNull('digest_meta')
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_POSTED,
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+            ])
+            ->orderByDesc('id')
+            ->limit($depth)
+            ->pluck('digest_meta')
+            ->map(fn ($m) => (string) (json_decode((string) $m, true)['theme'] ?? ''))
+            ->filter()
+            ->values()
+            ->all();
     }
 
     /**
@@ -238,7 +297,7 @@ final class BroadcastDigestComposer
 
         return [
             'theme' => $theme,
-            'named' => $this->pickNamed($rows),
+            'named' => $this->pickNamed($rows, self::namedRange($theme)),
             'total' => $total,
             'venues' => $venues,
         ];
@@ -446,15 +505,29 @@ final class BroadcastDigestComposer
         ?int $exceptItemId = null,
         bool $keepShown = false,
     ): ?array {
-        $ids = $this->interestTree((string) $theme['interest']);
-        if ($ids === []) {
-            return null;
+        // РУБРИКА ОТБИРАЕТ НЕ ТОЛЬКО ПО ТЕМЕ. «Спектакли» — это интерес, а
+        // «Бесплатно» и «Дешевле 500» — цена, «Вечером» — час начала. Признак
+        // разный, всё остальное (срок, отсечки, схлопывание повторов)
+        // одинаковое, поэтому развилка живёт здесь, а не в отдельном пуле.
+        $pick = (string) ($theme['pick'] ?? 'interest');
+
+        $ids = [];
+        if ($pick === 'interest') {
+            $ids = $this->interestTree((string) $theme['interest']);
+            if ($ids === []) {
+                return null;
+            }
         }
 
-        $until = $publishAt->copy()->addDays((int) config('broadcast_digest.window_days', 7));
+        // Окно у рубрики может быть своё. Бесплатное объявляют поздно: замер
+        // 25.09.2026 — 35 событий в ближайшую неделю и 4 в следующую, поэтому
+        // недельное окно для него почти пустое, а трёхдневное полное.
+        $until = $publishAt->copy()->addDays(
+            (int) ($theme['window_days'] ?? config('broadcast_digest.window_days', 7)),
+        );
 
         $rows = DB::table('events as e')
-            ->join('event_interest as ei', 'ei.event_id', '=', 'e.id')
+            ->when($pick === 'interest', fn ($q) => $q->join('event_interest as ei', 'ei.event_id', '=', 'e.id'))
             ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
             ->join('communities as c', 'c.id', '=', 'e.community_id')
             ->whereNull('e.deleted_at')
@@ -467,10 +540,27 @@ final class BroadcastDigestComposer
             // выставку, открывшуюся на прошлой неделе и висящую месяц, — то
             // есть ровно ту, ради которой тема и заведена.
             ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, PostTiming::MIN_LEAD_HOURS, 'e'))
-            // ПЕРВИЧНЫЙ интерес внутри дерева темы. Без rank = 0 в спектакли
-            // попадает концерт, которому театр проставлен вторым тегом.
-            ->where('ei.rank', 0)
-            ->whereIn('ei.interest_id', $ids)
+            ->when($pick === 'interest', fn ($q) => $q
+                // ПЕРВИЧНЫЙ интерес внутри дерева темы. Без rank = 0 в спектакли
+                // попадает концерт, которому театр проставлен вторым тегом.
+                ->where('ei.rank', 0)
+                ->whereIn('ei.interest_id', $ids))
+            ->when($pick === 'free', fn ($q) => $q
+                // donation рядом с free намеренно: «вход свободный, кто сколько
+                // может» читатель считает бесплатным, и он прав.
+                ->whereIn('e.price_status', ['free', 'donation']))
+            ->when($pick === 'price_max', fn ($q) => $q
+                // Только там, где цена ИЗВЕСТНА и это число. `unknown` в рубрику
+                // про деньги пускать нельзя: обещание «дешевле 500» проверят
+                // первым же нажатием.
+                ->whereNotNull('e.price_min')
+                ->where('e.price_min', '>', 0)
+                ->where('e.price_min', '<=', (int) ($theme['price_max'] ?? 500)))
+            ->when($pick === 'tod', fn ($q) => $q
+                ->whereRaw(
+                    "EXTRACT(HOUR FROM e.start_time AT TIME ZONE 'Europe/Moscow') >= ?",
+                    [(int) ($theme['hour_from'] ?? 20)],
+                ))
             ->where(function ($q) {
                 $q->whereNull('e.tickets_status')->orWhere('e.tickets_status', '<>', 'sold_out');
             })
@@ -486,8 +576,16 @@ final class BroadcastDigestComposer
             ]);
 
         $rows = $this->rejectStopList($rows);
-        $rows = $this->rejectForeignGenre($rows, (string) $theme['slug']);
-        $rows = $this->rejectForeignSourceRubric($rows, (string) $theme['slug']);
+
+        // Жанровые отсечки — ТОЛЬКО тематическим рубрикам. Они спрашивают «не
+        // чужой ли это жанр для темы», а у «Бесплатно» и «Дешевле 500» жанра
+        // нет вовсе: там годится и концерт, и лекция, и экскурсия. Оставь их
+        // включёнными — и рубрика выкосит сама себя, потому что у каждого
+        // события в описании найдётся слово чужого жанра.
+        if ($pick === 'interest') {
+            $rows = $this->rejectForeignGenre($rows, (string) $theme['slug']);
+            $rows = $this->rejectForeignSourceRubric($rows, (string) $theme['slug']);
+        }
         // Остывание отказа — и в подборке тоже: см. rejectRecentlyRejected.
         $rows = $this->rejectRecentlyRejected($broadcast, $rows);
 
@@ -745,8 +843,12 @@ final class BroadcastDigestComposer
      *
      * @return list<object>
      */
-    private function pickNamed(\Illuminate\Support\Collection $rows): array
+    /**
+     * @param  array{0:int,1:int}  $range  сколько назвать: минимум и максимум
+     */
+    private function pickNamed(\Illuminate\Support\Collection $rows, array $range = [3, 3]): array
     {
+        [$min, $max] = $range;
         $minDescription = (int) config('broadcast_digest.min_description', 120);
 
         $ranked = $rows
@@ -783,13 +885,25 @@ final class BroadcastDigestComposer
                 continue;
             }
 
+            // ЧИСЛО НАЗВАННЫХ ПЛАВАЕТ, но не наугад. Сверх минимума берём
+            // только того, кому есть что сказать: у события должно хватать
+            // описания на строку-изюм. Иначе четвёртым встанет голое
+            // «название · дата · место» — и пост выглядит недоделанным, а не
+            // щедрым. Подпись это тоже бережёт: замер на живой подборке —
+            // шапка с подвалом 147 знаков, каждое названное с фразой около
+            // 176, при пороге 950 пятое уже не влезает.
+            $full = mb_strlen(trim((string) $row->description)) >= $minDescription;
+            if (count($named) >= $min && ! $full) {
+                continue;
+            }
+
             $named[] = $row;
             if ($venue !== null) {
                 $venues[$venue] = true;
             }
             $days[$day] = true;
 
-            if (count($named) >= (int) config('broadcast_digest.named', 3)) {
+            if (count($named) >= $max) {
                 break;
             }
         }
@@ -800,6 +914,32 @@ final class BroadcastDigestComposer
         usort($named, fn ($a, $b) => strcmp((string) $a->start_time, (string) $b->start_time));
 
         return $named;
+    }
+
+    /**
+     * Сколько событий называть в этой рубрике: [минимум, максимум].
+     *
+     * У темы может стоять своё `named` — числом или парой. Пара означает
+     * «от и до»: сколько получится назвать с полным описанием, столько и
+     * назовём (см. pickNamed).
+     *
+     * @param  array<string, mixed>  $theme
+     * @return array{0:int,1:int}
+     */
+    private static function namedRange(array $theme): array
+    {
+        $raw = $theme['named'] ?? config('broadcast_digest.named', 3);
+
+        if (is_array($raw)) {
+            $min = max(1, (int) ($raw[0] ?? 3));
+            $max = max($min, (int) ($raw[1] ?? $min));
+
+            return [$min, $max];
+        }
+
+        $n = max(1, (int) $raw);
+
+        return [$n, $n];
     }
 
     /**
@@ -868,7 +1008,7 @@ final class BroadcastDigestComposer
         // события другие, — обмануть в мелочи, которую читатель проверит первым
         // же нажатием.
         $footer = $this->link(
-            $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id),
+            $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id, $theme),
             'Вся афиша '.($forms[2] ?? mb_strtolower((string) $theme['title'])),
         );
 
@@ -1233,20 +1373,38 @@ final class BroadcastDigestComposer
      *                            Метрика отличает переходы ЭТОЙ подборки от
      *                            прошлой — иначе рубрика измерима только целиком
      */
-    private function landingUrl(TelegramChatBroadcast $broadcast, string $slug, ?int $itemId = null): string
+    /**
+     * @param  array<string, mixed>|null  $theme  рубрика, если у неё своя посадка
+     */
+    private function landingUrl(TelegramChatBroadcast $broadcast, string $slug, ?int $itemId = null, ?array $theme = null): string
     {
         $base = rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/');
         $citySlug = $broadcast->chat?->city?->slug ?? '';
         $utm = (array) config('broadcast_digest.utm', []);
 
-        $url = $citySlug !== ''
-            ? $base.'/afisha/'.$citySlug.'/'.$slug
-            : $base.'/events';
+        // ЦЕНОВОЙ И ВРЕМЕННОЙ РУБРИКЕ ЛЕНДИНГА НЕТ. На сайте адреса вида
+        // /afisha/{city}/{slug} заведены только у категорий (реестр —
+        // landingCategories.ts) и у двух временных срезов. Отправить подвал на
+        // /afisha/voronezh/besplatno значило бы привести читателя на 404.
+        //
+        // Зато лента умеет ровно эти фильтры: ?free=1, ?price_max=, ?tod=.
+        // Ведём туда — читатель попадает на тот же отбор, что в посте.
+        $landing = (string) ($theme['landing'] ?? '');
+
+        $url = match (true) {
+            $landing !== '' => $base.$landing,
+            $citySlug !== '' => $base.'/afisha/'.$citySlug.'/'.$slug,
+            default => $base.'/events',
+        };
 
         // Подвал ведёт на лендинг и метку несёт с самого начала — через общий
         // помощник, чтобы она не разошлась с метками на строках поста.
+        // Разделитель по месту: у ленты с фильтром вопрос в адресе уже стоит,
+        // и второй превратил бы ссылку в «?free=1?utm_source=».
+        $sep = str_contains($url, '?') ? '&' : '?';
+
         return $itemId === null
-            ? $url.'?utm_source='.($utm['source'] ?? 'tg').'&utm_medium='.($utm['medium'] ?? 'digest')
+            ? $url.$sep.'utm_source='.($utm['source'] ?? 'tg').'&utm_medium='.($utm['medium'] ?? 'digest')
             : PostLink::utm($url, (string) ($utm['medium'] ?? 'digest'), $itemId);
     }
 

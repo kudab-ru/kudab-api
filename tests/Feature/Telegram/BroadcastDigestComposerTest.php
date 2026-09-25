@@ -32,6 +32,17 @@ class BroadcastDigestComposerTest extends TestCase
         parent::setUp();
         Carbon::setTestNow(Carbon::parse('2026-09-15 12:00', 'Europe/Moscow'));
 
+        // ТОЛЬКО ТЕМАТИЧЕСКИЕ РУБРИКИ. Рядом с ними живут «Бесплатно»,
+        // «Дешевле 500» и «Вечером» — они отбирают не по интересу, и на
+        // фикстурах этого файла (шесть театральных событий с ценой) выигрывают
+        // по числу площадок. Тесты здесь про тематический отбор: жанровые
+        // отсечки, дерево интересов, порядок по датам. Ценовые рубрики
+        // проверяются своим файлом.
+        config(['broadcast_digest.themes' => array_values(array_filter(
+            (array) config('broadcast_digest.themes', []),
+            static fn (array $t) => ($t['pick'] ?? 'interest') === 'interest',
+        ))]);
+
         $this->cityId = $this->city();
         $this->interestId = (int) DB::table('interests')->insertGetId([
             'name' => 'Театр', 'slug' => 'theatre', 'created_at' => now(), 'updated_at' => now(),
