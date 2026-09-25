@@ -773,6 +773,42 @@ class BroadcastDigestPrepareTest extends TestCase
         $this->assertSame($ids, $this->rosterOf($item), 'порядок прежний');
     }
 
+    /**
+     * Ручной текст запирает ВСЕ правки состава, а не только замену.
+     *
+     * applyDigestDraft безусловно ставит caption_source=template, то есть
+     * любая пересборка переписала бы переписанную руками подпись. Держит это
+     * общий гард — и держать он обязан все три новые двери, а не одну
+     * старую: потерять написанный руками пост молча нельзя.
+     */
+    public function test_manual_caption_blocks_every_roster_edit(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+
+        $item->caption = 'Свой текст, написанный руками.';
+        $item->caption_source = TelegramChatBroadcastItem::CAPTION_MANUAL;
+        $item->save();
+
+        $before = $this->rosterOf($item);
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/add", [
+            'in' => $candidate,
+        ])->assertStatus(409);
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/remove", [
+            'out' => $named[0]['id'],
+        ])->assertStatus(409);
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/reorder", [
+            'order' => array_reverse(array_column($named, 'id')),
+        ])->assertStatus(409);
+
+        $fresh = $item->fresh();
+        $this->assertSame($before, $this->rosterOf($item), 'состав не тронут');
+        $this->assertSame('Свой текст, написанный руками.', $fresh->caption, 'текст цел');
+        $this->assertSame(TelegramChatBroadcastItem::CAPTION_MANUAL, $fresh->caption_source);
+    }
+
     /** @return list<int> */
     private function rosterOf(TelegramChatBroadcastItem $item): array
     {
