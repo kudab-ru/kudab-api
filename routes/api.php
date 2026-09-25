@@ -110,6 +110,12 @@ Route::prefix('admin')
         // той же транзакции: альбом доставка берёт по составу, и разойтись им
         // нельзя.
         Route::post('/broadcast/items/{id}/digest-events/replace', [AdminBroadcastController::class, 'replaceDigestEvent']);
+        // Правка состава: добавить, убрать, переставить. Замена один в один
+        // держала число строк равным тому, что выбрал автоотбор, — и подборки
+        // из пяти событий не собиралось ни одной настройкой.
+        Route::post('/broadcast/items/{id}/digest-events/add', [AdminBroadcastController::class, 'addDigestEvent']);
+        Route::post('/broadcast/items/{id}/digest-events/remove', [AdminBroadcastController::class, 'removeDigestEvent']);
+        Route::post('/broadcast/items/{id}/digest-events/reorder', [AdminBroadcastController::class, 'reorderDigestEvents']);
         Route::post('/broadcast/items/{id}/restore', [AdminBroadcastController::class, 'restore']);
         Route::post('/broadcast/items/{id}/unreject', [AdminBroadcastController::class, 'unreject']);
         Route::get('/broadcast/items/{id}/revisions', [AdminBroadcastController::class, 'revisions']);

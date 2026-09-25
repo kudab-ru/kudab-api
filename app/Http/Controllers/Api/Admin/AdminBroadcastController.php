@@ -1478,6 +1478,328 @@ class AdminBroadcastController extends Controller
     }
 
     /**
+     * Сколько строк подборка обязана сохранить.
+     *
+     * Одна строка — это уже не подборка, а пост про событие, и шапка рубрики
+     * над ней обещает список, которого нет. Две — минимум, при котором
+     * заголовок не врёт.
+     */
+    private const DIGEST_MIN_ROSTER = 2;
+
+    /**
+     * Добавить строку в состав.
+     *
+     * POST /api/admin/broadcast/items/{id}/digest-events/add
+     * Тело: in — событие, swap — согласие снять его собственный пост.
+     *
+     * Правила автоотбора («одна строка на день», «одна на площадку», «без
+     * площадки не называем») на этот путь не действуют: они охраняют сборку от
+     * случайного состава, а здесь состав выбирает человек. Зато действуют все
+     * проверки замены — живое ли событие, не занято ли оно другим постом.
+     */
+    public function addDigestEvent(Request $request, int $itemId): JsonResponse
+    {
+        $data = $request->validate([
+            'in' => ['required', 'integer'],
+            'swap' => ['sometimes', 'boolean'],
+        ]);
+
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+        if ($blocked = $this->digestRosterGuard($item)) {
+            return $blocked;
+        }
+
+        $roster = $this->rosterIds($item);
+        if (in_array((int) $data['in'], $roster, true)) {
+            return response()->json(['ok' => false, 'error' => 'Это событие уже названо в подборке.'], 422);
+        }
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($item->broadcast_id);
+        $publishAt = $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now();
+
+        $taken = null;
+        if ($blocked = $this->digestIncomingGuard($request, $broadcast, $item, (int) $data['in'], $publishAt, $taken)) {
+            return $blocked;
+        }
+
+        try {
+            $fresh = DB::transaction(function () use ($item, $broadcast, $data, $publishAt, $taken) {
+                $this->releaseTakenPost($taken);
+
+                if (! $this->broadcasts->addDigestEvent($item, $broadcast, (int) $data['in'], $publishAt)) {
+                    throw new DigestRecomposeFailed;
+                }
+
+                $this->dropManualPhotos($item);
+
+                return $item->fresh();
+            });
+        } catch (DigestRecomposeFailed) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Состав с этой строкой не собрался — подборка осталась как была.',
+            ], 409);
+        }
+
+        // Подпись меряем ПОСЛЕ сборки, а не считаем заранее: сборка сама
+        // снимает фразы с конца, когда длинно, и до неё настоящей длины нет.
+        if (! CaptionLength::fits((string) $fresh->caption)) {
+            $this->broadcasts->removeDigestEvent($fresh, $broadcast, (int) $data['in'], $publishAt);
+
+            return response()->json([
+                'ok' => false,
+                'error' => 'С этой строкой подпись длиннее, чем принимает телеграм. Уберите другую или укоротите текст.',
+            ], 422);
+        }
+
+        return response()->json(['data' => $this->itemPayload($fresh, null, null)]);
+    }
+
+    /**
+     * Убрать строку из состава.
+     *
+     * POST /api/admin/broadcast/items/{id}/digest-events/remove
+     * Тело: out — событие, cool — не предлагать его какое-то время.
+     */
+    public function removeDigestEvent(Request $request, int $itemId): JsonResponse
+    {
+        $data = $request->validate([
+            'out' => ['required', 'integer'],
+            'cool' => ['sometimes', 'boolean'],
+        ]);
+
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+        if ($blocked = $this->digestRosterGuard($item)) {
+            return $blocked;
+        }
+
+        $roster = $this->rosterIds($item);
+        if (! in_array((int) $data['out'], $roster, true)) {
+            return response()->json(['ok' => false, 'error' => 'Этого события в подборке нет.'], 422);
+        }
+        if (count($roster) <= self::DIGEST_MIN_ROSTER) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'В подборке должно остаться хотя бы две строки — иначе это пост про одно событие.',
+            ], 422);
+        }
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($item->broadcast_id);
+        $publishAt = $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now();
+
+        try {
+            $out = DB::transaction(function () use ($item, $broadcast, $data, $publishAt, $request) {
+                if (! $this->broadcasts->removeDigestEvent($item, $broadcast, (int) $data['out'], $publishAt)) {
+                    throw new DigestRecomposeFailed;
+                }
+
+                $cooled = $request->boolean('cool')
+                    && $this->coolDownEvent($broadcast->id, (int) $data['out']);
+
+                $this->dropManualPhotos($item);
+
+                return ['item' => $item->fresh(), 'cooled' => $cooled];
+            });
+        } catch (DigestRecomposeFailed) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Состав без этой строки не собрался — подборка осталась как была.',
+            ], 409);
+        }
+
+        return response()->json([
+            'data' => $this->itemPayload($out['item'], null, null),
+            'cooled' => $out['cooled'],
+        ]);
+    }
+
+    /**
+     * Переставить строки состава.
+     *
+     * POST /api/admin/broadcast/items/{id}/digest-events/reorder
+     * Тело: order — ВЕСЬ состав в новом порядке.
+     *
+     * Целиком, а не «подвинь вверх»: так ответ не зависит от того, совпала ли
+     * картинка на экране с базой, и частичного порядка не бывает.
+     */
+    public function reorderDigestEvents(Request $request, int $itemId): JsonResponse
+    {
+        $data = $request->validate([
+            'order' => ['required', 'array', 'min:1'],
+            'order.*' => ['integer'],
+        ]);
+
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+        if ($blocked = $this->digestRosterGuard($item)) {
+            return $blocked;
+        }
+
+        $order = array_values(array_unique(array_map('intval', $data['order'])));
+        $roster = $this->rosterIds($item);
+
+        sort($order);
+        $sorted = $roster;
+        sort($sorted);
+        if ($order !== $sorted) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Порядок прислан не для этого состава — обновите страницу.',
+            ], 409);
+        }
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($item->broadcast_id);
+        $publishAt = $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now();
+
+        try {
+            $fresh = DB::transaction(function () use ($item, $broadcast, $data, $publishAt) {
+                $ids = array_values(array_unique(array_map('intval', $data['order'])));
+                if (! $this->broadcasts->reorderDigestEvents($item, $broadcast, $ids, $publishAt)) {
+                    throw new DigestRecomposeFailed;
+                }
+
+                return $item->fresh();
+            });
+        } catch (DigestRecomposeFailed) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Подборка в этом порядке не собралась — порядок остался прежним.',
+            ], 409);
+        }
+
+        return response()->json(['data' => $this->itemPayload($fresh, null, null)]);
+    }
+
+    /**
+     * Общие запреты на правку состава — те же, что у замены строки.
+     *
+     * Ручной текст сюда попадает отдельным отказом: подпись описывает состав,
+     * и поменять состав, не тронув текст, нельзя. У «собрать заново» на этот
+     * случай снимок в историю, у правки состава снимка нет.
+     */
+    private function digestRosterGuard(TelegramChatBroadcastItem $item): ?JsonResponse
+    {
+        if ($item->kind !== TelegramChatBroadcastItem::KIND_DIGEST) {
+            return response()->json(['ok' => false, 'error' => 'Состав есть только у подборки.'], 422);
+        }
+        if ($item->posted_at !== null) {
+            return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
+        }
+        if ($blocked = $this->digestNotEditable($item)) {
+            return $blocked;
+        }
+        if ($item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Текст поста правлен целиком. Верните шаблонный — тогда состав можно менять.',
+            ], 409);
+        }
+
+        return null;
+    }
+
+    /**
+     * Можно ли взять это событие в подборку: живо ли оно и не занято ли постом.
+     *
+     * Те же проверки, что у замены строки, — вынесены, чтобы «добавить» не
+     * оказалось дверью в обход них. $taken заполняется постом, который придётся
+     * снять, если человек согласился обменом.
+     */
+    private function digestIncomingGuard(
+        Request $request,
+        TelegramChatBroadcast $broadcast,
+        TelegramChatBroadcastItem $item,
+        int $inEventId,
+        Carbon $publishAt,
+        ?TelegramChatBroadcastItem &$taken,
+    ): ?JsonResponse {
+        $fresh = Event::query()
+            ->whereKey($inEventId)
+            ->active()
+            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, 0))
+            ->exists();
+
+        if (! $fresh) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Этого события больше нет в подборе — обновите список кандидатов.',
+            ], 422);
+        }
+
+        $taken = $this->eventTakenByAnotherPost($broadcast->id, $inEventId, $item->id);
+        if ($taken === null) {
+            return null;
+        }
+
+        if (! $request->boolean('swap')) {
+            return response()->json([
+                'ok' => false,
+                'error' => $this->takenMessage($taken),
+                'data' => ['needs_swap' => true, 'post_item_id' => $taken->id],
+            ], 409);
+        }
+        if ($taken->posted_at !== null
+            && Carbon::parse($taken->posted_at)->gt(Carbon::now()->subDays(BroadcastDigestComposer::SHOWN_WINDOW_DAYS))) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Канал показывал это событие на этой неделе — в подборке оно будет повтором.',
+            ], 409);
+        }
+        if ($taken->kind !== TelegramChatBroadcastItem::KIND_EVENT) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Это событие занято другой рубрикой — уберите его оттуда заменой, а не отсюда.',
+            ], 409);
+        }
+        if ($taken->is_pinned) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Тот пост закреплён. Снимите закрепление, если правда хотите его убрать.',
+            ], 409);
+        }
+        if ($taken->claimed_at !== null
+            && Carbon::parse($taken->claimed_at)->gt(Carbon::now()->subSeconds(TelegramChatBroadcastService::CLAIM_LEASE_SECONDS))) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Тот пост уже взят на отправку — обмен невозможен.',
+            ], 409);
+        }
+
+        return null;
+    }
+
+    /** Снять пост, у которого событие забирает подборка. */
+    private function releaseTakenPost(?TelegramChatBroadcastItem $taken): void
+    {
+        if ($taken === null) {
+            return;
+        }
+
+        // Снимаем, а не отклоняем: это не отказ по качеству, событие просто
+        // переезжает в подборку.
+        $taken->status = TelegramChatBroadcastItem::STATUS_SKIPPED;
+        $taken->error_message = 'переехало в подборку недели';
+        $taken->publish_at = null;
+        $taken->claimed_at = null;
+        $taken->claim_token = null;
+        $taken->save();
+    }
+
+    /**
+     * Снять ручной выбор картинок после правки состава.
+     *
+     * Белый список картинок держится составом: после правки прежний набор ему
+     * больше не отвечает, и следующая правка формы отбилась бы 422.
+     */
+    private function dropManualPhotos(TelegramChatBroadcastItem $item): void
+    {
+        if (is_array($item->photo_urls)) {
+            $item->photo_urls = null;
+            $item->forgetEdit(TelegramChatBroadcastItem::EDIT_PHOTOS);
+            $item->save();
+        }
+    }
+
+    /**
      * Почему подборку сейчас трогать нельзя — или null, если можно.
      *
      * Один гард на все кнопки, которые меняют состав, подпись или digest_meta:

@@ -639,6 +639,151 @@ class BroadcastDigestPrepareTest extends TestCase
             'у подборки event_id пуст — остывание обязано читаться связью');
     }
 
+    /* ──────────── шаг 4: состав правится, а не только меняется ──────────── */
+
+    /**
+     * Добавить строку.
+     *
+     * До этого число строк было намертво равно тому, что выбрал автоотбор:
+     * замена работала один в один, и подборки из пяти событий не собиралось
+     * ни одной настройкой.
+     */
+    public function test_add_appends_a_line_and_keeps_the_rest(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/add", [
+            'in' => $candidate,
+        ])->assertOk();
+
+        $roster = $this->rosterOf($item);
+
+        $this->assertCount(4, $roster, 'строк стало больше, а не столько же');
+        $this->assertSame($candidate, end($roster), 'новая строка встала в хвост');
+        foreach ($named as $row) {
+            $this->assertContains($row['id'], $roster, 'прежние строки на месте');
+        }
+    }
+
+    /** Подпись обязана описывать текущий состав — иначе альбом разойдётся с текстом. */
+    public function test_add_rebuilds_the_caption(): void
+    {
+        [$item, , $candidate] = $this->composedDigestWithSpare();
+
+        $title = (string) DB::table('events')->where('id', $candidate)->value('title');
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/add", [
+            'in' => $candidate,
+        ])->assertOk();
+
+        $this->assertStringContainsString($title, (string) $item->fresh()->caption);
+    }
+
+    public function test_add_refuses_an_event_already_named(): void
+    {
+        [$item, $named] = $this->composedDigestWithSpare();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/add", [
+            'in' => $named[0]['id'],
+        ])->assertStatus(422);
+
+        $this->assertCount(3, $this->rosterOf($item), 'состав не тронут');
+    }
+
+    public function test_remove_drops_a_line(): void
+    {
+        [$item, $named] = $this->composedDigestWithSpare();
+
+        $out = $named[1]['id'];
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/remove", [
+            'out' => $out,
+        ])->assertOk();
+
+        $roster = $this->rosterOf($item);
+
+        $this->assertCount(2, $roster);
+        $this->assertNotContains($out, $roster);
+        $this->assertStringNotContainsString($named[1]['title'], (string) $item->fresh()->caption);
+    }
+
+    /**
+     * Две строки — нижняя граница.
+     *
+     * Одна строка это уже не подборка, а пост про событие, и шапка рубрики над
+     * ней обещает список, которого нет.
+     */
+    public function test_remove_keeps_at_least_two_lines(): void
+    {
+        [$item, $named] = $this->composedDigestWithSpare();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/remove", [
+            'out' => $named[0]['id'],
+        ])->assertOk();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/remove", [
+            'out' => $named[1]['id'],
+        ])->assertStatus(422);
+
+        $this->assertCount(2, $this->rosterOf($item), 'вторая строка осталась');
+    }
+
+    /**
+     * Порядок, выставленный рукой, доезжает до подписи.
+     *
+     * Раньше состав пересортировывался по времени начала на каждой сборке:
+     * позиции в связи писались, читались — и выбрасывались. Поставить сильное
+     * событие первым было нельзя.
+     */
+    public function test_reorder_is_kept_in_the_caption(): void
+    {
+        [$item, $named] = $this->composedDigestWithSpare();
+
+        $ids = array_column($named, 'id');
+        $flipped = array_reverse($ids);
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/reorder", [
+            'order' => $flipped,
+        ])->assertOk();
+
+        $this->assertSame($flipped, $this->rosterOf($item), 'порядок записан');
+
+        $caption = (string) $item->fresh()->caption;
+        $at = [];
+        foreach ($named as $row) {
+            $at[$row['id']] = mb_strpos($caption, (string) $row['title']);
+            $this->assertNotFalse($at[$row['id']], 'строка есть в тексте: '.$row['title']);
+        }
+
+        $this->assertGreaterThan($at[$flipped[0]], $at[$flipped[1]], 'вторая ниже первой');
+        $this->assertGreaterThan($at[$flipped[1]], $at[$flipped[2]], 'третья ниже второй');
+    }
+
+    /** Порядок присылается целиком: неполный набор — это рассинхрон экрана с базой. */
+    public function test_reorder_refuses_a_foreign_roster(): void
+    {
+        [$item, $named] = $this->composedDigestWithSpare();
+
+        $ids = array_column($named, 'id');
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/reorder", [
+            'order' => [$ids[0], $ids[1]],
+        ])->assertStatus(409);
+
+        $this->assertSame($ids, $this->rosterOf($item), 'порядок прежний');
+    }
+
+    /** @return list<int> */
+    private function rosterOf(TelegramChatBroadcastItem $item): array
+    {
+        return DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)
+            ->orderBy('position')
+            ->pluck('event_id')
+            ->map(fn ($v) => (int) $v)
+            ->all();
+    }
+
     /** @return array{0: TelegramChatBroadcastItem, 1: array<int, array<string, mixed>>, 2: int} */
     private function composedDigestWithSpare(): array
     {

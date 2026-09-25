@@ -1435,6 +1435,103 @@ class TelegramChatBroadcastService
             'created_at' => now(),
         ]);
 
+        return $this->recomposeRoster($item, $broadcast, $publishAt, [
+            'op' => 'replace', 'out' => $outEventId, 'in' => $inEventId,
+        ]);
+    }
+
+    /**
+     * Добавить строку в состав — в хвост.
+     *
+     * Раньше состав можно было только менять один в один, и число строк было
+     * намертво равно тому, что выбрал автоотбор. Подборка «назови пять» этим
+     * не собиралась ни одной настройкой.
+     *
+     * Правила отбора (одна строка на день, одна на площадку, без площадки не
+     * называем) тут не действуют и не должны: они охраняют АВТОсборку от
+     * случайного состава, а состав, выбранный руками, — это и есть решение.
+     */
+    public function addDigestEvent(
+        TelegramChatBroadcastItem $item,
+        TelegramChatBroadcast $broadcast,
+        int $inEventId,
+        Carbon $publishAt,
+    ): bool {
+        $tail = (int) DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)
+            ->max('position');
+
+        DB::table('telegram.chat_broadcast_item_events')->insertOrIgnore([
+            'item_id' => $item->id,
+            'event_id' => $inEventId,
+            'position' => $tail + 1,
+            'created_at' => now(),
+        ]);
+
+        return $this->recomposeRoster($item, $broadcast, $publishAt, [
+            'op' => 'add', 'in' => $inEventId,
+        ]);
+    }
+
+    /** Убрать строку из состава. */
+    public function removeDigestEvent(
+        TelegramChatBroadcastItem $item,
+        TelegramChatBroadcast $broadcast,
+        int $outEventId,
+        Carbon $publishAt,
+    ): bool {
+        DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)
+            ->where('event_id', $outEventId)
+            ->delete();
+
+        return $this->recomposeRoster($item, $broadcast, $publishAt, [
+            'op' => 'remove', 'out' => $outEventId,
+        ]);
+    }
+
+    /**
+     * Переставить состав: порядок задаётся целиком, позиции пишутся подряд.
+     *
+     * Целиком, а не «подвинь эту на одну вверх»: перестановка по одной строке
+     * с двумя запросами оставляет дырки в нумерации при обрыве, а ЭТОТ порядок
+     * потом читает подпись и подбор обложек.
+     *
+     * @param  list<int>  $eventIds  весь состав в новом порядке
+     */
+    public function reorderDigestEvents(
+        TelegramChatBroadcastItem $item,
+        TelegramChatBroadcast $broadcast,
+        array $eventIds,
+        Carbon $publishAt,
+    ): bool {
+        foreach (array_values($eventIds) as $i => $eventId) {
+            DB::table('telegram.chat_broadcast_item_events')
+                ->where('item_id', $item->id)
+                ->where('event_id', $eventId)
+                ->update(['position' => $i + 1]);
+        }
+
+        return $this->recomposeRoster($item, $broadcast, $publishAt, [
+            'op' => 'reorder', 'order' => $eventIds,
+        ]);
+    }
+
+    /**
+     * Пересобрать подпись под изменившийся состав.
+     *
+     * Общее окончание всех правок состава: подпись обязана описывать ТЕКУЩИЕ
+     * строки. Вернувшийся false означает «состав не собрался» — вызывающий
+     * откатывает транзакцию, и запись остаётся прежней.
+     *
+     * @param  array<string, mixed>  $log
+     */
+    private function recomposeRoster(
+        TelegramChatBroadcastItem $item,
+        TelegramChatBroadcast $broadcast,
+        Carbon $publishAt,
+        array $log,
+    ): bool {
         $draft = $this->digestComposer->recompose($item->refresh(), $broadcast, $publishAt);
         if ($draft === null) {
             return false;
@@ -1442,10 +1539,8 @@ class TelegramChatBroadcastService
 
         $this->applyDigestDraft($item, $draft);
 
-        Log::info('broadcast.digest.event_replaced', [
+        Log::info('broadcast.digest.roster_changed', $log + [
             'item_id' => $item->id,
-            'out' => $outEventId,
-            'in' => $inEventId,
             'named' => count($draft['event_ids']),
         ]);
 

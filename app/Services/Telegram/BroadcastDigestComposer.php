@@ -256,14 +256,17 @@ final class BroadcastDigestComposer
             ])
             ->keyBy(fn ($r) => (int) $r->id);
 
+        // ПОРЯДОК СВЯЗЕЙ — ЭТО РЕШЕНИЕ ЧЕЛОВЕКА, и пересортировка по дате его
+        // стирала. У автоотбора сортировка по датам обоснована (см. pickNamed:
+        // отбор шёл по полноте карточки, и порядок на выходе был случайным), но
+        // сюда она попала копией. Состав, собранный руками, приходит уже в том
+        // порядке, в каком его выстроили, — position пишется с единицы подряд.
         $named = [];
         foreach ($ids as $id) {
             if ($rows->has($id)) {
                 $named[] = $rows->get($id);
             }
         }
-
-        usort($named, fn ($a, $b) => strcmp((string) $a->start_time, (string) $b->start_time));
 
         return $named;
     }
