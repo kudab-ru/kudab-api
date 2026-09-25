@@ -960,7 +960,12 @@ final class BroadcastDigestComposer
     ): string {
         $theme = $picked['theme'];
         $from = $publishAt->copy()->setTimezone(self::TZ);
-        $to = $from->copy()->addDays((int) config('broadcast_digest.window_days', 7));
+        // Срок в шапке — окно ЭТОЙ рубрики, а не общее. У «Бесплатно» оно
+        // пятидневное, и шапка «25 сентября – 2 октября» обещала бы восемь
+        // дней там, где отбор смотрит пять.
+        $to = $from->copy()->addDays(
+            (int) ($theme['window_days'] ?? config('broadcast_digest.window_days', 7)),
+        );
         $forms = (array) ($theme['forms'] ?? []);
 
         // Город в шапке не пишем — канал городской, а площадки в строках

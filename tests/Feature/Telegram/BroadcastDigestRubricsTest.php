@@ -84,18 +84,20 @@ class BroadcastDigestRubricsTest extends TestCase
     }
 
     /**
-     * Окно у «Бесплатно» короче недели.
+     * Окно у «Бесплатно» короче недели, но не короче пяти дней.
      *
-     * Иначе рубрика тянула бы события, которых на момент выхода ещё нет в
-     * афише: бесплатное объявляют за пару дней.
+     * Строка в подборке одна на день, поэтому названных не бывает больше, чем
+     * дней в окне. На трёх днях рубрика не дотягивала до обещанного минимума
+     * в три события, а раз в четыре выхода не набиралась совсем — замеры в
+     * докблоке `window_days` в config/broadcast_digest.php.
      */
     #[Test]
-    public function the_free_rubric_looks_three_days_ahead(): void
+    public function the_free_rubric_does_not_look_a_whole_week_ahead(): void
     {
         $this->onlyRubric('besplatno');
 
         $this->fill('Бесплатное', free: true);
-        $far = $this->event('Событие через неделю', 6, free: true);
+        $far = $this->event('Событие через неделю', 7, free: true);
 
         $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::now());
 
