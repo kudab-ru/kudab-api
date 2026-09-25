@@ -386,8 +386,12 @@ final class GrowthReport
         ]);
 
         $since = CarbonImmutable::parse($from);
+        // СТАТУС «posted», а не «sent»: такого статуса у записи нет вовсе
+        // (см. константы TelegramChatBroadcastItem), поэтому счётчик молча
+        // отдавал нули и весь блок «телеграм в обе стороны» на главной
+        // выглядел пустым — как будто по постам не переходят.
         $posts = TelegramChatBroadcastItem::query()
-            ->where('status', 'sent')
+            ->where('status', TelegramChatBroadcastItem::STATUS_POSTED)
             ->where('posted_at', '>=', $since)
             ->selectRaw('count(*) as sent')
             ->selectRaw('count(*) filter (where clicks is not null) as measured')

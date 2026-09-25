@@ -2,11 +2,11 @@
 
 namespace Tests\Feature\Admin;
 
+use App\Console\Commands\AnalyticsWarmCommand;
 use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
-use App\Console\Commands\AnalyticsWarmCommand;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -124,6 +124,83 @@ class AnalyticsGrowthTest extends TestCase
         );
         $this->assertFalse($data['blind']['gsc_connected']);
         $this->assertSame([], $response->json('meta.errors'));
+    }
+
+    /**
+     * Плитка переходов считает посты со статусом `posted`.
+     *
+     * Считала по `sent` — такого статуса у записи нет вовсе, поэтому счётчик
+     * молча отдавал нули, и весь блок «телеграм в обе стороны» на главной
+     * выглядел пустым: как будто по постам не переходят.
+     */
+    public function test_плитка_переходов_видит_опубликованные_посты(): void
+    {
+        $this->fakeAll();
+        $this->seedPostedPosts();
+
+        $telegram = $this->warmAndGet()->json('data.telegram');
+
+        $this->assertSame(3, $telegram['posts_sent'], 'три поста ушли в канал');
+        $this->assertSame(2, $telegram['posts_measured'], 'у двух переходы посчитаны');
+        $this->assertSame(1, $telegram['posts_with_clicks'], 'у одного они ненулевые');
+        $this->assertSame(7, $telegram['post_clicks']);
+    }
+
+    /** Посты за пределами окна и неопубликованные в плитку не попадают. */
+    public function test_плитка_переходов_не_берёт_чужое(): void
+    {
+        $this->fakeAll();
+        $this->seedPostedPosts();
+
+        $this->broadcastItem(status: 'posted', postedAt: CarbonImmutable::now()->subDays(60), clicks: 100);
+        $this->broadcastItem(status: 'pending', postedAt: null, clicks: null);
+        $this->broadcastItem(status: 'skipped', postedAt: CarbonImmutable::now()->subDay(), clicks: 50);
+
+        $telegram = $this->warmAndGet()->json('data.telegram');
+
+        $this->assertSame(3, $telegram['posts_sent'], 'старое, неотправленное и пропущенное не считаются');
+        $this->assertSame(7, $telegram['post_clicks']);
+    }
+
+    private function seedPostedPosts(): void
+    {
+        $this->broadcastItem(status: 'posted', postedAt: CarbonImmutable::now()->subDays(3), clicks: 7);
+        $this->broadcastItem(status: 'posted', postedAt: CarbonImmutable::now()->subDays(2), clicks: 0);
+        $this->broadcastItem(status: 'posted', postedAt: CarbonImmutable::now()->subDay(), clicks: null);
+    }
+
+    private function broadcastItem(string $status, ?CarbonImmutable $postedAt, ?int $clicks): void
+    {
+        $broadcastId = DB::table('telegram.chat_broadcasts')->value('id')
+            ?? $this->seedBroadcast();
+
+        DB::table('telegram.chat_broadcast_items')->insert([
+            'broadcast_id' => $broadcastId,
+            'kind' => 'event',
+            'status' => $status,
+            'posted_at' => $postedAt,
+            'clicks' => $clicks,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
+    private function seedBroadcast(): int
+    {
+        $chatId = DB::table('telegram.chats')->insertGetId([
+            'telegram_chat_id' => -1001234567890,
+            'chat_type' => 'channel',
+            'title' => 'Тестовый канал',
+            'is_active' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        return (int) DB::table('telegram.chat_broadcasts')->insertGetId([
+            'chat_id' => $chatId,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     public function test_пустой_кэш_не_роняет_страницу(): void
