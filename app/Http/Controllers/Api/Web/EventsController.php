@@ -526,18 +526,11 @@ class EventsController extends Controller
      */
     private function weekendWindow(Carbon $now): array
     {
-        $dow = $now->dayOfWeek;
-
-        if ($dow === Carbon::SATURDAY) {
-            $from = $now->copy()->startOfDay();
-            $to   = $now->copy()->addDay()->endOfDay();
-        } elseif ($dow === Carbon::SUNDAY) {
-            $from = $now->copy()->startOfDay();
-            $to   = $now->copy()->endOfDay();
-        } else {
-            $from = $now->copy()->addDays((Carbon::SATURDAY - $dow + 7) % 7)->startOfDay();
-            $to   = $from->copy()->addDay()->endOfDay();
-        }
+        // Формула переехала в Support: по ней же считает окно подборка «На
+        // выходных», и подвал её поста ведёт сюда, на ?when=weekend. Две копии
+        // разошлись бы на один день — и число в посте перестало бы сходиться
+        // с тем, что читатель увидит по ссылке.
+        [$from, $to] = \App\Support\WeekendWindow::for($now);
 
         return [$from->toDateTimeString(), $to->toDateTimeString()];
     }

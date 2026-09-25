@@ -7,6 +7,7 @@ namespace App\Services\Telegram;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Support\Telegram\VenueName;
+use App\Support\WeekendWindow;
 use Carbon\Carbon;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
@@ -83,7 +84,17 @@ final class BroadcastDigestComposer
 
         $gathered = [];
 
+        $weekday = (int) $publishAt->copy()->setTimezone(self::TZ)->isoWeekday();
+
         foreach ((array) config('broadcast_digest.themes', []) as $theme) {
+            // Рубрика может иметь смысл не в любой день. «На выходных» во
+            // вторник — это приглашение подождать четыре дня; такое читают
+            // один раз и отписываются.
+            $days = (array) ($theme['only_weekdays'] ?? []);
+            if ($days !== [] && ! in_array($weekday, array_map('intval', $days), true)) {
+                continue;
+            }
+
             $picked = $this->pickForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $forItem?->id);
             if ($picked !== null) {
                 $gathered[(string) ($theme['slug'] ?? '')] = [$theme, $picked];
@@ -314,7 +325,7 @@ final class BroadcastDigestComposer
 
         return [
             'theme' => $theme,
-            'named' => $this->pickNamed($rows, self::namedRange($theme)),
+            'named' => $this->pickNamed($rows, self::namedRange($theme), (bool) ($theme['one_per_day'] ?? true)),
             'total' => $total,
             'venues' => $venues,
         ];
@@ -528,6 +539,19 @@ final class BroadcastDigestComposer
         // одинаковое, поэтому развилка живёт здесь, а не в отдельном пуле.
         $pick = (string) ($theme['pick'] ?? 'interest');
 
+        // 'all' — отбор без фильтра, одно только окно; на нём стоит рубрика
+        // «На выходных». Перечень закрытый НАМЕРЕННО: без него опечатка в
+        // конфиге («fre» вместо «free») тихо превращала бы рубрику про деньги
+        // в подборку всего подряд, и заметить это можно было бы только в
+        // канале.
+        if (! in_array($pick, ['interest', 'free', 'price_max', 'tod', 'all'], true)) {
+            Log::warning('broadcast.digest.unknown_pick', [
+                'theme' => $theme['slug'] ?? null, 'pick' => $pick,
+            ]);
+
+            return null;
+        }
+
         $ids = [];
         if ($pick === 'interest') {
             $ids = $this->interestTree((string) $theme['interest']);
@@ -536,12 +560,10 @@ final class BroadcastDigestComposer
             }
         }
 
-        // Окно у рубрики может быть своё. Бесплатное объявляют поздно: замер
-        // 25.09.2026 — 35 событий в ближайшую неделю и 4 в следующую, поэтому
-        // недельное окно для него почти пустое, а трёхдневное полное.
-        $until = $publishAt->copy()->addDays(
-            (int) ($theme['window_days'] ?? config('broadcast_digest.window_days', 7)),
-        );
+        // Окно у рубрики может быть своё — и по длине, и по виду. Бесплатное
+        // объявляют поздно: замер 25.09.2026 — 35 событий в ближайшую неделю и
+        // 4 в следующую, поэтому недельное окно для него почти пустое.
+        [$since, $until] = $this->themeWindow((array) $theme, $publishAt);
 
         $rows = DB::table('events as e')
             ->when($pick === 'interest', fn ($q) => $q->join('event_interest as ei', 'ei.event_id', '=', 'e.id'))
@@ -551,6 +573,10 @@ final class BroadcastDigestComposer
             ->where('e.status', 'active')
             ->where('c.city_id', $cityId)
             ->where('e.start_time', '<=', $until)
+            // Нижняя граница нужна только КАЛЕНДАРНОМУ окну: у «N дней вперёд»
+            // низ и так момент выхода, а у «выходных» он суббота, и без этого
+            // условия в подборку на выходные попадал бы вечер пятницы.
+            ->when($since !== null, fn ($q) => $q->where('e.start_time', '>=', $since))
             // Срок — общим правилом ([[PostTiming]]), а не «начнётся позже
             // поста»: у многодневки успеть надо к ЗАКРЫТИЮ. Из-за своей копии
             // рубрика «Выставки недели» по построению не могла назвать
@@ -873,7 +899,7 @@ final class BroadcastDigestComposer
     /**
      * @param  array{0:int,1:int}  $range  сколько назвать: минимум и максимум
      */
-    private function pickNamed(\Illuminate\Support\Collection $rows, array $range = [3, 3]): array
+    private function pickNamed(\Illuminate\Support\Collection $rows, array $range = [3, 3], bool $onePerDay = true): array
     {
         [$min, $max] = $range;
         $minDescription = (int) config('broadcast_digest.min_description', 120);
@@ -908,7 +934,12 @@ final class BroadcastDigestComposer
             if (isset($venues[$venue])) {
                 continue;
             }
-            if (isset($days[$day])) {
+            // «Одна строка на день» существует ради НЕДЕЛЬНОЙ подборки: она
+            // раскладывает пост по дням вперёд. На двухдневном окне это же
+            // правило превращается в потолок из двух строк — то есть рубрика
+            // «На выходных» физически не может назвать больше двух событий.
+            // Поэтому правило снимаемое, а не вечное.
+            if ($onePerDay && isset($days[$day])) {
                 continue;
             }
 
@@ -980,13 +1011,12 @@ final class BroadcastDigestComposer
         ?TelegramChatBroadcastItem $item = null,
     ): string {
         $theme = $picked['theme'];
-        $from = $publishAt->copy()->setTimezone(self::TZ);
-        // Срок в шапке — окно ЭТОЙ рубрики, а не общее. У «Бесплатно» оно
-        // пятидневное, и шапка «25 сентября – 2 октября» обещала бы восемь
-        // дней там, где отбор смотрит пять.
-        $to = $from->copy()->addDays(
-            (int) ($theme['window_days'] ?? config('broadcast_digest.window_days', 7)),
-        );
+        // Срок в шапке — окно ЭТОЙ рубрики, а не общее, и считается тем же
+        // методом, что окно отбора. Пока их было два, шапка «25 сентября –
+        // 2 октября» обещала восемь дней там, где отбор смотрел пять.
+        [$since, $to] = $this->themeWindow((array) $theme, $publishAt);
+        // У окна «N дней вперёд» своего низа нет — им служит сам момент выхода.
+        $from = $since ?? $publishAt->copy()->setTimezone(self::TZ);
         $forms = (array) ($theme['forms'] ?? []);
 
         // Город в шапке не пишем — канал городской, а площадки в строках
@@ -1002,8 +1032,8 @@ final class BroadcastDigestComposer
 
         // Число — из той же выборки, на которую ведёт подвал. У рубрик без
         // фильтра ленты (тематических) его нет, и шапка остаётся как была.
-        $feedFilters = $this->feedFilters((array) $theme, $broadcast, $from, $to);
-        $total = $this->feedTotal($feedFilters);
+        $feed = $this->feedSpec((array) $theme, $broadcast, $from, $to);
+        $total = $this->feedTotal($feed['count'] ?? null);
 
         $head = trim(($theme['emoji'] ?? '').' <b>'.$this->escape($headline).'</b>')
             .' · '.$this->escape($range);
@@ -1060,7 +1090,7 @@ final class BroadcastDigestComposer
         // же нажатием.
         $label = 'Вся афиша '.($forms[2] ?? mb_strtolower((string) $theme['title']));
         $link = $this->link(
-            $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id, $theme, $feedFilters),
+            $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id, $theme, $feed['link'] ?? null),
             $label,
         );
 
@@ -1072,7 +1102,7 @@ final class BroadcastDigestComposer
         // 23 события — вся афиша событий» повторяет слово дважды в семи словах.
         $footer = $rest > 0
             ? 'Остальные '.$rest.' — '.$this->link(
-                $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id, $theme, $feedFilters),
+                $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id, $theme, $feed['link'] ?? null),
                 (string) ($theme['feed_label'] ?? mb_strtolower($label)),
             )
             : $link;
@@ -1401,6 +1431,35 @@ final class BroadcastDigestComposer
     }
 
     /**
+     * Окно рубрики: где начинается и где кончается её отбор.
+     *
+     * ОДИН метод на отбор и на шапку. Пока их было два, шапка обещала восемь
+     * дней там, где отбор смотрел пять.
+     *
+     * Видов два. «N дней вперёд» — от момента выхода, нижней границы нет:
+     * снизу и так стоит срок ([[PostTiming]]). «Выходные» — календарные
+     * суббота и воскресенье, и вот у них нижняя граница обязательна, иначе в
+     * подборку на выходные попадёт вечер пятницы.
+     *
+     * @param  array<string, mixed>  $theme
+     * @return array{0: Carbon|null, 1: Carbon}
+     */
+    private function themeWindow(array $theme, Carbon $publishAt): array
+    {
+        $at = $publishAt->copy()->setTimezone(self::TZ);
+
+        if (($theme['window'] ?? '') === 'weekend') {
+            // Той же формулой, что и лента: подвал такой рубрики ведёт на
+            // ?when=weekend, и разойтись им нельзя. См. [[WeekendWindow]].
+            return WeekendWindow::for($at);
+        }
+
+        return [null, $at->copy()->addDays(
+            (int) ($theme['window_days'] ?? config('broadcast_digest.window_days', 7)),
+        )];
+    }
+
+    /**
      * Строка времени: «сб 13:30» или «сб 26 сентября, 18:00».
      *
      * Короткая форма экономит двенадцать знаков на строке — в посте из пяти
@@ -1526,17 +1585,24 @@ final class BroadcastDigestComposer
      * @param  array<string, mixed>|null  $theme  рубрика, если у неё своя посадка
      */
     /**
-     * Фильтр ленты рубрики — ОДНО описание и для ссылки, и для числа.
+     * Фильтр ленты рубрики: ОДНО описание, две стороны.
      *
-     * К фильтру рубрики добавляются границы её окна: без них ссылка ведёт на
-     * всю будущую афишу, и любое число рядом с ней становится враньём.
-     * Рубрика без `feed` (тематические, у них подвал ведёт на страницу
-     * категории) возвращает null — и числа у такой не будет.
+     * `count` — чем считаем: фильтр рубрики плюс город и ГРАНИЦЫ ЕЁ ОКНА.
+     * `link` — что пишем в адрес: тот же фильтр как объявлен, плюс город.
+     *
+     * Почему они не одинаковы и почему это не расхождение. У «На выходных»
+     * объявлено `when=weekend` — лента развернёт его САМА, той же формулой
+     * ([[WeekendWindow]]), которой посчитано окно рубрики. Писать в адрес ещё
+     * и даты значило бы удлинить ссылку вчетверо, не добавив ни одного факта.
+     * У остальных рубрик `when` нет, и тогда границы идут и в счёт, и в адрес.
+     *
+     * Рубрика без `feed` (тематические, подвал ведёт на страницу категории)
+     * возвращает null — и числа у такой не будет.
      *
      * @param  array<string, mixed>  $theme
-     * @return array<string, mixed>|null
+     * @return array{count: array<string, mixed>, link: array<string, mixed>}|null
      */
-    private function feedFilters(array $theme, TelegramChatBroadcast $broadcast, Carbon $from, Carbon $to): ?array
+    private function feedSpec(array $theme, TelegramChatBroadcast $broadcast, Carbon $from, Carbon $to): ?array
     {
         $feed = $theme['feed'] ?? null;
         if (! is_array($feed) || $feed === []) {
@@ -1548,11 +1614,24 @@ final class BroadcastDigestComposer
             return null;
         }
 
-        return $feed + [
+        // Считаем ВСЕГДА по границам окна рубрики, а не по «сегодня». Пост
+        // собирается заранее — за сутки до слота, а то и раньше: взяв
+        // now(), подборка на выходные, собранная в четверг, посчитала бы
+        // прошедшие выходные, а в шапке стояли бы будущие.
+        $count = Arr::except($feed, ['when']) + [
             'city_id' => (int) $cityId,
             'date_from' => $from->copy()->setTimezone(self::TZ)->toDateTimeString(),
             'date_to' => $to->copy()->setTimezone(self::TZ)->toDateTimeString(),
         ];
+
+        $link = isset($feed['when'])
+            ? $feed
+            : $feed + [
+                'date_from' => $count['date_from'],
+                'date_to' => $count['date_to'],
+            ];
+
+        return ['count' => $count, 'link' => $link];
     }
 
     /**
@@ -1581,7 +1660,7 @@ final class BroadcastDigestComposer
         }
     }
 
-    private function landingUrl(TelegramChatBroadcast $broadcast, string $slug, ?int $itemId = null, ?array $theme = null, ?array $feedFilters = null): string
+    private function landingUrl(TelegramChatBroadcast $broadcast, string $slug, ?int $itemId = null, ?array $theme = null, ?array $linkFilters = null): string
     {
         $base = rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/');
         $citySlug = $broadcast->chat?->city?->slug ?? '';
@@ -1597,8 +1676,8 @@ final class BroadcastDigestComposer
         // Адрес собирается из ТОГО ЖЕ фильтра, по которому посчитано число в
         // посте. Готовой строки-адреса у рубрики больше нет намеренно: пока
         // они лежали порознь, число и страница могли разъехаться молча.
-        $query = $feedFilters !== null
-            ? http_build_query(Arr::except($feedFilters, ['city_id']) + ['city' => $citySlug])
+        $query = $linkFilters !== null
+            ? http_build_query($linkFilters + ['city' => $citySlug])
             : '';
 
         $url = match (true) {

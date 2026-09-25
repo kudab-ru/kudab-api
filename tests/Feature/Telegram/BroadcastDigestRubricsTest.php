@@ -521,10 +521,130 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertStringContainsString('Бесплатно в эти дни', $caption, 'пост собрался');
     }
 
-    /** Подпись собранной подборки — тем же путём, что и в жизни. */
-    private function caption(): string
+    /* ──────────────── окно «выходные» ──────────────── */
+
+    /**
+     * Календарное окно: суббота и воскресенье, а не «N дней вперёд».
+     *
+     * Выход в пятницу, значит выходные — завтра и послезавтра. Событие
+     * пятничного вечера в такую подборку попасть не должно: оно не «на
+     * выходных», оно сегодня.
+     */
+    #[Test]
+    public function the_weekend_rubric_takes_saturday_and_sunday_only(): void
     {
-        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::now());
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow')); // пятница
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $this->event('Пятничный вечер', 0, free: false, priceMin: 500, hour: 20, description: $long);
+        foreach ([1, 1, 1, 2, 2] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+
+        $caption = $this->caption(Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertStringNotContainsString('Пятничный вечер', $caption, 'пятница — не выходные');
+        $this->assertStringContainsString('На выходных', $caption);
+    }
+
+    /**
+     * Три события одной субботы в одном посте.
+     *
+     * Правило «одна строка на день» на двухдневном окне даёт потолок в две
+     * строки — то есть рубрика физически не смогла бы назвать больше двух.
+     * Поэтому у неё оно снято, и это условие её существования.
+     */
+    #[Test]
+    public function the_weekend_rubric_names_several_events_of_one_day(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 1, 2, 2] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertGreaterThan(2, count($out['event_ids']),
+            'на двух днях названо больше двух — правило дня снято');
+    }
+
+    /** Во вторник такой рубрики нет: «на выходных» за четыре дня читают один раз. */
+    #[Test]
+    public function the_weekend_rubric_is_absent_on_a_tuesday(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 10:00', 'Europe/Moscow')); // вторник
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([4, 4, 4, 5, 5] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-15 14:00', 'Europe/Moscow'));
+
+        $this->assertNull($out, 'единственная рубрика не допущена — подборки нет');
+    }
+
+    /**
+     * ИНВАРИАНТ ПРИ СБОРКЕ ЗАРАНЕЕ: счёт считается по окну ВЫХОДА, а не по «сегодня».
+     *
+     * Подборка собирается за сутки до слота, а то и раньше. Пока счёт брал
+     * now(), подборка на выходные, собранная в четверг, считала бы одни
+     * выходные, а в шапке стояли бы другие.
+     */
+    #[Test]
+    public function the_count_follows_the_publish_window_not_today(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow')); // пятница
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        // Эти выходные — 19–20 сентября: пять событий.
+        foreach ([1, 1, 1, 2, 2] as $i => $day) {
+            $this->event('Ближнее '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+        // Следующие — 26–27 сентября: восемь.
+        foreach ([8, 8, 8, 8, 9, 9, 9, 9] as $i => $day) {
+            $this->event('Дальнее '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + ($i % 6), description: $long);
+        }
+
+        // Выход через неделю: считать надо ДАЛЬНИЕ выходные, не ближние.
+        $caption = $this->caption(Carbon::parse('2026-09-25 14:00', 'Europe/Moscow'));
+
+        $this->assertStringContainsString('8 событий', $caption, 'счёт по окну выхода');
+        $this->assertStringNotContainsString('5 событий', $caption);
+    }
+
+    /** У рубрики с `when` ссылка короткая: даты лента разворачивает сама, той же формулой. */
+    #[Test]
+    public function the_weekend_footer_link_stays_short(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 1, 2, 2] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+
+        $caption = $this->caption(Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertMatchesRegularExpression('/href="[^"]*when=weekend/u', $caption);
+        $this->assertDoesNotMatchRegularExpression('/href="[^"]*when=weekend[^"]*date_from=/u', $caption,
+            'даты в такой ссылке лишние — лента считает их сама');
+    }
+
+    /** Подпись собранной подборки — тем же путём, что и в жизни. */
+    private function caption(?Carbon $at = null): string
+    {
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), $at ?? Carbon::now());
         $this->assertNotNull($out, 'подборка обязана собраться');
 
         return (string) $out['caption'];
