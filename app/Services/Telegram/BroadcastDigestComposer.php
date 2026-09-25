@@ -51,6 +51,16 @@ final class BroadcastDigestComposer
     private const WEEKDAYS = [1 => 'пн', 2 => 'вт', 3 => 'ср', 4 => 'чт', 5 => 'пт', 6 => 'сб', 7 => 'вс'];
 
     /**
+     * Ниже этого фразу заказывать бессмысленно: в 40 знаков помещается
+     * назывное предложение, а не мысль. Если бюджет вышел меньше — значит
+     * строк слишком много, и это чинится составом, а не длиной фразы.
+     */
+    private const HOOK_BUDGET_MIN = 40;
+
+    /** Сколько места осталось на фразу в ПОСЛЕДНЕЙ собранной подписи. */
+    private int $hookBudget = 0;
+
+    /**
      * Лента нужна ради ОДНОГО числа — того же, что читатель увидит, нажав на
      * подвал. Своё считать нельзя: пул рубрики уже прошёл стоп-лист, жанровые
      * отсечки, вычет показанного и схлопывание повторов, и к числу на странице
@@ -133,6 +143,8 @@ final class BroadcastDigestComposer
             'theme' => $best['theme'],
             'theme_slug' => (string) $best['theme']['slug'],
             'caption' => $this->buildCaption($broadcast, $best, $publishAt, $forItem),
+            // Сколько знаков осталось на фразу — читает парсер, когда её пишет.
+            'hook_budget' => $this->hookBudget,
             'event_ids' => array_map(fn ($e) => (int) $e->id, $best['named']),
             'total' => $best['total'],
             'venues' => $best['venues'],
@@ -235,6 +247,7 @@ final class BroadcastDigestComposer
             'theme' => $picked['theme'],
             'theme_slug' => $slug,
             'caption' => $this->buildCaption($broadcast, $picked, $publishAt, $item),
+            'hook_budget' => $this->hookBudget,
             'event_ids' => array_map(fn ($e) => (int) $e->id, $named),
             'total' => $picked['total'],
             'venues' => $picked['venues'],
@@ -1120,6 +1133,22 @@ final class BroadcastDigestComposer
         // в середине читается как сбой. Строка снимается целиком, так что
         // обрезанных на полуслове по-прежнему не бывает.
         $soft = (int) config('broadcast_digest.caption_soft_limit', 950);
+
+        // СКОЛЬКО МЕСТА ОСТАЁТСЯ НА ФРАЗУ — считаем здесь и сохраняем, потому
+        // что только здесь известна вся арифметика: шапка со счётом, подвал,
+        // настоящие названия и строки фактов.
+        //
+        // Бюджет зависит от ЧИСЛА строк, а он у рубрик разный: замер
+        // 25.09.2026 — при трёх названных на фразу остаётся около 200 знаков,
+        // при пяти всего 91, а модель пишет в среднем 101. То есть на пяти
+        // строках фразы начали бы сниматься с конца просто потому, что порог
+        // был один на всех.
+        $bare = implode("\n\n", array_merge($top, $lines, [$footer]));
+        $named = max(1, count($picked['named']));
+        $this->hookBudget = max(
+            self::HOOK_BUDGET_MIN,
+            (int) floor(($soft - \App\Support\Telegram\CaptionLength::visible($bare)) / $named),
+        );
 
         for ($keep = count($rich); $keep >= 0; $keep--) {
             $body = array_merge(

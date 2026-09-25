@@ -641,6 +641,77 @@ class BroadcastDigestRubricsTest extends TestCase
             'даты в такой ссылке лишние — лента считает их сама');
     }
 
+    /* ──────────────── бюджет фразы ──────────────── */
+
+    /**
+     * Сколько места осталось на фразу — считает api и кладёт в мету.
+     *
+     * Порог в парсере один на все рубрики, а места у трёх строк и у пяти
+     * отличается вдвое: замер 25.09.2026 — при трёх названных на фразу
+     * остаётся около 200 знаков, при пяти всего около 100, а модель пишет в
+     * среднем 101. Без бюджета пятая строка теряла бы фразу просто потому,
+     * что порог не знал про число строк.
+     */
+    #[Test]
+    public function the_hook_budget_shrinks_as_the_roster_grows(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow')); // пятница
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+
+        $this->onlyRubric('na-vyhodnyh');
+        foreach ([1, 1, 1, 2, 2] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+
+        $wide = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($wide);
+        $this->assertGreaterThan(3, count($wide['event_ids']), 'рубрика назвала больше трёх');
+        $this->assertGreaterThan(0, $wide['hook_budget'], 'бюджет посчитан');
+
+        // Та же лента, но рубрика на три строки: на фразу остаётся заметно больше.
+        $this->onlyRubric('spektakli');
+        foreach ([1, 2, 3, 4, 5] as $i => $day) {
+            $this->event('Спектакль '.($i + 1), $day, free: false, priceMin: 700, description: $long);
+        }
+
+        $narrow = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($narrow);
+        $this->assertGreaterThan(
+            $wide['hook_budget'],
+            $narrow['hook_budget'],
+            'на трёх строках места на фразу больше, чем на пяти',
+        );
+    }
+
+    /** Бюджет доезжает до меты — по ней парсер и пишет. */
+    #[Test]
+    public function the_budget_reaches_the_meta(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+
+        $channel = $this->channel();
+        $draft = app(BroadcastDigestComposer::class)->compose($channel, Carbon::now());
+        $this->assertNotNull($draft);
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $channel->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = Carbon::now()->addDay();
+        $item->save();
+
+        app(\App\Services\Telegram\TelegramChatBroadcastService::class)->applyDigestDraft($item, $draft);
+
+        $meta = (array) $item->fresh()->digest_meta;
+        $this->assertArrayHasKey('hook_budget', $meta);
+        $this->assertGreaterThan(40, (int) $meta['hook_budget']);
+    }
+
     /** Подпись собранной подборки — тем же путём, что и в жизни. */
     private function caption(?Carbon $at = null): string
     {
@@ -675,13 +746,25 @@ class BroadcastDigestRubricsTest extends TestCase
         }
     }
 
+    /**
+     * Оставить в конфиге только названные рубрики.
+     *
+     * Фильтруем от ИСХОДНОГО списка, а не от текущего: второй вызов в одном
+     * тесте иначе фильтрует уже отфильтрованное и оставляет пусто — подборка
+     * молча перестаёт собираться, и падает не та строка, где ошибка.
+     */
     private function onlyRubric(string ...$slugs): void
     {
+        $this->allThemes ??= (array) config('broadcast_digest.themes', []);
+
         config(['broadcast_digest.themes' => array_values(array_filter(
-            (array) config('broadcast_digest.themes', []),
+            $this->allThemes,
             static fn (array $t) => in_array($t['slug'] ?? '', $slugs, true),
         ))]);
     }
+
+    /** @var list<array<string, mixed>>|null */
+    private ?array $allThemes = null;
 
     private function postedDigest(TelegramChatBroadcast $channel, string $themeSlug): void
     {
