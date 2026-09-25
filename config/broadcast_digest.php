@@ -63,7 +63,7 @@ return [
          * подпись альбома не влезает (замер: шапка с подвалом 147 знаков,
          * названное с фразой около 176, порог 950).
          */
-        ['slug' => 'besplatno', 'title' => 'Бесплатно', 'emoji' => '🆓',
+        ['slug' => 'besplatno', 'title' => 'Бесплатно', 'headline' => 'Бесплатно в эти дни', 'emoji' => '🆓',
             'forms' => ['событие', 'события', 'событий'],
             'pick' => 'free',
             // Трёхдневное окно, а не недельное: бесплатное объявляют поздно.
@@ -73,7 +73,7 @@ return [
             'named' => [3, 4],
             'landing' => '/events?free=1'],
 
-        ['slug' => 'deshevle-500', 'title' => 'Дешевле 500', 'emoji' => '💸',
+        ['slug' => 'deshevle-500', 'title' => 'Дешевле 500', 'headline' => 'Дешевле 500 рублей', 'emoji' => '💸',
             'forms' => ['событие', 'события', 'событий'],
             'pick' => 'price_max',
             'price_max' => 500,
@@ -83,7 +83,7 @@ return [
             'only_if_missing' => 'besplatno',
             'landing' => '/events?price_max=500'],
 
-        ['slug' => 'vecherom', 'title' => 'Вечером', 'emoji' => '🌙',
+        ['slug' => 'vecherom', 'title' => 'Вечером', 'headline' => 'Вечером на этой неделе', 'emoji' => '🌙',
             'forms' => ['событие', 'события', 'событий'],
             'pick' => 'tod',
             'hour_from' => 20,

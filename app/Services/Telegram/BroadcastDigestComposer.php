@@ -561,6 +561,12 @@ final class BroadcastDigestComposer
                     "EXTRACT(HOUR FROM e.start_time AT TIME ZONE 'Europe/Moscow') >= ?",
                     [(int) ($theme['hour_from'] ?? 20)],
                 ))
+            // РУБРИКЕ ПО ПОВОДУ НУЖНО НАЧАЛО ВПЕРЕДИ, а не «идёт до сих пор».
+            // Общее правило срока пропускает многодневку, пока она не
+            // закрылась, — выставке так и надо. А «Вечером» с таким правилом
+            // называет спектакль, начавшийся 8 июля, и строка выходит
+            // «ср 8 июля, 20:00»: дата в прошлом под заголовком про эту неделю.
+            ->when($pick !== 'interest', fn ($q) => $q->where('e.start_time', '>=', $publishAt))
             ->where(function ($q) {
                 $q->whereNull('e.tickets_status')->orWhere('e.tickets_status', '<>', 'sold_out');
             })
@@ -963,7 +969,12 @@ final class BroadcastDigestComposer
             ? sprintf('%d–%d %s', $from->day, $to->day, self::MONTHS[$to->month])
             : sprintf('%d %s – %d %s', $from->day, self::MONTHS[$from->month], $to->day, self::MONTHS[$to->month]);
 
-        $head = trim(($theme['emoji'] ?? '').' <b>'.$this->escape((string) $theme['title']).' недели</b>')
+        // «Спектакли НЕДЕЛИ» — про тему, и это верно. Но «Вечером недели» или
+        // «Бесплатно недели» по-русски не говорят: у рубрик по поводу заголовок
+        // свой, и задаётся он в конфиге.
+        $headline = (string) ($theme['headline'] ?? ($theme['title'].' недели'));
+
+        $head = trim(($theme['emoji'] ?? '').' <b>'.$this->escape($headline).'</b>')
             .' · '.$this->escape($range);
 
         // Подводка ведущего — про эту неделю и эту тройку. Её место занимала
