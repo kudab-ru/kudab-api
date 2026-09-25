@@ -7,6 +7,7 @@ namespace App\Services\Telegram;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Support\CityCase;
+use App\Support\Telegram\KindEmoji;
 use App\Support\Telegram\VenueName;
 use App\Support\WeekendWindow;
 use Carbon\Carbon;
@@ -290,7 +291,7 @@ final class BroadcastDigestComposer
                 // price_text — ради «по регистрации»: отдельного поля под это нет,
                 // слово живёт только в тексте цены. time_precision — ради событий
                 // без времени: у них в start_time полночь, и «сб 00:00» это враньё.
-                'e.price_text', 'e.time_precision',
+                'e.price_text', 'e.time_precision', 'e.content_kind',
                 'v.name as venue_name',
             ])
             ->keyBy(fn ($r) => (int) $r->id);
@@ -638,7 +639,7 @@ final class BroadcastDigestComposer
                 // price_text — ради «по регистрации»: отдельного поля под это нет,
                 // слово живёт только в тексте цены. time_precision — ради событий
                 // без времени: у них в start_time полночь, и «сб 00:00» это враньё.
-                'e.price_text', 'e.time_precision',
+                'e.price_text', 'e.time_precision', 'e.content_kind',
                 'v.name as venue_name',
             ]);
 
@@ -1102,6 +1103,7 @@ final class BroadcastDigestComposer
         // Форма даты решается ОДИН РАЗ на весь пост: вперемешку «сб 13:30» и
         // «сб 26 сентября, 18:00» читаются как сбой, а не как решение.
         $shortDates = $this->weekdaysAreDistinct($picked['named']);
+        $emoji = $this->emojiFor($picked['named'], $item);
 
         $lines = [];
         $rich = [];
@@ -1114,7 +1116,11 @@ final class BroadcastDigestComposer
 
             // НЕ $head: этим именем выше назван заголовок поста, и повторное
             // использование затирало его названием последнего события.
-            $titleLink = '<b>'.$this->link($this->eventUrl((int) $row->id, $item?->id), (string) $row->title).'</b>';
+            // Значок ПЕРЕД названием, как в посте ленты. Пустой не оставляет
+            // после себя пробела: строка начиналась бы с отступа.
+            $mark = $emoji[(int) $row->id] ?? '';
+            $titleLink = trim($mark.' <b>'
+                .$this->link($this->eventUrl((int) $row->id, $item?->id), (string) $row->title).'</b>');
             // БЕЗ КУРСИВА. Он ничего не стоит по длине (теги в подпись не
             // считаются), поэтому дело только в виде: в подборке пять таких
             // строк подряд, и наклонный блок читается как сноска, а не как
@@ -1520,6 +1526,56 @@ final class BroadcastDigestComposer
         return [null, $at->copy()->addDays(
             (int) ($theme['window_days'] ?? config('broadcast_digest.window_days', 7)),
         )];
+    }
+
+    /**
+     * Значок для каждой названной строки.
+     *
+     * Подавление «тема названа словом» здесь ВЫКЛЮЧЕНО — и это главное
+     * отличие от поста события. В посте значок стоит вплотную к названию, и
+     * повтор первого слова там лишний. В подборке он образует столбец слева
+     * от пяти строк, и дыра в нём читается как сбой вёрстки: замер 25.09.2026
+     * — с подавлением значка нет у 167 событий из 465, без него у 12.
+     *
+     * Рука сильнее карты: значок из digest_meta.emoji перекрывает
+     * вычисленный. Карта угадывает тему, но не замысел — у археологического
+     * раскопа в ней экскурсия, а не лопата.
+     *
+     * @param  list<object>  $named
+     * @return array<int, string>
+     */
+    private function emojiFor(array $named, ?TelegramChatBroadcastItem $item): array
+    {
+        if ($named === []) {
+            return [];
+        }
+
+        $ids = array_map(static fn ($r) => (int) $r->id, $named);
+
+        $slugs = [];
+        foreach (DB::table('event_interest as ei')
+            ->join('interests as i', 'i.id', '=', 'ei.interest_id')
+            ->whereIn('ei.event_id', $ids)
+            ->orderBy('ei.rank')
+            ->get(['ei.event_id', 'i.slug']) as $row) {
+            $slugs[(int) $row->event_id][] = (string) $row->slug;
+        }
+
+        $manual = (array) (($item->digest_meta ?? [])['emoji'] ?? []);
+
+        $out = [];
+        foreach ($named as $row) {
+            $id = (int) $row->id;
+            $byHand = trim((string) ($manual[(string) $id] ?? ''));
+
+            $out[$id] = $byHand !== '' ? $byHand : KindEmoji::for([
+                'title' => $row->title,
+                'interest_slugs' => $slugs[$id] ?? [],
+                'content_kind' => $row->content_kind ?? null,
+            ], suppressWhenTitleSaysIt: false);
+        }
+
+        return $out;
     }
 
     /**

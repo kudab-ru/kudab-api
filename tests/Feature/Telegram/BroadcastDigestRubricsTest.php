@@ -781,6 +781,65 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertStringNotContainsString('<i>', $this->caption());
     }
 
+    /* ──────────────── значок у строки ──────────────── */
+
+    /**
+     * Подавление «тема названа словом» в подборке ВЫКЛЮЧЕНО.
+     *
+     * Заголовки фикстуры начинаются со слова «Спектакль» — ровно тот случай,
+     * когда пост события значок снимает. В подборке он образует столбец слева
+     * от пяти строк, и дыра в нём читается как сбой вёрстки: замер 25.09.2026
+     * — с подавлением значка нет у 167 событий из 465, без него у 12.
+     */
+    #[Test]
+    public function a_line_keeps_its_emoji_even_when_the_title_says_the_theme(): void
+    {
+        $this->onlyRubric('spektakli');
+        $this->fill('Спектакль', free: false, priceMin: 700);
+
+        $caption = $this->caption();
+
+        $this->assertMatchesRegularExpression('/\x{1F3AD} <b><a /u', $caption,
+            'значок театра стоит перед названием, хотя «Спектакль» есть в заголовке');
+    }
+
+    /**
+     * Рука сильнее карты.
+     *
+     * Карта угадывает тему, но не замысел: у археологического раскопа в ней
+     * экскурсия, а не лопата.
+     */
+    #[Test]
+    public function a_hand_picked_emoji_wins_over_the_map(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+
+        $channel = $this->channel();
+        $draft = app(BroadcastDigestComposer::class)->compose($channel, Carbon::now());
+        $this->assertNotNull($draft);
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $channel->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = Carbon::now()->addDay();
+        $item->save();
+
+        app(\App\Services\Telegram\TelegramChatBroadcastService::class)->applyDigestDraft($item, $draft);
+
+        $first = (int) $draft['event_ids'][0];
+        $meta = (array) $item->fresh()->digest_meta;
+        $meta['emoji'] = [(string) $first => '⛏️'];
+        $item->digest_meta = $meta;
+        $item->save();
+
+        $again = app(BroadcastDigestComposer::class)->recompose($item->fresh(), $channel, Carbon::now());
+
+        $this->assertNotNull($again);
+        $this->assertStringContainsString('⛏️ <b><a ', $again['caption'], 'поставленный рукой значок в посте');
+    }
+
     /** Подпись собранной подборки — тем же путём, что и в жизни. */
     private function caption(?Carbon $at = null): string
     {
