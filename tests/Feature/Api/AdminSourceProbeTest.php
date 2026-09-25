@@ -111,6 +111,101 @@ class AdminSourceProbeTest extends TestCase
         ]);
     }
 
+    /**
+     * Сайт одного места заводится площадкой, а не агрегатором.
+     *
+     * Агрегатору домашний адрес намеренно не подставляется — у него «дом» это
+     * редакция. Для сайта учреждения это тупик: страницы собираются, события
+     * извлекаются, а карточек ноль, потому что места нет. Источник при этом
+     * выглядит рабочим — на театре оперы и балета это стоило пяти шагов
+     * разбирательства.
+     */
+    public function test_create_with_a_venue_makes_a_venue_host_with_its_address(): void
+    {
+        $this->actingAsSuperadmin();
+        $cityId = $this->seedCity();
+        $reqId = $this->seedDoneRequest();
+
+        $venueId = DB::table('venues')->insertGetId([
+            'city_id' => $cityId,
+            'name' => 'Никитинский театр',
+            'slug' => 'nikitinskiy-teatr',
+            'street' => 'улица Никитинская',
+            'house' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->postJson('/api/admin/sources/profiles/create', [
+            'probe_request_id' => $reqId,
+            'name' => 'Никитинский театр',
+            'city_slug' => 'voronezh',
+            'parse_mode' => 'jsonld',
+            'venue_id' => $venueId,
+        ])->assertCreated()
+            ->assertJsonPath('data.venue_name', 'Никитинский театр')
+            ->assertJsonPath('data.venue_has_address', true);
+
+        $community = DB::table('communities')->where('name', 'Никитинский театр')->first();
+        $this->assertSame($venueId, (int) $community->venue_id);
+        $this->assertSame('улица Никитинская', $community->street);
+        $this->assertSame('1', $community->house);
+        $this->assertSame('venue_host', json_decode((string) $community->verification_meta, true)['final']['kind']);
+    }
+
+    /** Без места источник остаётся агрегатором — как и был. */
+    public function test_create_without_a_venue_stays_an_aggregator(): void
+    {
+        $this->actingAsSuperadmin();
+        $this->seedCity();
+        $reqId = $this->seedDoneRequest();
+
+        $this->postJson('/api/admin/sources/profiles/create', [
+            'probe_request_id' => $reqId,
+            'name' => 'Билетный сайт',
+            'city_slug' => 'voronezh',
+            'parse_mode' => 'jsonld',
+        ])->assertCreated()->assertJsonPath('data.venue_id', null);
+
+        $community = DB::table('communities')->where('name', 'Билетный сайт')->first();
+        $this->assertNull($community->venue_id);
+        $this->assertSame('aggregator', json_decode((string) $community->verification_meta, true)['final']['kind']);
+    }
+
+    /**
+     * Чужому организатору площадку отсюда не меняем.
+     *
+     * Он уже настроен, и переписать ему место мимоходом — тронуть то, за чем
+     * сюда не приходили. Для этого есть кнопка «место» в списке источников.
+     */
+    public function test_venue_is_refused_when_binding_to_an_existing_community(): void
+    {
+        $this->actingAsSuperadmin();
+        $cityId = $this->seedCity();
+        $reqId = $this->seedDoneRequest();
+
+        $communityId = DB::table('communities')->insertGetId([
+            'name' => 'Уже есть', 'city_id' => $cityId,
+            'verification_status' => 'approved', 'is_verified' => true,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $venueId = DB::table('venues')->insertGetId([
+            'city_id' => $cityId, 'name' => 'Площадка', 'slug' => 'ploshchadka-'.uniqid(),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->postJson('/api/admin/sources/profiles/create', [
+            'probe_request_id' => $reqId,
+            'name' => 'Что угодно',
+            'city_slug' => 'voronezh',
+            'parse_mode' => 'jsonld',
+            'community_id' => $communityId,
+            'venue_id' => $venueId,
+        ])->assertStatus(422);
+
+        $this->assertSame(0, DB::table('source_profiles')->count(), 'ничего не создалось');
+    }
+
     public function test_create_llm_text_profile_builds_regex_from_template(): void
     {
         $this->actingAsSuperadmin();

@@ -158,6 +158,14 @@ class AdminSourceProbeController extends Controller
             'slug' => ['sometimes', 'nullable', 'string', 'max:100', 'regex:~^[a-z0-9-]+$~'],
             // привязка к УЖЕ существующей площадке/сообществу вместо создания нового
             'community_id' => ['sometimes', 'nullable', 'integer'],
+            // САЙТ ОДНОГО МЕСТА. Онбординг всегда заводил агрегатора, а
+            // агрегатору домашний адрес намеренно не подставляется — у него
+            // «дом» это редакция (EventUpsertJob::tryHqFallbackGeocode). Для
+            // сайта учреждения это тупик: события извлекаются, а карточки не
+            // создаются, потому что места нет. Источник при этом выглядит
+            // рабочим: прогон «ok», страницы собираются, карточек ноль — на
+            // театре оперы и балета это стоило пяти шагов разбирательства.
+            'venue_id' => ['sometimes', 'nullable', 'integer'],
         ]);
 
         $req = DB::table('source_probe_requests')->where('id', $data['probe_request_id'])->first();
@@ -206,7 +214,20 @@ class AdminSourceProbeController extends Controller
             }
         }
 
-        DB::transaction(function () use ($data, $slug, $regex, $req, $result, $cityId, $host, $existingCommunityId) {
+        // Площадку выбирает человек, а не догадка по имени: справочник держит
+        // «Никитинский театр» и «Прогресс. Никитинский театр» с одинаковым
+        // весом, и молча взять не ту хуже, чем не взять никакой.
+        $venue = null;
+        if (! empty($data['venue_id'])) {
+            $venue = DB::table('venues')
+                ->where('id', (int) $data['venue_id'])->whereNull('deleted_at')
+                ->first(['id', 'name', 'street', 'house']);
+            abort_if($venue === null, 422, 'Площадка не найдена');
+            abort_if($existingCommunityId !== null, 422,
+                'Площадка задаётся только новому организатору: у существующего её меняют кнопкой «место» в списке источников.');
+        }
+
+        DB::transaction(function () use ($data, $slug, $regex, $req, $result, $cityId, $host, $existingCommunityId, $venue) {
             DB::table('source_profiles')->insert([
                 'slug' => $slug,
                 'name' => $data['name'],
@@ -226,21 +247,29 @@ class AdminSourceProbeController extends Controller
                 'updated_at' => now(),
             ]);
 
-            // aggregator-community + link (network 3 'site') — схема сида qtickets:
-            // venue_id=NULL, kind=aggregator блокирует HQ-fallback
+            // community + link (network 3 'site'). Вид решает выбранная
+            // площадка: есть — venue_host с её адресом, нет — aggregator,
+            // которому HQ-fallback намеренно закрыт.
             $communityId = $existingCommunityId
                 ?? DB::table('communities')
                     ->where('name', $data['name'])->where('city_id', $cityId)->whereNull('deleted_at')->value('id');
             if ($communityId === null) {
+                $cityName = (string) DB::table('cities')->where('id', $cityId)->value('name');
                 $communityId = DB::table('communities')->insertGetId([
                     'name' => $data['name'],
                     'description' => 'Афиша событий с '.$host,
                     'city_id' => $cityId,
-                    'venue_id' => null,
+                    'venue_id' => $venue?->id,
+                    'city' => $venue !== null ? $cityName : null,
+                    'street' => $venue?->street,
+                    'house' => $venue?->house,
                     'verification_status' => 'approved',
                     'is_verified' => true,
                     'verification_meta' => json_encode([
-                        'final' => ['kind' => 'aggregator', 'hq' => ['confidence' => 1.0]],
+                        'final' => [
+                            'kind' => $venue !== null ? 'venue_host' : 'aggregator',
+                            'hq' => ['confidence' => 1.0],
+                        ],
                     ], JSON_UNESCAPED_UNICODE),
                     'created_at' => now(),
                     'updated_at' => now(),
@@ -296,6 +325,13 @@ SQL);
             'community_id' => $finalCommunityId,
             'community_name' => $communityName,
             'bound_via' => $boundVia ?? 'created', // manual|url_host|name|created
+            'venue_id' => $venue?->id,
+            'venue_name' => $venue?->name,
+            // Площадка без улицы с домом адреса не даст: карточки всё равно
+            // не появятся, пока у неё не будет адреса. Говорим сразу.
+            'venue_has_address' => $venue !== null
+                && trim((string) $venue->street) !== ''
+                && preg_match('~\d~u', (string) $venue->house) === 1,
         ]], 201);
     }
 
