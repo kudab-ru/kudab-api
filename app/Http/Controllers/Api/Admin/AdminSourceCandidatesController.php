@@ -40,6 +40,10 @@ class AdminSourceCandidatesController extends Controller
                 'id' => (int) $r->id,
                 'domain' => (string) $r->domain,
                 'sample_url' => $r->sample_url,
+                // Раздел афиши, найденный ночным прогоном: по нему выносится
+                // вердикт, и им же «Разведать» подставляет адрес целиком.
+                // Раньше подставлялся корень домена, а путь дописывали руками.
+                'afisha_url' => $r->afisha_url ?? null,
                 'communities' => (int) $r->communities,
                 'posts' => (int) $r->posts,
                 'verdict' => $r->verdict,
