@@ -712,6 +712,75 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertGreaterThan(40, (int) $meta['hook_budget']);
     }
 
+    /* ──────────────── форма шапки ──────────────── */
+
+    /**
+     * Со счётом шапка — одно предложение с городом, без срока.
+     *
+     * «На выходных» и «в эти дни» уже сказали когда; «26–27 сентября» рядом с
+     * ними это та же мысль во второй раз. Точка в конце нужна: следом встык
+     * идёт подводка.
+     */
+    #[Test]
+    public function a_counted_header_is_one_sentence_with_the_city(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow')); // пятница
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 1, 2, 2] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+
+        $head = explode("\n", $this->caption(Carbon::parse('2026-09-18 14:00', 'Europe/Moscow')))[0];
+
+        $this->assertStringContainsString('в Воронеже', $head, 'город в предложном падеже');
+        $this->assertMatchesRegularExpression('/\d+ событи\w*\.<\/b>/u', $head, 'счёт внутри предложения');
+        $this->assertStringNotContainsString('·', $head, 'срока в такой шапке нет');
+    }
+
+    /** У рубрики, чей заголовок кончается временем, города в шапке нет. */
+    #[Test]
+    public function a_headline_ending_in_a_time_phrase_skips_the_city(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+
+        $head = explode("\n", $this->caption())[0];
+
+        $this->assertStringContainsString('Бесплатно в эти дни — ', $head);
+        $this->assertStringNotContainsString('в Воронеже', $head, 'два «в» подряд не пишем');
+    }
+
+    /** Без счёта шапка прежняя: заголовок и срок через точку. */
+    #[Test]
+    public function an_uncounted_header_keeps_the_date_range(): void
+    {
+        $this->onlyRubric('spektakli');
+        $this->fill('Спектакль', free: false, priceMin: 700);
+
+        $head = explode("\n", $this->caption())[0];
+
+        $this->assertStringContainsString('·', $head, 'срок на месте');
+        $this->assertStringContainsString('сентября', $head);
+        $this->assertStringNotContainsString('в Воронеже', $head, 'город только там, где есть счёт');
+    }
+
+    /**
+     * Строка фактов без курсива.
+     *
+     * По длине он не стоит ничего — теги в подпись не считаются. Дело в виде:
+     * пять наклонных строк подряд читаются как сноски, а не как факты.
+     */
+    #[Test]
+    public function the_facts_line_is_not_italic(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+
+        $this->assertStringNotContainsString('<i>', $this->caption());
+    }
+
     /** Подпись собранной подборки — тем же путём, что и в жизни. */
     private function caption(?Carbon $at = null): string
     {
@@ -879,9 +948,9 @@ class BroadcastDigestRubricsTest extends TestCase
         DB::insert(
             'INSERT INTO cities (name, country_code, location, status, slug, created_at, updated_at)
              VALUES (?, ?, ST_SetSRID(ST_Point(?, ?), 4326), ?, ?, ?, ?)',
-            ['Воронеж', 'RU', 39.2, 51.66, 'active', 'voronezh-rubrics', now(), now()]
+            ['Воронеж', 'RU', 39.2, 51.66, 'active', 'voronezh', now(), now()]
         );
 
-        return (int) DB::table('cities')->where('slug', 'voronezh-rubrics')->value('id');
+        return (int) DB::table('cities')->where('slug', 'voronezh')->value('id');
     }
 }
