@@ -252,6 +252,10 @@ final class BroadcastDigestComposer
             ->get([
                 'e.id', 'e.title', 'e.start_time', 'e.event_group_id', 'e.venue_id',
                 'e.description', 'e.tg_description', 'e.price_min', 'e.price_max', 'e.price_status',
+                // price_text — ради «по регистрации»: отдельного поля под это нет,
+                // слово живёт только в тексте цены. time_precision — ради событий
+                // без времени: у них в start_time полночь, и «сб 00:00» это враньё.
+                'e.price_text', 'e.time_precision',
                 'v.name as venue_name',
             ])
             ->keyBy(fn ($r) => (int) $r->id);
@@ -581,6 +585,10 @@ final class BroadcastDigestComposer
             ->get([
                 'e.id', 'e.title', 'e.start_time', 'e.event_group_id', 'e.venue_id',
                 'e.description', 'e.tg_description', 'e.price_min', 'e.price_max', 'e.price_status',
+                // price_text — ради «по регистрации»: отдельного поля под это нет,
+                // слово живёт только в тексте цены. time_precision — ради событий
+                // без времени: у них в start_time полночь, и «сб 00:00» это враньё.
+                'e.price_text', 'e.time_precision',
                 'v.name as venue_name',
             ]);
 
@@ -997,12 +1005,15 @@ final class BroadcastDigestComposer
         $namedIds = array_map(fn ($r) => (int) $r->id, $picked['named']);
         $lead = $item?->digestIntroFor($namedIds);
 
+        // Форма даты решается ОДИН РАЗ на весь пост: вперемешку «сб 13:30» и
+        // «сб 26 сентября, 18:00» читаются как сбой, а не как решение.
+        $shortDates = $this->weekdaysAreDistinct($picked['named']);
+
         $lines = [];
         $rich = [];
         foreach ($picked['named'] as $row) {
-            $at = Carbon::parse($row->start_time)->setTimezone(self::TZ);
             $meta = array_values(array_filter([
-                self::WEEKDAYS[(int) $at->isoWeekday()].' '.$at->day.' '.self::MONTHS[$at->month].', '.$at->format('H:i'),
+                $this->whenLabel($row, $shortDates),
                 $this->venueLabel($row),
                 $this->priceLabel($row),
             ]));
@@ -1354,10 +1365,74 @@ final class BroadcastDigestComposer
         return rtrim($cut, ' ,;:—–-').'…';
     }
 
+    /**
+     * Строка времени: «сб 13:30» или «сб 26 сентября, 18:00».
+     *
+     * Короткая форма экономит двенадцать знаков на строке — в посте из пяти
+     * строк это место под целое шестое событие.
+     */
+    private function whenLabel(object $row, bool $short): string
+    {
+        $at = Carbon::parse($row->start_time)->setTimezone(self::TZ);
+        $date = $short
+            ? self::WEEKDAYS[(int) $at->isoWeekday()]
+            : self::WEEKDAYS[(int) $at->isoWeekday()].' '.$at->day.' '.self::MONTHS[$at->month];
+
+        // У события без времени в start_time стоит полночь, и «сб 00:00» —
+        // это не факт, а артефакт: источник назвал только день.
+        if ((string) ($row->time_precision ?? 'datetime') === 'date') {
+            return $date;
+        }
+
+        return $short
+            ? $date.' '.$at->format('H:i')
+            : $date.', '.$at->format('H:i');
+    }
+
+    /**
+     * Можно ли печатать день недели без числа.
+     *
+     * «сб» однозначно ровно до тех пор, пока суббота в составе одна. Окно
+     * рубрики бывает и восьмидневным (window_days=7 считается от МОМЕНТА
+     * публикации, а не от полуночи), и тогда в составе встретятся две разные
+     * субботы — читатель придёт не в тот день.
+     *
+     * @param  list<object>  $named
+     */
+    private function weekdaysAreDistinct(array $named): bool
+    {
+        $seen = [];
+
+        foreach ($named as $row) {
+            $at = Carbon::parse($row->start_time)->setTimezone(self::TZ);
+            $weekday = (int) $at->isoWeekday();
+            $date = $at->toDateString();
+
+            // Два события одного дня — не помеха: это буквально один день.
+            if (isset($seen[$weekday]) && $seen[$weekday] !== $date) {
+                return false;
+            }
+
+            $seen[$weekday] = $date;
+        }
+
+        return true;
+    }
+
     private function priceLabel(object $row): string
     {
+        // «Свободно», а не «бесплатно»: короче на два знака и не спорит с
+        // «свободно, по регистрации», где «бесплатно по регистрации» звучит
+        // как оговорка к бесплатности.
         if ($row->price_status === 'free') {
-            return 'бесплатно';
+            return $this->needsSignup($row) ? 'свободно, по регистрации' : 'свободно';
+        }
+
+        // Пожертвование раньше давало ПУСТУЮ строку цены: статус не 'free', а
+        // сумм у таких событий нет. При этом в пул рубрики «Бесплатно» они
+        // берутся наравне с free — и выходили в пост без единого слова о цене.
+        if ($row->price_status === 'donation') {
+            return 'свободный взнос';
         }
 
         $min = $row->price_min !== null ? (int) $row->price_min : null;
@@ -1374,6 +1449,26 @@ final class BroadcastDigestComposer
         return $min !== null && $max !== null && $min !== $max
             ? 'от '.$min."\u{00A0}₽"
             : $amount."\u{00A0}₽";
+    }
+
+    /**
+     * Нужна ли на бесплатное событие регистрация.
+     *
+     * Отдельного поля под это нет — слово живёт только в тексте цены. Замер по
+     * живой базе: 65 событий упоминают регистрацию, и ВСЕ 65 — в смысле «она
+     * нужна»; ни одного «без регистрации» или «регистрация закрыта». Отрицания
+     * всё равно отсекаем: данные приходят каждый час, и первое же такое
+     * событие иначе позвало бы людей регистрироваться на пустом месте.
+     */
+    private function needsSignup(object $row): bool
+    {
+        $text = mb_strtolower(trim((string) ($row->price_text ?? '')));
+
+        if ($text === '' || ! preg_match('/регистрац/u', $text)) {
+            return false;
+        }
+
+        return ! preg_match('/(без\s+регистрац|не\s+нужн\w*\s+регистрац|не\s+требу\w*\s+регистрац|регистрац\w*\s+(не|закрыт|заверш))/u', $text);
     }
 
     /**

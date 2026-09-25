@@ -287,6 +287,145 @@ class BroadcastDigestRubricsTest extends TestCase
             ->where('broadcast_id', $channel->id)->count());
     }
 
+    /* ──────────────── как выглядит строка события ──────────────── */
+
+    /**
+     * Короткий день недели, пока суббота в составе одна.
+     *
+     * «сб 19:00» против «сб 19 сентября, 19:00» — двенадцать знаков на строке,
+     * то есть место под целое шестое событие в посте из пяти.
+     */
+    #[Test]
+    public function a_weekday_without_a_date_when_days_do_not_repeat(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+
+        $caption = $this->caption();
+
+        $this->assertMatchesRegularExpression('/\b(пн|вт|ср|чт|пт|сб|вс) \d{2}:\d{2}/u', $caption,
+            'день недели и время без числа');
+        $this->assertStringNotContainsString('сентября,', $caption, 'числа в строке фактов нет');
+    }
+
+    /**
+     * Повторился день недели — печатаем число у ВСЕХ строк.
+     *
+     * Окно тематической рубрики восьмидневное: оно считается от момента
+     * публикации, а не от полуночи, и «вт» в нём встречается дважды. Читатель
+     * придёт не в тот день.
+     */
+    #[Test]
+    public function a_repeated_weekday_brings_the_date_back(): void
+    {
+        $this->onlyRubric('spektakli');
+
+        // Два вторника — первый и восьмой день окна. Описания самые длинные:
+        // отбор идёт по полноте карточки, и оба обязаны попасть в названные.
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $this->event('Спектакль вторник первый', 0, free: false, priceMin: 500, hour: 20, description: $long);
+        $this->event('Спектакль вторник второй', 7, free: false, priceMin: 500, hour: 10, description: $long);
+        foreach ([1, 2, 3] as $day) {
+            $this->event('Спектакль день '.$day, $day, free: false, priceMin: 500);
+        }
+
+        $caption = $this->caption();
+
+        $this->assertStringContainsString('сентября', $caption, 'число вернулось в строку фактов');
+    }
+
+    /** «Свободно», а не «бесплатно»: короче и не спорит с «по регистрации». */
+    #[Test]
+    public function a_free_event_is_called_svobodno(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+
+        $caption = $this->caption();
+
+        $this->assertStringContainsString('свободно', $caption);
+        $this->assertStringNotContainsString('бесплатно', $caption);
+    }
+
+    /**
+     * Регистрация названа в строке цены.
+     *
+     * Своего поля под неё нет — слово живёт только в тексте цены. Замер по
+     * живой базе: 65 событий упоминают регистрацию, и все 65 в смысле «нужна».
+     */
+    #[Test]
+    public function registration_is_named_next_to_the_price(): void
+    {
+        $this->onlyRubric('besplatno');
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $this->event('Форум про безопасность', 1, free: true, hour: 8, description: $long,
+            priceText: 'Участие бесплатное, по предварительной регистрации.');
+        $this->fill('Бесплатное', free: true);
+
+        $this->assertStringContainsString('свободно, по регистрации', $this->caption());
+    }
+
+    /** Отрицание не считается: «без регистрации» зовёт регистрироваться на пустом месте. */
+    #[Test]
+    public function a_denied_registration_is_not_announced(): void
+    {
+        $this->onlyRubric('besplatno');
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $this->event('Вход без формальностей', 1, free: true, hour: 8, description: $long,
+            priceText: 'Вход свободный, без регистрации.');
+        $this->fill('Бесплатное', free: true);
+
+        $this->assertStringNotContainsString('по регистрации', $this->caption());
+    }
+
+    /**
+     * Пожертвование больше не остаётся без строки цены.
+     *
+     * Статус не 'free', сумм у таких событий нет — и цена выходила ПУСТОЙ,
+     * хотя в пул «Бесплатно» они берутся наравне с бесплатными.
+     */
+    #[Test]
+    public function a_donation_event_gets_a_price_word(): void
+    {
+        $this->onlyRubric('besplatno');
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $this->event('Концерт по пожертвованию', 1, free: false, hour: 8, description: $long,
+            priceText: 'Вход на основе пожертвования.', donation: true);
+        $this->fill('Бесплатное', free: true);
+
+        $this->assertStringContainsString('свободный взнос', $this->caption());
+    }
+
+    /**
+     * У события без времени часов в строке нет.
+     *
+     * В start_time у таких стоит полночь, и «сб 00:00» — это не факт, а
+     * артефакт: источник назвал только день.
+     */
+    #[Test]
+    public function an_event_without_a_time_is_printed_without_a_clock(): void
+    {
+        $this->onlyRubric('besplatno');
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $this->event('Ярмарка весь день', 1, free: true, hour: 0, description: $long,
+            timePrecision: 'date');
+        $this->fill('Бесплатное', free: true);
+
+        $caption = $this->caption();
+
+        $this->assertStringContainsString('Ярмарка весь день', $caption);
+        $this->assertStringNotContainsString('00:00', $caption);
+    }
+
+    /** Подпись собранной подборки — тем же путём, что и в жизни. */
+    private function caption(): string
+    {
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::now());
+        $this->assertNotNull($out, 'подборка обязана собраться');
+
+        return (string) $out['caption'];
+    }
+
     private function actingAsSuperadmin(): void
     {
         \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
@@ -340,6 +479,9 @@ class BroadcastDigestRubricsTest extends TestCase
         ?int $priceMin = null,
         int $hour = 19,
         ?string $description = null,
+        ?string $priceText = null,
+        string $timePrecision = 'datetime',
+        bool $donation = false,
     ): int {
         $community = \App\Models\Community::create([
             'name' => 'Организатор '.uniqid(),
@@ -370,8 +512,12 @@ class BroadcastDigestRubricsTest extends TestCase
         $event->start_date = $at->toDateString();
         $event->end_time = $at->copy()->addHours(2);
         $event->description = $description ?? str_repeat('описание события достаточной длины. ', 5);
-        $event->price_status = $free ? 'free' : ($priceMin === null ? 'unknown' : 'range');
-        $event->price_min = $free ? 0 : $priceMin;
+        $event->price_status = $donation
+            ? 'donation'
+            : ($free ? 'free' : ($priceMin === null ? 'unknown' : 'range'));
+        $event->price_min = $free || $donation ? 0 : $priceMin;
+        $event->price_text = $priceText;
+        $event->time_precision = $timePrecision;
         $event->save();
 
         DB::table('event_interest')->insert([
