@@ -245,6 +245,61 @@ class BroadcastDigestComposerTest extends TestCase
         );
     }
 
+    /**
+     * Не влезает одна строка — снимается одна, а не весь изюм.
+     *
+     * Правило «целиком или никак» стояло ради того, чтобы пост не выходил
+     * обрезанным на полуслове. Резать строку и правда нельзя, но снимать ВСЕ
+     * ради одной лишней — плата не за то: текст уже написан и оплачен, а без
+     * него пост становится списком из базы.
+     *
+     * Предел подписи здесь подгоняется под фикстуру, а не наоборот: важно
+     * поведение на границе, а не конкретное число из конфига.
+     */
+    public function test_only_the_overflowing_hook_is_dropped(): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $digest = $this->digestItem($broadcast, Carbon::now()->addDay());
+        $service = app(\App\Services\Telegram\TelegramChatBroadcastService::class);
+        $composer = app(BroadcastDigestComposer::class);
+        $draft = $composer->compose($broadcast, Carbon::now(), $digest);
+        $service->applyDigestDraft($digest, $draft);
+
+        // Длина подписи БЕЗ изюма — точка отсчёта.
+        $base = \App\Support\Telegram\CaptionLength::visible(
+            $composer->recompose($digest->refresh(), $broadcast, Carbon::now())['caption'],
+        );
+
+        $hooks = [];
+        foreach ($draft['event_ids'] as $i => $eventId) {
+            // mb_substr, а не str_pad: тот считает БАЙТЫ, и на кириллице
+            // строка выходила вдвое короче задуманного — все три влезали,
+            // и тест проходил бы на любой реализации.
+            $hooks[(string) $eventId] = mb_substr(
+                'Фраза номер '.($i + 1).' '.str_repeat('абвгде ', 30), 0, 100,
+            );
+        }
+
+        $meta = (array) $digest->refresh()->digest_meta;
+        $meta['hooks'] = $hooks;
+        $meta['roster'] = $draft['event_ids'];
+        $digest->digest_meta = $meta;
+        $digest->save();
+
+        // Предел такой, что две строки помещаются, а третья — нет.
+        config(['broadcast_digest.caption_soft_limit' => $base + 2 * 102 + 5]);
+
+        $caption = $composer->recompose($digest->refresh(), $broadcast, Carbon::now())['caption'];
+
+        $this->assertStringContainsString('Фраза номер 1', $caption, 'первая строка осталась');
+        $this->assertStringContainsString('Фраза номер 2', $caption, 'вторая тоже');
+        $this->assertStringNotContainsString('Фраза номер 3', $caption, 'снялась только лишняя, с конца');
+    }
+
     /** Названные события идут по датам — подборка про «что впереди». */
     public function test_named_events_are_ordered_by_date(): void
     {

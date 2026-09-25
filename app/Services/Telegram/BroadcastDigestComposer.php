@@ -874,13 +874,28 @@ final class BroadcastDigestComposer
 
         $top = array_values(array_filter([$head, $lead !== null ? $this->escape($lead) : null]));
 
-        // С изюмом, если он влезает: целиком или никак — причина у
-        // `caption_soft_limit` в config/broadcast_digest.php.
-        $withHooks = implode("\n\n", array_merge($top, $rich, [$footer]));
+        // ИЗЮМ СНИМАЕТСЯ ПО ОДНОЙ СТРОКЕ С КОНЦА, а не весь разом.
+        //
+        // Правило «целиком или никак» стояло ради того, чтобы пост не выходил
+        // обрезанным на полуслове, и это верно: резать строку нельзя. Но
+        // снятие ВСЕХ строк ради одной лишней — плата не за то: текст уже
+        // написан и оплачен, а без него пост становится списком из базы.
+        //
+        // С конца, а не самую длинную: хвост подборки слабее начала, и дыра
+        // в середине читается как сбой. Строка снимается целиком, так что
+        // обрезанных на полуслове по-прежнему не бывает.
         $soft = (int) config('broadcast_digest.caption_soft_limit', 950);
 
-        if (\App\Support\Telegram\CaptionLength::visible($withHooks) <= $soft) {
-            return $withHooks;
+        for ($keep = count($rich); $keep >= 0; $keep--) {
+            $body = array_merge(
+                array_slice($rich, 0, $keep),
+                array_slice($lines, $keep),
+            );
+            $caption = implode("\n\n", array_merge($top, $body, [$footer]));
+
+            if ($keep === 0 || \App\Support\Telegram\CaptionLength::visible($caption) <= $soft) {
+                return $caption;
+            }
         }
 
         return implode("\n\n", array_merge($top, $lines, [$footer]));

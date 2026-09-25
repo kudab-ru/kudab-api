@@ -398,6 +398,58 @@ class BroadcastDigestPrepareTest extends TestCase
         $this->assertTrue($item->planned_at?->isFuture(), 'и придержка поставлена');
     }
 
+    /**
+     * Версию, написанную под другой состав, откатить нельзя.
+     *
+     * Откат возвращал подпись из прошлого со своим `caption_source`, а ручную
+     * подпись доставка не пересобирает вовсе. Состав при этом не трогался —
+     * то есть откат был законным способом выпустить текст про другую тройку.
+     */
+    public function test_a_revision_written_for_another_roster_is_refused(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+
+        // Версию кладём напрямую: ручная подпись запирает замену состава
+        // (свой гард), а нам нужен ровно обратный порядок — сперва версия,
+        // потом смена состава.
+        $revisionId = (int) DB::table('telegram.chat_broadcast_item_revisions')->insertGetId([
+            'item_id' => $item->id,
+            'caption' => 'Мой текст про нынешнюю тройку.',
+            'caption_source' => TelegramChatBroadcastItem::CAPTION_MANUAL,
+            'roster' => json_encode(array_column($named, 'id')),
+            'changed' => json_encode(['caption']),
+            'created_at' => now(),
+        ]);
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[1]['id'],
+            'in' => $candidate,
+        ])->assertOk();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/revisions/{$revisionId}/restore")
+            ->assertStatus(409);
+    }
+
+    /** Состав не менялся — откат работает как прежде. */
+    public function test_a_revision_for_the_same_roster_restores(): void
+    {
+        [$item] = $this->composedDigestWithSpare();
+
+        $this->patchJson("/api/admin/broadcast/items/{$item->id}", [
+            'caption' => 'Первый вариант.',
+        ])->assertOk();
+
+        $revisionId = (int) DB::table('telegram.chat_broadcast_item_revisions')
+            ->where('item_id', $item->id)->orderByDesc('id')->value('id');
+
+        $this->patchJson("/api/admin/broadcast/items/{$item->id}", [
+            'caption' => 'Второй вариант.',
+        ])->assertOk();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/revisions/{$revisionId}/restore")
+            ->assertOk();
+    }
+
     /** Флаг cool ставит то же тридцатидневное «не предлагать», что кнопка отказа. */
     public function test_cooled_event_stops_coming_back(): void
     {

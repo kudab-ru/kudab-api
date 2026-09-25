@@ -1600,6 +1600,21 @@ class AdminBroadcastController extends Controller
     }
 
     /**
+     * Состав подборки — номера событий, как он есть сейчас.
+     *
+     * @return list<int>
+     */
+    private function rosterIds(TelegramChatBroadcastItem $item): array
+    {
+        return DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)
+            ->orderBy('position')
+            ->pluck('event_id')
+            ->map(fn ($v) => (int) $v)
+            ->all();
+    }
+
+    /**
      * Запомнить состояние поста ДО правки.
      *
      * @param  list<string>  $changed  что изменила правка
@@ -1607,6 +1622,12 @@ class AdminBroadcastController extends Controller
      */
     private function saveRevision(TelegramChatBroadcastItem $item, array $changed, array $before): void
     {
+        // Состав подборки — вместе с подписью. Без него откат возвращал текст,
+        // написанный под другую тройку, и проверить это было нечем.
+        $roster = $item->kind === TelegramChatBroadcastItem::KIND_DIGEST
+            ? $this->rosterIds($item)
+            : null;
+
         DB::table('telegram.chat_broadcast_item_revisions')->insert([
             'item_id' => $item->id,
             'caption' => $before['caption'],
@@ -1614,6 +1635,7 @@ class AdminBroadcastController extends Controller
             'photo_urls' => $before['photo_urls'] === null
                 ? null
                 : json_encode($before['photo_urls'], JSON_UNESCAPED_UNICODE),
+            'roster' => $roster === null ? null : json_encode($roster),
             'changed' => json_encode($changed, JSON_UNESCAPED_UNICODE),
             'user_id' => optional(request()->user())->id,
             'created_at' => now(),
@@ -1686,6 +1708,26 @@ class AdminBroadcastController extends Controller
 
         if (! $rev) {
             return response()->json(['ok' => false, 'error' => 'Такой версии у поста нет.'], 404);
+        }
+
+        // ТЕКСТ ВСЕГДА ПОД ТЕКУЩИЙ СОСТАВ — и откат не исключение. Подпись из
+        // прошлого возвращается со своим `caption_source`, а ручную подпись
+        // доставка не пересобирает вовсе: версия, написанная под другую
+        // тройку, уехала бы в канал как есть.
+        //
+        // У версий, записанных до появления поля, состав неизвестен — их
+        // возвращаем как раньше: гадать не о чем.
+        if ($item->kind === TelegramChatBroadcastItem::KIND_DIGEST && $rev->roster !== null) {
+            $was = array_map('intval', (array) json_decode((string) $rev->roster, true));
+            $now = $this->rosterIds($item);
+            sort($was);
+            sort($now);
+
+            if ($was !== $now) {
+                return response()->json(['ok' => false, 'error' => 'Состав подборки с тех пор изменился — эта версия написана про другие события. '
+                    .'Нажми «Написать заново» или верни прежний состав.',
+                ], 409);
+            }
         }
 
         $this->saveRevision($item, ['restore'], [
