@@ -7,7 +7,6 @@ namespace App\Services\Telegram;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use Carbon\Carbon;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -118,12 +117,19 @@ final class BroadcastDigestBooking
         $summary['booked']++;
     }
 
-    /** Стоит ли уже будущая подборка — в любом открытом статусе. */
+    /**
+     * Стоит ли уже будущая подборка — в любом открытом статусе.
+     *
+     * Подборка ВНЕ СЕТКИ не в счёт: её поставили руками, дополнительно к
+     * рубрике, и она не должна отменять очередную недельную. Иначе кнопка
+     * «подборка сейчас» тихо съедала бы следующую по расписанию.
+     */
     private function hasOpenDigest(TelegramChatBroadcast $broadcast, Carbon $now): bool
     {
         return TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
             ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->where('is_off_grid', false)
             ->whereNull('posted_at')
             ->whereIn('status', [
                 TelegramChatBroadcastItem::STATUS_PENDING,

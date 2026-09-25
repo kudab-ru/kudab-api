@@ -1179,6 +1179,62 @@ class AdminBroadcastController extends Controller
     }
 
     /**
+     * Поставить подборку ВНЕ ОЧЕРЕДИ.
+     *
+     * POST /api/admin/broadcast/channels/{id}/digest-now
+     *
+     * Рубрика выходит раз в неделю, своим днём. Этой ручкой владелец ставит
+     * ещё одну — когда в афише случилось что-то, чего ждать до вторника
+     * глупо: бесплатные выходные, фестиваль, дешёвая неделя.
+     *
+     * ВНЕ СЕТКИ (`is_off_grid`), и это не косметика:
+     *  — слот дня остаётся свободным для обычных постов (планировщик считает
+     *    занятость по ключу «дата + час» и внесеточные пропускает);
+     *  — очередная недельная подборка не отменяется (BroadcastDigestBooking
+     *    считает открытой только сеточную).
+     *
+     * Состав собираем сразу, а не перед отправкой: человек нажал кнопку,
+     * чтобы УВИДЕТЬ, что получится, и успеть поправить. Рубрику выбирает тот
+     * же отбор, что и автосборку, — с оглядкой на прошлые посты.
+     */
+    public function digestNow(int $channelId): JsonResponse
+    {
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($channelId);
+
+        $at = Carbon::now()->addMinutes(
+            max(1, (int) config('services.bot.broadcast_text_grace_minutes', 6)),
+        );
+
+        $draft = $this->digestComposer->compose($broadcast, $at);
+        if ($draft === null) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Ни одна рубрика не набрала состава — ставить пока нечего.',
+            ], 422);
+        }
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $broadcast->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = $at;
+        $item->is_off_grid = true;
+        $item->save();
+
+        $this->broadcasts->applyDigestDraft($item, $draft);
+
+        Log::info('admin:broadcast:digest-now', [
+            'actor_id' => request()->user()?->id,
+            'broadcast_id' => $broadcast->id,
+            'item_id' => $item->id,
+            'theme' => $draft['theme_slug'] ?? null,
+            'named' => count($draft['event_ids']),
+        ]);
+
+        return response()->json(['data' => $this->itemPayload($item->fresh(), null, null)], 201);
+    }
+
+    /**
      * Собрать подборку сейчас: записать текст и состав в саму запись.
      *
      * POST /api/admin/broadcast/items/{id}/compose

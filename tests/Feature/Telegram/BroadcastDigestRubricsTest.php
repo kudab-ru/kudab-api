@@ -214,6 +214,87 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertSame('vecherom', $out['theme_slug'], 'недавняя рубрика уступает');
     }
 
+    /* ───────────── подборка вне очереди ───────────── */
+
+    /**
+     * Кнопка ставит ЕЩЁ ОДНУ подборку, не трогая недельную.
+     *
+     * Вне сетки — и это не косметика: слот дня остаётся свободным для обычных
+     * постов, а очередная недельная подборка не отменяется. Без признака
+     * кнопка тихо съедала бы следующую по расписанию.
+     */
+    #[Test]
+    public function the_off_grid_digest_is_marked_and_composed(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+        $channel = $this->channel();
+        $this->actingAsSuperadmin();
+
+        $res = $this->postJson("/api/admin/broadcast/channels/{$channel->id}/digest-now")
+            ->assertCreated();
+
+        $item = DB::table('telegram.chat_broadcast_items')
+            ->where('broadcast_id', $channel->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->first();
+
+        $this->assertTrue((bool) $item->is_off_grid, 'подборка вне сетки');
+        $this->assertNotNull($item->caption, 'состав и подпись собраны сразу');
+        $this->assertSame(
+            'besplatno',
+            json_decode((string) $item->digest_meta, true)['theme'] ?? null,
+        );
+        $this->assertGreaterThanOrEqual(3, count($res->json('data.linked_events')));
+    }
+
+    /** Внесеточная подборка не отменяет очередную недельную. */
+    #[Test]
+    public function an_off_grid_digest_does_not_cancel_the_weekly_one(): void
+    {
+        $channel = $this->channel();
+
+        DB::table('telegram.chat_broadcast_items')->insert([
+            'broadcast_id' => $channel->id,
+            'kind' => TelegramChatBroadcastItem::KIND_DIGEST,
+            'status' => TelegramChatBroadcastItem::STATUS_PENDING,
+            'publish_at' => now()->addMinutes(10),
+            'is_off_grid' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $booking = app(\App\Services\Telegram\BroadcastDigestBooking::class);
+        $m = new \ReflectionMethod($booking, 'hasOpenDigest');
+        $m->setAccessible(true);
+
+        $this->assertFalse($m->invoke($booking, $channel, Carbon::now()),
+            'внесеточная не считается открытой — недельная всё равно встанет');
+    }
+
+    /** Ставить нечего — говорим прямо, а не создаём пустую запись. */
+    #[Test]
+    public function nothing_to_post_creates_nothing(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->actingAsSuperadmin();
+        $channel = $this->channel();
+
+        $this->postJson("/api/admin/broadcast/channels/{$channel->id}/digest-now")
+            ->assertStatus(422);
+
+        $this->assertSame(0, DB::table('telegram.chat_broadcast_items')
+            ->where('broadcast_id', $channel->id)->count());
+    }
+
+    private function actingAsSuperadmin(): void
+    {
+        \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
+        $user = \App\Models\User::factory()->create();
+        $user->assignRole('superadmin');
+        \Laravel\Sanctum\Sanctum::actingAs($user);
+    }
+
     /* ───────────────────────── обстановка ───────────────────────── */
 
     /**
