@@ -781,6 +781,63 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertStringNotContainsString('<i>', $this->caption());
     }
 
+    /**
+     * Кнопка «вне очереди» создаёт ЧЕРНОВИК, а не отправку.
+     *
+     * Раньше пост сразу вставал на отправку через шесть минут, и форма
+     * открывалась поверх уже уехавшего.
+     */
+    #[Test]
+    public function an_off_grid_digest_does_not_send_by_itself(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+        $channel = $this->channel();
+        $this->actingAsSuperadmin();
+
+        $this->postJson("/api/admin/broadcast/channels/{$channel->id}/digest-now")->assertCreated();
+
+        $item = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $channel->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->firstOrFail();
+
+        $this->assertNull($item->publish_at);
+        $this->assertNotNull($item->caption, 'состав и подпись всё равно собраны');
+
+        $due = app(\App\Services\Telegram\TelegramChatBroadcastService::class)
+            ->collectDueSingleRuns(Carbon::now()->addHours(2));
+
+        $this->assertNotContains(
+            (int) $item->id,
+            array_map(static fn ($t) => (int) ($t['item_id'] ?? 0), $due),
+            'черновик не уходит сам даже через два часа',
+        );
+    }
+
+    /** Слота он тоже не ждёт: вне сетки — значит слот не занимает вовсе. */
+    #[Test]
+    public function an_off_grid_draft_is_not_given_a_free_slot(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+        $channel = $this->channel();
+        $this->actingAsSuperadmin();
+
+        $this->postJson("/api/admin/broadcast/channels/{$channel->id}/digest-now")->assertCreated();
+
+        app(\App\Services\Telegram\TelegramChatBroadcastService::class)
+            ->fillFeedDays($channel->fresh(), Carbon::now());
+
+        $item = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $channel->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->where('is_off_grid', true)
+            ->firstOrFail();
+
+        $this->assertNull($item->publish_at);
+    }
+
     /* ──────────────── значок у строки ──────────────── */
 
     /**

@@ -1217,7 +1217,9 @@ class AdminBroadcastController extends Controller
         $item->broadcast_id = $broadcast->id;
         $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
         $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
-        $item->publish_at = $at;
+        // Без срока — черновик: раньше пост вставал на отправку через шесть
+        // минут, и форма открывалась поверх уже уехавшего. Срок ставит человек.
+        $item->publish_at = null;
         $item->is_off_grid = true;
         $item->save();
 
