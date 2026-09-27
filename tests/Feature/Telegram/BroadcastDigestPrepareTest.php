@@ -809,6 +809,83 @@ class BroadcastDigestPrepareTest extends TestCase
         $this->assertSame(TelegramChatBroadcastItem::CAPTION_MANUAL, $fresh->caption_source);
     }
 
+    /* ──────── шаг 5: подводку и фразы правят по одной ──────── */
+
+    /** Фраза, написанная рукой, доезжает до подписи. */
+    public function test_a_hand_written_hook_reaches_the_caption(): void
+    {
+        [$item, $named] = $this->composedDigestWithSpare();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-text", [
+            'hooks' => [(string) $named[1]['id'] => 'Копать дают самим.'],
+        ])->assertOk();
+
+        $this->assertStringContainsString('Копать дают самим.', (string) $item->fresh()->caption);
+    }
+
+    /**
+     * Правка строки НЕ замораживает пост.
+     *
+     * Иначе каждая поправленная фраза стоила бы ручной подписи, а с ней —
+     * запрета менять состав и пересборки фактов перед выходом.
+     */
+    public function test_editing_a_hook_keeps_the_caption_rebuildable(): void
+    {
+        [$item, $named] = $this->composedDigestWithSpare();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-text", [
+            'hooks' => [(string) $named[0]['id'] => 'Своя фраза про первое.'],
+        ])->assertOk();
+
+        $this->assertNotSame(
+            TelegramChatBroadcastItem::CAPTION_MANUAL,
+            $item->fresh()->caption_source,
+        );
+    }
+
+    /** Пустая строка стирает фразу, а не пишет пустоту. */
+    public function test_an_empty_hook_clears_it(): void
+    {
+        [$item, $named] = $this->composedDigestWithSpare();
+        $id = (string) $named[0]['id'];
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-text", [
+            'hooks' => [$id => 'Временная фраза.'],
+        ])->assertOk();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-text", [
+            'hooks' => [$id => ''],
+        ])->assertOk();
+
+        $meta = (array) $item->fresh()->digest_meta;
+        $this->assertArrayNotHasKey($id, (array) ($meta['hooks'] ?? []));
+    }
+
+    /** Фраза чужому событию — отказ: состав и текст обязаны сходиться. */
+    public function test_a_hook_for_a_foreign_event_is_refused(): void
+    {
+        [$item, , $candidate] = $this->composedDigestWithSpare();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-text", [
+            'hooks' => [(string) $candidate => 'Не из этого состава.'],
+        ])->assertStatus(422);
+    }
+
+    /** Подводка запоминает состав, под который написана. */
+    public function test_a_hand_written_intro_remembers_its_roster(): void
+    {
+        [$item, $named] = $this->composedDigestWithSpare();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-text", [
+            'intro' => 'Три повода выйти из дома.',
+        ])->assertOk();
+
+        $meta = (array) $item->fresh()->digest_meta;
+        $this->assertSame('Три повода выйти из дома.', $meta['intro'] ?? null);
+        $this->assertEqualsCanonicalizing(array_column($named, 'id'), $meta['roster'] ?? []);
+        $this->assertStringContainsString('Три повода выйти из дома.', (string) $item->fresh()->caption);
+    }
+
     /** @return list<int> */
     private function rosterOf(TelegramChatBroadcastItem $item): array
     {

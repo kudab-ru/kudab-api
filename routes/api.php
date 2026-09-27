@@ -116,6 +116,9 @@ Route::prefix('admin')
         Route::post('/broadcast/items/{id}/digest-events/add', [AdminBroadcastController::class, 'addDigestEvent']);
         Route::post('/broadcast/items/{id}/digest-events/remove', [AdminBroadcastController::class, 'removeDigestEvent']);
         Route::post('/broadcast/items/{id}/digest-events/reorder', [AdminBroadcastController::class, 'reorderDigestEvents']);
+        // Правка подводки и фраз по одной: без неё каждая правка текста
+        // стоила переписывания всего поста и заморозки подписи.
+        Route::post('/broadcast/items/{id}/digest-text', [AdminBroadcastController::class, 'updateDigestText']);
         Route::post('/broadcast/items/{id}/restore', [AdminBroadcastController::class, 'restore']);
         Route::post('/broadcast/items/{id}/unreject', [AdminBroadcastController::class, 'unreject']);
         Route::get('/broadcast/items/{id}/revisions', [AdminBroadcastController::class, 'revisions']);

@@ -1672,6 +1672,79 @@ class AdminBroadcastController extends Controller
     }
 
     /**
+     * Поправить подводку и фразы строк руками.
+     *
+     * POST /api/admin/broadcast/items/{id}/digest-text
+     * Тело: intro — подводка (null стирает), hooks — {id события: фраза}.
+     *
+     * Текст ручным НЕ помечается: правка одной строки не должна замораживать
+     * весь пост. Подпись пересобирается — иначе превью врёт.
+     */
+    public function updateDigestText(Request $request, int $itemId): JsonResponse
+    {
+        $data = $request->validate([
+            'intro' => ['sometimes', 'nullable', 'string', 'max:400'],
+            'hooks' => ['sometimes', 'array'],
+            'hooks.*' => ['nullable', 'string', 'max:400'],
+        ]);
+
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+        if ($blocked = $this->digestRosterGuard($item)) {
+            return $blocked;
+        }
+
+        $roster = $this->rosterIds($item);
+        $meta = (array) ($item->digest_meta ?? []);
+
+        if ($request->has('hooks')) {
+            $hooks = (array) ($meta['hooks'] ?? []);
+            foreach ((array) $data['hooks'] as $eventId => $text) {
+                $id = (int) $eventId;
+                if (! in_array($id, $roster, true)) {
+                    return response()->json([
+                        'ok' => false,
+                        'error' => 'Этого события в подборке нет.',
+                    ], 422);
+                }
+
+                $text = trim((string) $text);
+                if ($text === '') {
+                    unset($hooks[(string) $id]);
+                } else {
+                    $hooks[(string) $id] = $text;
+                }
+            }
+            $meta['hooks'] = $hooks;
+        }
+
+        if ($request->has('intro')) {
+            $intro = trim((string) ($data['intro'] ?? ''));
+            if ($intro === '') {
+                unset($meta['intro'], $meta['roster']);
+            } else {
+                $meta['intro'] = $intro;
+                // Подводка говорит про НАБОР, поэтому помечаем, под какой
+                // именно она написана: иначе она переживёт смену состава и
+                // будет врать.
+                $meta['roster'] = $roster;
+            }
+        }
+
+        $item->digest_meta = $meta;
+        $item->save();
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($item->broadcast_id);
+        $publishAt = $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now();
+
+        $draft = $this->digestComposer->recompose($item->fresh(), $broadcast, $publishAt);
+        if ($draft !== null) {
+            $this->broadcasts->applyDigestDraft($item, $draft);
+        }
+
+        return response()->json(['data' => $this->itemPayload($item->fresh(), null, null)]);
+    }
+
+    /**
      * Общие запреты на правку состава — те же, что у замены строки.
      *
      * Ручной текст сюда попадает отдельным отказом: подпись описывает состав,
@@ -4158,6 +4231,13 @@ class AdminBroadcastController extends Controller
             // Состав подборки: что именно она называет. Без этого в карточке
             // виден текст, но не видно, какие события он закрыл для ленты.
             'linked_events' => $linked,
+            // Подводка и бюджет фразы: править их можно только увидев.
+            'digest_intro' => $i->kind === TelegramChatBroadcastItem::KIND_DIGEST
+                ? (($i->digest_meta ?? [])['intro'] ?? null)
+                : null,
+            'hook_budget' => $i->kind === TelegramChatBroadcastItem::KIND_DIGEST
+                ? (int) (($i->digest_meta ?? [])['hook_budget'] ?? 0)
+                : null,
             // Состав выбран руками — пересборка ленты его не тронет.
             'photos_manual' => is_array($i->photo_urls),
         ];
@@ -4193,6 +4273,7 @@ class AdminBroadcastController extends Controller
             // строками встаёт пресс-релиз. Глазами это видно только в
             // превью и только если знать, что искать.
             'has_hook' => $item->digestHook((int) $r->id) !== null,
+            'hook' => $item->digestHook((int) $r->id),
             'venue' => VenueName::label($r->venue_name) ?: null,
             'start_time' => $r->start_time ? Carbon::parse($r->start_time)->toIso8601String() : null,
             'url' => $this->siteUrl().'/events/'.$r->id,
