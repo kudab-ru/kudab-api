@@ -838,6 +838,89 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertNull($item->publish_at);
     }
 
+    /* ──────────────── сеансы в одной строке ──────────────── */
+
+    /** Одно время, разные дни: «сб и вс с 12:00». */
+    #[Test]
+    public function one_time_on_two_days_merges(): void
+    {
+        $this->onlyRubric('besplatno');
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $group = $this->group();
+
+        $this->event('Зин-фестиваль', 1, free: true, hour: 12, description: $long, groupId: $group);
+        $this->event('Зин-фестиваль', 2, free: true, hour: 12, description: $long, groupId: $group);
+        $this->fill('Бесплатное', free: true);
+
+        $this->assertMatchesRegularExpression('/(пн|вт|ср|чт|пт|сб|вс) и (пн|вт|ср|чт|пт|сб|вс) с 12:00/u', $this->caption());
+    }
+
+    /** Один день, разное время: «вс 11:30 и 14:30». */
+    #[Test]
+    public function two_times_on_one_day_merge(): void
+    {
+        $this->onlyRubric('besplatno');
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $group = $this->group();
+
+        $this->event('Раскоп', 1, free: true, hour: 11, description: $long, groupId: $group, minute: 30);
+        $this->event('Раскоп', 1, free: true, hour: 14, description: $long, groupId: $group, minute: 30);
+        $this->fill('Бесплатное', free: true);
+
+        $this->assertMatchesRegularExpression('/(пн|вт|ср|чт|пт|сб|вс) 11:30 и 14:30/u', $this->caption());
+    }
+
+    /** Разные дни И разное время короткой формы не имеют — печатаем один сеанс. */
+    #[Test]
+    public function a_mixed_series_is_not_merged(): void
+    {
+        $this->onlyRubric('besplatno');
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $group = $this->group();
+
+        $this->event('Смешанная серия', 1, free: true, hour: 11, description: $long, groupId: $group);
+        $this->event('Смешанная серия', 2, free: true, hour: 19, description: $long, groupId: $group);
+        $this->fill('Бесплатное', free: true);
+
+        $caption = $this->caption();
+
+        $this->assertStringNotContainsString(' и 19:00', $caption);
+        $this->assertStringNotContainsString(' с 11:00', $caption);
+    }
+
+    /** Длинная серия в строку не лезет: перечисление становится шумом. */
+    #[Test]
+    public function a_long_series_falls_back_to_one_session(): void
+    {
+        $this->onlyRubric('besplatno');
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $group = $this->group();
+
+        foreach ([9, 12, 15, 18] as $hour) {
+            $this->event('Каждый час', 1, free: true, hour: $hour, description: $long, groupId: $group);
+        }
+        $this->fill('Бесплатное', free: true);
+
+        $this->assertStringNotContainsString('12:00 и', $this->caption());
+    }
+
+    private function group(): int
+    {
+        $community = \App\Models\Community::create([
+            'name' => 'Серия '.uniqid(),
+            'city_id' => $this->cityId,
+        ]);
+
+        return (int) DB::table('event_groups')->insertGetId([
+            'group_key' => 'grp-'.uniqid(),
+            'city_id' => $this->cityId,
+            'community_id' => $community->id,
+            'title_norm' => 'seriya-'.uniqid(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
     /* ──────────────── рубрику выбирает человек ──────────────── */
 
     /** Названная рубрика побеждает ротацию. */
@@ -1042,6 +1125,8 @@ class BroadcastDigestRubricsTest extends TestCase
         ?string $priceText = null,
         string $timePrecision = 'datetime',
         bool $donation = false,
+        ?int $groupId = null,
+        int $minute = 0,
     ): int {
         $community = \App\Models\Community::create([
             'name' => 'Организатор '.uniqid(),
@@ -1066,7 +1151,7 @@ class BroadcastDigestRubricsTest extends TestCase
         // а запись даты идёт форматированием без смены пояса: 21:00 по Москве
         // ложилось в базу как 21:00 UTC, то есть полночь по Москве, и рубрика
         // «Вечером» не набиралась вовсе.
-        $at = Carbon::now('Europe/Moscow')->addDays($dayOffset)->setTime($hour, 0)->utc();
+        $at = Carbon::now('Europe/Moscow')->addDays($dayOffset)->setTime($hour, $minute)->utc();
 
         $event->start_time = $at;
         $event->start_date = $at->toDateString();
@@ -1077,6 +1162,7 @@ class BroadcastDigestRubricsTest extends TestCase
             : ($free ? 'free' : ($priceMin === null ? 'unknown' : 'range'));
         $event->price_min = $free || $donation ? 0 : $priceMin;
         $event->price_text = $priceText;
+        $event->event_group_id = $groupId;
         $event->time_precision = $timePrecision;
         $event->save();
 

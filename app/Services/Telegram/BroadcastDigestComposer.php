@@ -59,6 +59,9 @@ final class BroadcastDigestComposer
      */
     private const HOOK_BUDGET_MIN = 40;
 
+    /** Больше сеансов в строку не склеиваем: перечисление становится шумом. */
+    private const MERGE_MAX = 3;
+
     /** Сколько места осталось на фразу в ПОСЛЕДНЕЙ собранной подписи. */
     private int $hookBudget = 0;
 
@@ -1095,14 +1098,15 @@ final class BroadcastDigestComposer
 
         // Форма даты решается ОДИН РАЗ на весь пост: вперемешку «сб 13:30» и
         // «сб 26 сентября, 18:00» читаются как сбой, а не как решение.
-        $shortDates = $this->weekdaysAreDistinct($picked['named']);
+        $sessions = $this->sessionsFor($picked['named'], $since, $to);
+        $shortDates = $this->weekdaysAreDistinct($picked['named'], $sessions);
         $emoji = $this->emojiFor($picked['named'], $item);
 
         $lines = [];
         $rich = [];
         foreach ($picked['named'] as $row) {
             $meta = array_values(array_filter([
-                $this->whenLabel($row, $shortDates),
+                $this->whenLabel($row, $shortDates, $sessions[(int) $row->id] ?? []),
                 $this->venueLabel($row),
                 $this->priceLabel($row),
             ]));
@@ -1561,22 +1565,112 @@ final class BroadcastDigestComposer
      * Короткая форма экономит двенадцать знаков на строке — в посте из пяти
      * строк это место под целое шестое событие.
      */
-    private function whenLabel(object $row, bool $short): string
+    /**
+     * Сеансы названных событий внутри окна рубрики.
+     *
+     * Берём ПОСЛЕ отбора и только для названных: collapseRepeats сносит
+     * близнецов из пула до сборки, и лезть туда — значит трогать отбор,
+     * который работает.
+     *
+     * @param  list<object>  $named
+     * @return array<int, list<Carbon>>
+     */
+    private function sessionsFor(array $named, ?Carbon $since, Carbon $until): array
+    {
+        $groups = [];
+        foreach ($named as $row) {
+            if ($row->event_group_id !== null) {
+                $groups[(int) $row->event_group_id][] = (int) $row->id;
+            }
+        }
+
+        if ($groups === []) {
+            return [];
+        }
+
+        $rows = DB::table('events')
+            ->whereIn('event_group_id', array_keys($groups))
+            ->whereNull('deleted_at')
+            ->where('status', 'active')
+            ->where('start_time', '<=', $until)
+            ->when($since !== null, fn ($q) => $q->where('start_time', '>=', $since))
+            ->orderBy('start_time')
+            ->get(['event_group_id', 'start_time']);
+
+        $byGroup = [];
+        foreach ($rows as $r) {
+            $byGroup[(int) $r->event_group_id][] = Carbon::parse($r->start_time)->setTimezone(self::TZ);
+        }
+
+        $out = [];
+        foreach ($groups as $groupId => $eventIds) {
+            foreach ($eventIds as $eventId) {
+                $out[$eventId] = $byGroup[$groupId] ?? [];
+            }
+        }
+
+        return $out;
+    }
+
+    private function whenLabel(object $row, bool $short, array $times = []): string
     {
         $at = Carbon::parse($row->start_time)->setTimezone(self::TZ);
-        $date = $short
-            ? self::WEEKDAYS[(int) $at->isoWeekday()]
-            : self::WEEKDAYS[(int) $at->isoWeekday()].' '.$at->day.' '.self::MONTHS[$at->month];
+
+        $day = fn (Carbon $t) => $short
+            ? self::WEEKDAYS[(int) $t->isoWeekday()]
+            : self::WEEKDAYS[(int) $t->isoWeekday()].' '.$t->day.' '.self::MONTHS[$t->month];
 
         // У события без времени в start_time стоит полночь, и «сб 00:00» —
         // это не факт, а артефакт: источник назвал только день.
         if ((string) ($row->time_precision ?? 'datetime') === 'date') {
-            return $date;
+            return $day($at);
+        }
+
+        if (($merged = $this->mergedWhen($times, $short, $day)) !== null) {
+            return $merged;
         }
 
         return $short
-            ? $date.' '.$at->format('H:i')
-            : $date.', '.$at->format('H:i');
+            ? $day($at).' '.$at->format('H:i')
+            : $day($at).', '.$at->format('H:i');
+    }
+
+    /**
+     * Несколько сеансов одной строкой: «сб и вс с 12:00», «вс 11:30 и 14:30».
+     *
+     * Только две формы, у которых склейка честна. Смешанный случай (разные дни
+     * И разное время) короткой формы не имеет — там печатаем один сеанс, как
+     * печатали всегда.
+     *
+     * @param  list<Carbon>  $times
+     */
+    private function mergedWhen(array $times, bool $short, callable $day): ?string
+    {
+        if (count($times) < 2 || count($times) > self::MERGE_MAX) {
+            return null;
+        }
+
+        $hours = array_values(array_unique(array_map(fn (Carbon $t) => $t->format('H:i'), $times)));
+        $dates = array_values(array_unique(array_map(fn (Carbon $t) => $t->toDateString(), $times)));
+
+        // Одно время, разные дни: «сб и вс с 12:00».
+        if (count($hours) === 1 && count($dates) === count($times)) {
+            $days = array_map($day, $times);
+            $last = array_pop($days);
+
+            return ($days === [] ? $last : implode(', ', $days).' и '.$last)
+                .($short ? ' с ' : ', с ').$hours[0];
+        }
+
+        // Один день, разное время: «вс 11:30 и 14:30».
+        if (count($dates) === 1) {
+            $last = array_pop($hours);
+
+            return $day($times[0]).($short ? ' ' : ', ')
+                .($hours === [] ? $last : implode(', ', $hours).' и '.$last);
+        }
+
+        return null;
     }
 
     /**
@@ -1589,21 +1683,28 @@ final class BroadcastDigestComposer
      *
      * @param  list<object>  $named
      */
-    private function weekdaysAreDistinct(array $named): bool
+    private function weekdaysAreDistinct(array $named, array $sessions = []): bool
     {
         $seen = [];
 
         foreach ($named as $row) {
-            $at = Carbon::parse($row->start_time)->setTimezone(self::TZ);
-            $weekday = (int) $at->isoWeekday();
-            $date = $at->toDateString();
-
-            // Два события одного дня — не помеха: это буквально один день.
-            if (isset($seen[$weekday]) && $seen[$weekday] !== $date) {
-                return false;
+            // Склеенная строка занимает все свои дни, а не только первый.
+            $times = $sessions[(int) $row->id] ?? [];
+            if ($times === [] || count($times) > self::MERGE_MAX) {
+                $times = [Carbon::parse($row->start_time)->setTimezone(self::TZ)];
             }
 
-            $seen[$weekday] = $date;
+            foreach ($times as $at) {
+                $weekday = (int) $at->isoWeekday();
+                $date = $at->toDateString();
+
+                // Два события одного дня — не помеха: это буквально один день.
+                if (isset($seen[$weekday]) && $seen[$weekday] !== $date) {
+                    return false;
+                }
+
+                $seen[$weekday] = $date;
+            }
         }
 
         return true;
