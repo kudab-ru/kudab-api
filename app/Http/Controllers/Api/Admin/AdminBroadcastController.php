@@ -1502,10 +1502,14 @@ class AdminBroadcastController extends Controller
      * Без этого выбирать не из чего: список рубрик живёт в конфиге api и
      * наружу не отдавался.
      */
-    public function digestThemes(int $channelId): JsonResponse
+    public function digestThemes(Request $request, int $channelId): JsonResponse
     {
         $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($channelId);
         $at = Carbon::now()->addMinutes($this->textGraceMinutes());
+
+        // probe=0 — только названия: примерка каждой рубрики собирает состав,
+        // и на тринадцати это секунды. В расписании нужен просто список.
+        $probe = $request->boolean('probe', true);
 
         $out = [];
         foreach ((array) config('broadcast_digest.themes', []) as $theme) {
@@ -1514,15 +1518,16 @@ class AdminBroadcastController extends Controller
                 continue;
             }
 
-            $draft = $this->digestComposer->compose($broadcast, $at, null, $slug);
+            $draft = $probe ? $this->digestComposer->compose($broadcast, $at, null, $slug) : null;
 
             $out[] = [
                 'slug' => $slug,
                 'title' => (string) ($theme['title'] ?? $slug),
                 'emoji' => (string) ($theme['emoji'] ?? ''),
-                'gathers' => $draft !== null,
+                'gathers' => $probe ? $draft !== null : true,
                 'named' => $draft !== null ? count($draft['event_ids']) : 0,
                 'venues' => $draft !== null ? (int) ($draft['venues'] ?? 0) : 0,
+                'probed' => $probe,
             ];
         }
 
@@ -3573,6 +3578,10 @@ class AdminBroadcastController extends Controller
             'text_lead_minutes' => ['sometimes', 'integer', 'min:1', 'max:1440'],
             // null — рубрика выключена; 1..7 — день недели, когда она выходит
             'digest_weekday' => ['sometimes', 'nullable', 'integer', 'min:1', 'max:7'],
+            'digest_slots' => ['sometimes', 'array', 'max:7'],
+            'digest_slots.*.weekday' => ['required', 'integer', 'min:1', 'max:7'],
+            'digest_slots.*.hour' => ['required', 'integer', 'min:0', 'max:23'],
+            'digest_slots.*.theme' => ['sometimes', 'nullable', 'string', 'max:64'],
         ]);
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
@@ -3642,6 +3651,9 @@ class AdminBroadcastController extends Controller
             $broadcast->text_lead_minutes = (int) $data['text_lead_minutes'];
         }
         $digestWas = $broadcast->digest_weekday;
+        if ($request->has('digest_slots')) {
+            $broadcast->digest_slots = (array) $data['digest_slots'];
+        }
         if ($request->has('digest_weekday')) {
             $broadcast->digest_weekday = $data['digest_weekday'] === null
                 ? null
@@ -3956,6 +3968,7 @@ class AdminBroadcastController extends Controller
             // Час не отдаём — он всегда вечерний слот канала.
             'digest_weekday' => $b->digest_weekday,
             'digest_hour' => $b->digest_hour,
+            'digest_slots' => $b->digest_slots,
             // Когда канал снова сможет постить. Без этого пост, ждущий
             // зазора, выглядел как «ничего не происходит»: в ленте он стоит
             // со временем в прошлом и молчит.

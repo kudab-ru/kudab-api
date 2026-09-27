@@ -60,45 +60,68 @@ final class BroadcastDigestBooking
         bool $dryRun,
         array &$summary,
     ): void {
-        if (! $broadcast->enabled || $broadcast->period === 'off' || $broadcast->digest_weekday === null) {
+        $slots = $broadcast->digest_slots;
+
+        if (! $broadcast->enabled || $broadcast->period === 'off' || $slots === []) {
             $summary['off']++;
 
             return;
         }
 
-        // одна бронь за раз: следующую поставит прогон после выхода этой
-        if ($this->hasOpenDigest($broadcast, $now)) {
-            $summary['already']++;
+        foreach ($slots as $slot) {
+            // Одна бронь НА СЛОТ: иначе четверговая подборка держала бы
+            // пятничную, а следующая четверговая встала бы через неделю.
+            if ($this->hasOpenDigestForSlot($broadcast, (int) $slot['weekday'], (int) $slot['hour'])) {
+                $summary['already']++;
 
-            return;
-        }
+                continue;
+            }
 
-        $at = $this->nextSlot($broadcast, $now);
-        if ($at === null) {
-            return;
-        }
+            $at = $this->slotAt($broadcast, $now, (int) $slot['weekday'], (int) $slot['hour']);
+            if ($at === null) {
+                continue;
+            }
 
-        if ($dryRun) {
+            if ($dryRun) {
+                $summary['booked']++;
+
+                continue;
+            }
+
+            $item = new TelegramChatBroadcastItem;
+            $item->broadcast_id = $broadcast->id;
+            $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+            $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+            $item->publish_at = $at->utc();
+            // Рубрика слота: её возьмёт сборка состава, когда придёт время.
+            if (! empty($slot['theme'])) {
+                $item->digest_meta = ['theme_wanted' => (string) $slot['theme']];
+            }
+            $item->save();
+
             $summary['booked']++;
-
-            return;
         }
+    }
 
-        $item = new TelegramChatBroadcastItem;
-        $item->broadcast_id = $broadcast->id;
-        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
-        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
-        $item->publish_at = $at->utc();
-        $item->save();
+    /** Есть ли незакрытая подборка, забронированная под ЭТОТ день и час. */
+    private function hasOpenDigestForSlot(TelegramChatBroadcast $broadcast, int $weekday, int $hour): bool
+    {
+        return $this->openDigests($broadcast)
+            ->contains(function (TelegramChatBroadcastItem $i) use ($weekday, $hour) {
+                if ($i->publish_at === null) {
+                    return false;
+                }
+                $at = Carbon::parse($i->publish_at)->setTimezone(BroadcastSlotPlanner::TZ);
 
-        $summary['booked']++;
+                return (int) $at->isoWeekday() === $weekday && (int) $at->hour === $hour;
+            });
     }
 
     /**
      * Внеочередная подборка (is_off_grid) не в счёт: иначе ручная «подборка сейчас»
      * отменила бы очередную недельную.
      */
-    private function hasOpenDigest(TelegramChatBroadcast $broadcast, Carbon $now): bool
+    private function openDigests(TelegramChatBroadcast $broadcast): \Illuminate\Support\Collection
     {
         return TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
@@ -112,7 +135,7 @@ final class BroadcastDigestBooking
                 TelegramChatBroadcastItem::STATUS_APPROVED,
                 TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
             ])
-            ->exists();
+            ->get();
     }
 
     /** nextSlot для админки: возврат снятой подборки ставит её в день рубрики. */
@@ -127,14 +150,17 @@ final class BroadcastDigestBooking
      */
     private function nextSlot(TelegramChatBroadcast $broadcast, Carbon $now): ?Carbon
     {
-        // рубрика выключена — слота нет, админка вернёт запись без дня
-        $weekday = $broadcast->digest_weekday;
-        if ($weekday === null) {
-            return null;
-        }
+        $first = $broadcast->digest_slots[0] ?? null;
 
+        return $first === null
+            ? null
+            : $this->slotAt($broadcast, $now, (int) $first['weekday'], (int) $first['hour']);
+    }
+
+    /** Ближайшее наступление дня и часа, не занятое другой записью. */
+    private function slotAt(TelegramChatBroadcast $broadcast, Carbon $now, int $weekday, int $hour): ?Carbon
+    {
         $msk = $now->copy()->setTimezone(BroadcastSlotPlanner::TZ);
-        $hour = $broadcast->digest_hour;
 
         for ($week = 0; $week < 5; $week++) {
             $candidate = $msk->copy()

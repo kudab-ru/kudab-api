@@ -76,7 +76,6 @@ class TelegramChatBroadcastService
         private readonly BroadcastDigestComposer $digestComposer,
     ) {}
 
-
     /**
      * Получить (или создать) настройки рассылки по telegram_id и telegram_chat_id.
      * Проверки прав — resolveManagedChat().
@@ -1078,7 +1077,15 @@ class TelegramChatBroadcastService
         TelegramChatBroadcast $broadcast,
         Carbon $now,
     ): bool {
-        $draft = $this->digestComposer->compose($broadcast, $now, $item);
+        // Рубрику мог задать слот расписания. Не набралась — пробуем как
+        // обычно: пустой пост хуже не той рубрики.
+        $wanted = trim((string) (($item->digest_meta ?? [])['theme_wanted'] ?? '')) ?: null;
+
+        $draft = $wanted !== null
+            ? $this->digestComposer->compose($broadcast, $now, $item, $wanted)
+            : null;
+
+        $draft ??= $this->digestComposer->compose($broadcast, $now, $item);
 
         if ($draft === null) {
             // следующую бронь поставит broadcast:enqueue-digests
@@ -1421,7 +1428,6 @@ class TelegramChatBroadcastService
     {
         return $this->broadcastItemRepository->autoApproveExpiredReviews($now);
     }
-
 
     /**
      * Проверка прав + поиск чата, которым можно управлять.

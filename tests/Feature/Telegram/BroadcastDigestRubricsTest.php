@@ -264,12 +264,115 @@ class BroadcastDigestRubricsTest extends TestCase
             'updated_at' => now(),
         ]);
 
-        $booking = app(\App\Services\Telegram\BroadcastDigestBooking::class);
-        $m = new \ReflectionMethod($booking, 'hasOpenDigest');
-        $m->setAccessible(true);
+        $channel->period = 'daily_19';
+        $channel->digest_slots = [['weekday' => 4, 'hour' => 19]];
+        $channel->save();
 
-        $this->assertFalse($m->invoke($booking, $channel, Carbon::now()),
-            'внесеточная не считается открытой — недельная всё равно встанет');
+        app(\App\Services\Telegram\BroadcastDigestBooking::class)->bookDue(Carbon::now());
+
+        $this->assertSame(
+            1,
+            TelegramChatBroadcastItem::query()
+                ->where('broadcast_id', $channel->id)
+                ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+                ->where('is_off_grid', false)
+                ->count(),
+            'внесеточная не мешает недельной встать',
+        );
+    }
+
+    /** Два слота — две брони в неделю, каждая на свой день и час. */
+    #[Test]
+    public function two_slots_book_two_digests(): void
+    {
+        $channel = $this->channel();
+        $channel->period = 'daily_19';
+        $channel->digest_slots = [
+            ['weekday' => 4, 'hour' => 19],
+            ['weekday' => 5, 'hour' => 14, 'theme' => 'na-vyhodnyh'],
+        ];
+        $channel->save();
+
+        app(\App\Services\Telegram\BroadcastDigestBooking::class)->bookDue(Carbon::now());
+
+        $booked = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $channel->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->get();
+
+        $this->assertCount(2, $booked);
+
+        $shape = $booked
+            ->map(fn ($i) => Carbon::parse($i->publish_at)->setTimezone('Europe/Moscow'))
+            ->map(fn ($t) => $t->isoWeekday().'@'.$t->hour)
+            ->sort()->values()->all();
+
+        $this->assertSame(['4@19', '5@14'], $shape);
+
+        $friday = $booked->first(fn ($i) => Carbon::parse($i->publish_at)->setTimezone('Europe/Moscow')->isoWeekday() === 5);
+        $this->assertSame('na-vyhodnyh', ($friday->digest_meta ?? [])['theme_wanted'] ?? null);
+    }
+
+    /** Рубрика слота доходит до сборки состава. */
+    #[Test]
+    public function a_slot_rubric_is_used_when_the_digest_is_filled(): void
+    {
+        $this->onlyRubric('besplatno', 'spektakli');
+        $this->fill('Бесплатное', free: true);
+        foreach ([1, 2, 3, 4, 5] as $day) {
+            $this->event('Спектакль '.$day, $day, free: false, priceMin: 700);
+        }
+
+        $channel = $this->channel();
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $channel->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = Carbon::now()->addHours(6);
+        $item->digest_meta = ['theme_wanted' => 'spektakli'];
+        $item->save();
+
+        app(\App\Services\Telegram\TelegramChatBroadcastService::class)
+            ->prepareDigestAhead($item, $channel, Carbon::now());
+
+        $this->assertSame('spektakli', ($item->fresh()->digest_meta ?? [])['theme'] ?? null);
+    }
+
+    /** Повторный прогон не плодит дубли: на слот одна бронь. */
+    #[Test]
+    public function booking_twice_keeps_one_per_slot(): void
+    {
+        $channel = $this->channel();
+        $channel->period = 'daily_19';
+        $channel->digest_slots = [['weekday' => 4, 'hour' => 19], ['weekday' => 5, 'hour' => 14]];
+        $channel->save();
+
+        $booking = app(\App\Services\Telegram\BroadcastDigestBooking::class);
+        $booking->bookDue(Carbon::now());
+        $booking->bookDue(Carbon::now());
+
+        $this->assertSame(2, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $channel->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->count());
+    }
+
+    /** Старая настройка одним днём читается как один слот. */
+    #[Test]
+    public function the_legacy_weekday_reads_as_one_slot(): void
+    {
+        $channel = $this->channel();
+        $settings = $channel->settings;
+        unset($settings['digest_slots']);
+        $settings['digest_weekday'] = 4;
+        $channel->settings = $settings;
+        $channel->save();
+
+        $slots = $channel->fresh()->digest_slots;
+
+        $this->assertCount(1, $slots);
+        $this->assertSame(4, $slots[0]['weekday']);
+        $this->assertSame(19, $slots[0]['hour'], 'час по старой раскладке — последний слот канала');
     }
 
     /** Ставить нечего — говорим прямо, а не создаём пустую запись. */
