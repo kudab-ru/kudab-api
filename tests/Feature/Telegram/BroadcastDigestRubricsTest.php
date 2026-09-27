@@ -838,6 +838,25 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertNull($item->publish_at);
     }
 
+    /** «от 0 ₽» читается как сбой: у такой цены значит только верх. */
+    #[Test]
+    public function a_range_starting_at_zero_names_its_ceiling(): void
+    {
+        $this->onlyRubric('spektakli');
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+
+        $id = $this->event('Вечер премьер', 1, free: false, priceMin: 0, description: $long);
+        DB::table('events')->where('id', $id)->update(['price_max' => 4000, 'price_status' => 'range']);
+        foreach ([2, 3, 4, 5] as $day) {
+            $this->event('Спектакль '.$day, $day, free: false, priceMin: 700);
+        }
+
+        $caption = $this->caption();
+
+        $this->assertStringNotContainsString('от 0', $caption);
+        $this->assertStringContainsString('до 4000', $caption);
+    }
+
     /* ──────────────── сеансы в одной строке ──────────────── */
 
     /** Одно время, разные дни: «сб и вс с 12:00». */
