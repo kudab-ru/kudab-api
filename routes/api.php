@@ -96,6 +96,7 @@ Route::prefix('admin')
         // Подборка вне очереди: ещё одна, дополнительно к недельной рубрике.
         // Вне сетки — слот дня и очередная недельная остаются нетронутыми.
         Route::post('/broadcast/channels/{id}/digest-now', [AdminBroadcastController::class, 'digestNow']);
+        Route::get('/broadcast/channels/{id}/digest-themes', [AdminBroadcastController::class, 'digestThemes']);
         Route::post('/broadcast/channels/{id}/move', [AdminBroadcastController::class, 'move']);
         Route::patch('/broadcast/items/{id}', [AdminBroadcastController::class, 'update']);
         Route::post('/broadcast/items/{id}/publish-now', [AdminBroadcastController::class, 'publishNow']);

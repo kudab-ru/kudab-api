@@ -838,6 +838,74 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertNull($item->publish_at);
     }
 
+    /* ──────────────── рубрику выбирает человек ──────────────── */
+
+    /** Названная рубрика побеждает ротацию. */
+    #[Test]
+    public function a_named_rubric_wins_over_the_rotation(): void
+    {
+        $this->onlyRubric('besplatno', 'spektakli');
+        $this->fill('Бесплатное', free: true);
+        foreach ([1, 2, 3, 4, 5] as $day) {
+            $this->event('Спектакль '.$day, $day, free: false, priceMin: 700);
+        }
+
+        $forced = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::now(), null, 'spektakli');
+
+        $this->assertNotNull($forced);
+        $this->assertSame('spektakli', $forced['theme_slug']);
+    }
+
+    /** Не набралась — отказ, а не подмена другой. */
+    #[Test]
+    public function a_named_rubric_that_gathers_nothing_returns_null(): void
+    {
+        $this->onlyRubric('besplatno', 'vecherom');
+        $this->fill('Бесплатное', free: true);
+
+        $this->assertNull(
+            app(BroadcastDigestComposer::class)
+                ->compose($this->channel(), Carbon::now(), null, 'vecherom'),
+        );
+    }
+
+    /** У выбранной руками ограничение по дню выхода не действует. */
+    #[Test]
+    public function a_named_rubric_ignores_its_weekday_limit(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 10:00', 'Europe/Moscow')); // вторник
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([4, 4, 4, 5, 5] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+
+        $at = Carbon::parse('2026-09-15 14:00', 'Europe/Moscow');
+        $composer = app(BroadcastDigestComposer::class);
+
+        $this->assertNull($composer->compose($this->channel(), $at), 'сама во вторник не выходит');
+        $this->assertNotNull($composer->compose($this->channel(), $at, null, 'na-vyhodnyh'), 'а по просьбе — да');
+    }
+
+    /** Справочник говорит, что наберётся, а что нет. */
+    #[Test]
+    public function the_theme_list_says_what_gathers(): void
+    {
+        $this->onlyRubric('besplatno', 'vecherom');
+        $this->fill('Бесплатное', free: true);
+        $this->actingAsSuperadmin();
+
+        $rows = $this->getJson("/api/admin/broadcast/channels/{$this->channel()->id}/digest-themes")
+            ->assertOk()->json('data');
+
+        $by = collect($rows)->keyBy('slug');
+        $this->assertTrue($by['besplatno']['gathers']);
+        $this->assertGreaterThan(0, $by['besplatno']['named']);
+        $this->assertFalse($by['vecherom']['gathers']);
+    }
+
     /* ──────────────── значок у строки ──────────────── */
 
     /**

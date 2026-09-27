@@ -1197,19 +1197,26 @@ class AdminBroadcastController extends Controller
      * чтобы УВИДЕТЬ, что получится, и успеть поправить. Рубрику выбирает тот
      * же отбор, что и автосборку, — с оглядкой на прошлые посты.
      */
-    public function digestNow(int $channelId): JsonResponse
+    public function digestNow(Request $request, int $channelId): JsonResponse
     {
+        $data = $request->validate([
+            'theme' => ['sometimes', 'nullable', 'string', 'max:64'],
+        ]);
+
         $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($channelId);
+        $theme = trim((string) ($data['theme'] ?? '')) ?: null;
 
         $at = Carbon::now()->addMinutes(
             max(1, (int) config('services.bot.broadcast_text_grace_minutes', 6)),
         );
 
-        $draft = $this->digestComposer->compose($broadcast, $at);
+        $draft = $this->digestComposer->compose($broadcast, $at, null, $theme);
         if ($draft === null) {
             return response()->json([
                 'ok' => false,
-                'error' => 'Ни одна рубрика не набрала состава — ставить пока нечего.',
+                'error' => $theme === null
+                    ? 'Ни одна рубрика не набрала состава — ставить пока нечего.'
+                    : 'Эта рубрика сейчас не набрала состава — выберите другую.',
             ], 422);
         }
 
@@ -1487,6 +1494,40 @@ class AdminBroadcastController extends Controller
      * заголовок не врёт.
      */
     private const DIGEST_MIN_ROSTER = 2;
+
+    /**
+     * Какие рубрики наберутся на этот момент.
+     *
+     * GET /api/admin/broadcast/channels/{id}/digest-themes
+     * Без этого выбирать не из чего: список рубрик живёт в конфиге api и
+     * наружу не отдавался.
+     */
+    public function digestThemes(int $channelId): JsonResponse
+    {
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($channelId);
+        $at = Carbon::now()->addMinutes($this->textGraceMinutes());
+
+        $out = [];
+        foreach ((array) config('broadcast_digest.themes', []) as $theme) {
+            $slug = (string) ($theme['slug'] ?? '');
+            if ($slug === '') {
+                continue;
+            }
+
+            $draft = $this->digestComposer->compose($broadcast, $at, null, $slug);
+
+            $out[] = [
+                'slug' => $slug,
+                'title' => (string) ($theme['title'] ?? $slug),
+                'emoji' => (string) ($theme['emoji'] ?? ''),
+                'gathers' => $draft !== null,
+                'named' => $draft !== null ? count($draft['event_ids']) : 0,
+                'venues' => $draft !== null ? (int) ($draft['venues'] ?? 0) : 0,
+            ];
+        }
+
+        return response()->json(['data' => $out]);
+    }
 
     /**
      * Добавить строку в состав.

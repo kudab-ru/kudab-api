@@ -80,6 +80,7 @@ final class BroadcastDigestComposer
         TelegramChatBroadcast $broadcast,
         Carbon $publishAt,
         ?TelegramChatBroadcastItem $forItem = null,
+        ?string $themeSlug = null,
     ): ?array {
         $cityId = $broadcast->chat?->city_id;
         if (! $cityId) {
@@ -99,11 +100,17 @@ final class BroadcastDigestComposer
         $weekday = (int) $publishAt->copy()->setTimezone(self::TZ)->isoWeekday();
 
         foreach ((array) config('broadcast_digest.themes', []) as $theme) {
+            // Рубрику назвали руками — остальные не считаем. Ограничение по
+            // дню на выбранную не действует: человек решил.
+            if ($themeSlug !== null && (string) ($theme['slug'] ?? '') !== $themeSlug) {
+                continue;
+            }
+
             // Рубрика может иметь смысл не в любой день. «На выходных» во
             // вторник — это приглашение подождать четыре дня; такое читают
             // один раз и отписываются.
             $days = (array) ($theme['only_weekdays'] ?? []);
-            if ($days !== [] && ! in_array($weekday, array_map('intval', $days), true)) {
+            if ($themeSlug === null && $days !== [] && ! in_array($weekday, array_map('intval', $days), true)) {
                 continue;
             }
 
