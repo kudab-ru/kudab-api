@@ -16,23 +16,8 @@ use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 /**
- * Постановка «портрета площадки» в очередь рассылки (этап 2 venue-portrait).
- *
- * Портрет едет по СУЩЕСТВУЮЩИМ рельсам событийной рассылки (claim-lease, ревью-
- * гейт, отправка ботом) — этот сервис только НАПОЛНЯЕТ очередь venue-айтемами.
- * Доставку (poll → send → mark) делают TelegramChatBroadcastService::collectDueSingleRuns
- * (ветка kind=venue) и bot-cron.
- *
- * Ключевое требование владельца — НЕ ПОВТОРЯТЬСЯ. Три слоя анти-повтора:
- *  1. Ротация: берём площадку, которая дольше всех не выходила портретом (или ни
- *     разу) — пока не пройдём весь пул, ни одна не повторится.
- *  2. Кулдаун COOLDOWN_DAYS: даже после круга площадка не выйдет повторно раньше.
- *  3. Кросс-формат: не постим портрет площадки, чьё СОБЫТИЕ ушло спотлайтом за
- *     последнюю неделю (одно место не мелькает дважды подряд).
- *  + текст (venues.tg_portrait) перегенерится парсером при новых данных.
- *
- * Каденс — настройка канала portrait_every_days (по умолчанию неделя),
- * считается от последнего отправленного портрета канала.
+ * Ставит портреты площадок в очередь рассылки. Доставка общая с событиями:
+ * TelegramChatBroadcastService::collectDueSingleRuns, ветка kind=venue.
  */
 class TelegramVenuePortraitService
 {
@@ -45,23 +30,16 @@ class TelegramVenuePortraitService
     /** Кросс-формат: окно, в котором событие площадки блокирует её портрет. */
     private const CROSS_FORMAT_DAYS = 7;
 
-    /**
-     * Сколько площадок нужно в пуле на один портрет в неделю.
-     *
-     * Площадка возвращается в ротацию через COOLDOWN_DAYS, то есть пул не
-     * расходуется, а рециркулирует: потолок частоты = пул ÷ (кулдаун ÷ 7).
-     */
+    /** Площадок в пуле на один портрет в неделю: каждая после выхода заперта на COOLDOWN_DAYS. */
     public const POOL_PER_WEEKLY_POST = self::COOLDOWN_DAYS / 7;
 
     /**
-     * Сколько дней не предлагать площадку, чей портрет отклонили или сняли.
-     *
-     * Столько же, сколько у событий: отказ не должен выглядеть
-     * проигнорированным, но и хоронить площадку навсегда незачем.
+     * Сколько дней не предлагать площадку после отклонённого, снятого или упавшего
+     * портрета. Столько же, сколько TelegramChatBroadcastService::REJECTED_COOLDOWN_DAYS.
      */
     private const REFUSED_COOLDOWN_DAYS = 30;
 
-    /** Сколько картинок уходит альбомом у портрета. Читается и доставкой, и админкой. */
+    /** Сколько картинок уходит альбомом у портрета и подборки. Читается и доставкой, и админкой. */
     public const ALBUM_LIMIT = 4;
 
     /** Название+адрес ≤ этой длины (символов) — склеиваем в одну строку шапки. */
@@ -74,18 +52,10 @@ class TelegramVenuePortraitService
 
     public function __construct(
         private readonly TelegramChatBroadcastRepositoryInterface $broadcastRepository,
-        // Тот же расчёт свободного места, что у событий: портрет перестал быть
-        // особым видом поста и встаёт в слот наравне с ними.
         private readonly BroadcastSlotPlanner $slotPlanner,
     ) {}
 
     /**
-     * Наполнить очередь портретами площадок для всех enabled city-каналов, которым
-     * пора (недельный каденс) и у которых сейчас пусто (одно в полёте).
-     *
-     * Идёт из scheduler (broadcast:enqueue-venue-portraits). Дедупликация постов —
-     * через ротацию/кулдаун (не через last_run_at — он у событийного расписания).
-     *
      * @return array{checked:int,due:int,enqueued:int,skipped_no_city:int,skipped_queue_busy:int,no_candidate:int,skipped_no_reviewer:int}
      */
     public function enqueueDueVenuePortraits(Carbon $now, bool $dryRun = false): array
@@ -112,19 +82,12 @@ class TelegramVenuePortraitService
                 continue;
             }
 
-            // Стенду боевые каналы не отдаём — ровно та же проверка, что у
-            // событийной постановки. Здесь её не было, и стенд молча копил
-            // портреты в очереди БОЕВОГО канала: запись 157 создана так.
             if (! BroadcastSafety::postingAllowed((int) $chat->telegram_chat_id)) {
                 $summary['skipped_not_allowed']++;
 
                 continue;
             }
 
-            // Одно в полёте — но ТОЛЬКО среди портретов. Раньше здесь считались
-            // и событийные записи, и с недельной лентой это убило бы портреты
-            // насовсем: лента почти всегда непуста, значит портрет не встал бы
-            // в очередь никогда.
             if ($this->openVenueItemsCount($broadcast->id) > 0) {
                 $summary['skipped_queue_busy']++;
 
@@ -143,11 +106,7 @@ class TelegramVenuePortraitService
                 continue;
             }
 
-            // День и час — как у события. Раньше портрету не ставил publish_at
-            // никто, поэтому для него сделали исключение в доставке, и он
-            // уезжал первым же тиком в произвольный час, вплотную за дневным
-            // постом. Нет свободного слота — ждём следующего раза: лучше
-            // пропустить неделю, чем публиковать мимо расписания.
+            // нет свободного слота — ждём следующего прогона, мимо расписания не ставим
             $publishAt = $this->slotPlanner->nextFreeSlot($broadcast, $now);
             if (! $publishAt) {
                 $summary['skipped_no_slot']++;
@@ -194,11 +153,7 @@ class TelegramVenuePortraitService
         return $summary;
     }
 
-    /**
-     * Пора ли каналу постить портрет: последний портрет постнут ≥ каденса
-     * назад (или ни разу). Каденс независим от событийного last_run_at и
-     * задаётся настройкой канала — раньше он был константой в коде.
-     */
+    /** Каденс portrait_every_days от последнего отправленного портрета, не от last_run_at: тот у событий. */
     private function venuePortraitDue(TelegramChatBroadcast $broadcast, Carbon $now): bool
     {
         $last = TelegramChatBroadcastItem::query()
@@ -214,19 +169,14 @@ class TelegramVenuePortraitService
         return Carbon::parse($last)->lt($now->copy()->subDays($broadcast->portrait_every_days));
     }
 
-    /** Канал по id — планировщику нужны его слоты и горизонт. */
     private function broadcastOf(int $broadcastId): TelegramChatBroadcast
     {
         return TelegramChatBroadcast::query()->findOrFail($broadcastId);
     }
 
     /**
-     * Незакрытые записи ПОРТРЕТОВ у канала.
-     *
-     * Раньше считались все записи подряд, вместе с событийными. Пока в очереди
-     * держалась ровно одна запись, это работало; с лентой на неделю вперёд
-     * событийные записи есть почти всегда, и портрет не встал бы в очередь
-     * никогда. Поэтому считаем только свой вид.
+     * Открытые записи портретов канала. Событийные не считаем: в ленте они
+     * есть почти всегда, и портрет не встал бы в очередь никогда.
      */
     private function openVenueItemsCount(int $broadcastId): int
     {
@@ -249,7 +199,6 @@ class TelegramVenuePortraitService
      */
     public function pickNextVenueForChat(int $cityId, int $broadcastId, Carbon $now): ?Venue
     {
-        // 1) на кулдауне: постились портретом за COOLDOWN_DAYS
         $onCooldown = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcastId)
             ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
@@ -258,9 +207,6 @@ class TelegramVenuePortraitService
             ->whereNotNull('venue_id')
             ->pluck('venue_id')->all();
 
-        // 1б) отклонённые и снятые: ротация помнила ТОЛЬКО отправленное, и
-        // отклонённая площадка предлагалась снова через день. На живых данных
-        // ВИНЗАВОД был поставлен дважды за двое суток, оба раза отклонён.
         $recentlyRefused = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcastId)
             ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
@@ -273,18 +219,11 @@ class TelegramVenuePortraitService
             ->whereNotNull('venue_id')
             ->pluck('venue_id')->all();
 
-        // 2) кросс-формат: чьё событие ушло спотлайтом за неделю ИЛИ стоит в
-        // открытой ленте. Раньше смотрели только отправленное, поэтому портрет
-        // площадки мог выйти в тот же день, что и анонс её события.
+        // площадки, чьё событие было в канале за CROSS_FORMAT_DAYS или стоит в открытой ленте
         $recentEventVenues = TelegramChatBroadcastItem::query()
             ->from('telegram.chat_broadcast_items as i')
-            // Через связь — и БЕЗ фильтра по типу записи. Фильтр был не
-            // страховкой, а причиной будущей ошибки: строка связи сама и есть
-            // утверждение «этот пост нёс это событие», а какого он вида —
-            // к вопросу «площадка уже звучала в канале» отношения не имеет.
-            // По принятой раскладке недели портрет площадки выходит в четверг,
-            // а подборка — в понедельник: с фильтром портрет не знал бы, что
-            // его площадку назвали три дня назад.
+            // через таблицу связи, без фильтра по kind: площадка, названная
+            // подборкой, тоже считается прозвучавшей
             ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
             ->join('events as e', 'e.id', '=', 'l.event_id')
             ->where('i.broadcast_id', $broadcastId)
@@ -303,10 +242,7 @@ class TelegramVenuePortraitService
             ->whereNotNull('e.venue_id')
             ->pluck('e.venue_id')->all();
 
-        // 1в) уже стоит в ленте: открытая запись портрета этой площадки. Без
-        // этого списка ротация предлагала её снова, а ручная постановка с
-        // force ставила второй пост про то же место — на стенде так и вышло с
-        // «Попкорн Драмой».
+        // открытый портрет этой площадки: иначе пул предложит её второй раз
         $alreadyQueued = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcastId)
             ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
@@ -342,17 +278,8 @@ class TelegramVenuePortraitService
             ->where('city_id', $cityId)
             ->whereNotNull('tg_portrait')
             ->where('tg_portrait', '<>', '')
-            // ПЛОЩАДКА БЕЗ ЕДИНОЙ ФОТОГРАФИИ В РОТАЦИЮ НЕ ИДЁТ.
-            //
-            // Фотографии портрет берёт у событий площадки, и у места без
-            // событий их нет вовсе: в канал уходит абзац прозы про бар — без
-            // картинки и без «что здесь скоро», потому что событий тоже нет.
-            // Замер 2026-09-16 по Воронежу: таких 19 площадок из 108 с готовым
-            // текстом, и ротация ставила их ПЕРВЫМИ — «ни разу не показывали»
-            // сортируется вперёд.
-            //
-            // Руками поставить такую по-прежнему можно: в карточке пула прямо
-            // написано «без фото — уйдёт текстом», и решение за человеком.
+            // без фото в ротацию не берём: портрет ушёл бы голым текстом.
+            // условие то же, что в venuePhotoUrls
             ->whereExists(function ($q) {
                 $q->selectRaw('1')
                     ->from('events as e')
@@ -376,21 +303,15 @@ class TelegramVenuePortraitService
     }
 
     /**
-     * @param  int|null  $itemId  запись очереди: её номер уходит в метку ссылок,
-     *                            и по нему считаются переходы с ЭТОГО поста.
-     *                            При первой сборке записи ещё нет — подпись
-     *                            пересобирается сразу после вставки.
+     * @param  int|null  $itemId  id записи для utm-меток; null — записи ещё нет, см. persist
      */
     public function buildVenueCaption(Venue $venue, Carbon $now, ?int $itemId = null): string
     {
-        // Имя чистим тем же правилом, что подборка и пост ленты, — [[VenueName]]:
-        // «Новый театр | Воронеж» в заголовке портрета читается как опечатка.
         $label = VenueName::label($venue->name);
         $name = $this->esc($label);
         $addr = $this->shortAddress($venue);
         $addrLink = $addr !== '' ? '📍 <a href="'.$this->mapsUrl($venue).'">'.$this->esc($addr).'</a>' : '';
 
-        // Короткие название+адрес — в одну строку; иначе адрес отдельной строкой.
         if ($addrLink !== '' && (mb_strlen($label) + mb_strlen($addr)) <= self::HEADER_ONE_LINE_MAX) {
             $lines = ['🏛 <b>'.$name.'</b>  ·  '.$addrLink];
         } else {
@@ -449,7 +370,6 @@ class TelegramVenuePortraitService
         return mb_strlen($addr) > 60 ? mb_substr($addr, 0, 57).'…' : $addr;
     }
 
-    /** Ссылка на Яндекс.Карты: по координатам (если есть) или по адресу/названию. */
     private function mapsUrl(Venue $venue): string
     {
         if ($venue->latitude !== null && $venue->longitude !== null) {
@@ -462,7 +382,6 @@ class TelegramVenuePortraitService
         return 'https://yandex.ru/maps/?text='.rawurlencode($q);
     }
 
-    /** Ближайшее будущее видимое событие площадки. */
     private function nextEvent(int $venueId, Carbon $now): ?Event
     {
         return Event::query()
@@ -475,8 +394,8 @@ class TelegramVenuePortraitService
     }
 
     /**
-     * До $limit РАЗНЫХ обложек-прокси из событий площадки — для альбома в посте
-     * (своих фото у venue нет, берём первые картинки её событий, дедуп по URL).
+     * До $limit разных картинок для альбома. Своих фото у площадки нет, берём
+     * первую картинку её событий. Условие то же, что в фильтре pickNextVenueForChat.
      *
      * @return list<string>
      */
@@ -510,7 +429,6 @@ class TelegramVenuePortraitService
         return $out;
     }
 
-    /** Одна обложка (совместимость / ревью-превью). */
     private function venueCoverUrl(int $venueId): ?string
     {
         return $this->venuePhotoUrls($venueId, 1)[0] ?? null;
@@ -545,9 +463,7 @@ class TelegramVenuePortraitService
         }
         $item->save();
 
-        // Метка в ссылках несёт НОМЕР ЗАПИСИ, а его до вставки не существует.
-        // Поэтому подпись пересобирается сразу после save: иначе портрет
-        // уходил бы с голыми ссылками и не считался бы вовсе.
+        // id для utm-меток появляется только после save, поэтому подпись собираем второй раз
         if ($captionAt !== null) {
             $venue = Venue::query()->find($venueId);
             if ($venue) {
@@ -560,13 +476,9 @@ class TelegramVenuePortraitService
     }
 
     /**
-     * Следующая площадка в ротации — как карточка предложения.
+     * Следующая площадка ротации как карточка пула для пустого слота.
      *
-     * Для пустого слота в ленте: «Портрет: бар «Архив» · не показывали
-     * 6 недель». Ротация уже считает и порядок, и дату последнего портрета —
-     * здесь только собираем из этого карточку.
-     *
-     * @return array{venue_id: int, name: string, cover: ?string, weeks_since: ?int}|null
+     * @return array{venue_id: int, name: string, cover: ?string, photos_count: int, weeks_since: ?int}|null
      */
     public function nextPortraitSuggestion(TelegramChatBroadcast $broadcast, Carbon $now): ?array
     {
@@ -587,9 +499,6 @@ class TelegramVenuePortraitService
             ->where('venue_id', $venue->id)
             ->max('posted_at');
 
-        // Сколько картинок уйдёт в пост — ВИДНО ЗАРАНЕЕ. Портрет собирает их
-        // из фотографий событий площадки, и у места без событий их нет вовсе:
-        // пост уходит голым текстом, а человек узнаёт об этом уже в канале.
         $photos = $this->venuePhotoUrls((int) $venue->id, self::ALBUM_LIMIT);
 
         return [
@@ -604,12 +513,8 @@ class TelegramVenuePortraitService
     }
 
     /**
-     * РУЧНАЯ постановка портрета конкретной площадки (админ-триггер: бот/панель/CLI).
-     *
-     * Игнорирует недельный каденс (постим сейчас, on-demand), НО уважает защиту
-     * «одно в полёте» (без $force): пока в очереди висит незакрытый пост — второй
-     * не ставим. Это и есть «таймаут» — ручной пост не приведёт к двойному.
-     * После отправки posted_at площадки обновится → авто-каденс сдвинется на неделю.
+     * Ручная постановка портрета (админка, бот, CLI): каденс не проверяет, берёт
+     * ближайший свободный слот. Без $force не ставит второй открытый портрет.
      */
     public function enqueueVenueManually(
         int $broadcastId,
@@ -619,9 +524,6 @@ class TelegramVenuePortraitService
         bool $reviewGate = false,
         ?int $reviewerTelegramId = null,
     ): TelegramChatBroadcastItem {
-        // Считаем только портреты: с лентой на неделю событийные записи в
-        // очереди есть почти всегда, и общий счёт запретил бы ручную
-        // постановку портрета навсегда.
         if (! $force && $this->openVenueItemsCount($broadcastId) > 0) {
             throw new RuntimeException('В очереди уже есть незакрытый портрет площадки — дождитесь отправки (защита от двойного поста). --force чтобы всё равно.');
         }
@@ -634,12 +536,7 @@ class TelegramVenuePortraitService
             throw new RuntimeException("У «{$venue->name}» нет tg_portrait — сначала parser:tg:venue-portrait --venue={$venueId} --save.");
         }
 
-        // День назначаем ЗДЕСЬ, а не у вызывающего: запись без момента для
-        // портрета означает «ехать следующим тиком в любой час» — ровно то
-        // поведение, ради отмены которого портрету и дали слот.
-        // respectLead = false: портрет ставит ЧЕЛОВЕК, а «поздний слот
-        // решается накануне» — правило автомата. Отказать руке из-за него
-        // значило бы сказать «неделя занята» там, где она пуста.
+        // respectLead = false: правило позднего слота только для автомата, см. nextFreeSlot
         $publishAt = $this->slotPlanner->nextFreeSlot($this->broadcastOf($broadcastId), $now, false);
         if (! $publishAt) {
             throw new RuntimeException(

@@ -9,13 +9,9 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 
 /**
- * Bootstrap супер-админа из env (BOT_SUPERADMIN_TELEGRAM_ID).
- *
- * Идемпотентно гарантирует, что для telegram_id есть TelegramUser, привязанный к
- * web-User с ролью superadmin. Раньше это делалось только руками через
- * `php artisan bot:superadmin`; теперь self-heal при первой проверке прав
- * (BotRoleService::getRoleByTelegramId) — чтобы заявленный в env админ работал
- * сразу, без CLI и без ручного /start. Та же логика, что у BotSuperAdmin-команды.
+ * Супер-админ из BOT_SUPERADMIN_TELEGRAM_ID, идемпотентно: TelegramUser, web-User и роль.
+ * Вызывается из BotRoleService::getRoleByTelegramId, чтобы админ из env работал без CLI и /start.
+ * Копия логики bot:superadmin (BotSuperAdmin), правятся вместе.
  */
 class SuperAdminProvisioner
 {
@@ -26,10 +22,8 @@ class SuperAdminProvisioner
                 ->where('telegram_id', $telegramId)
                 ->first();
 
-            // 1) web-User: переиспользуем привязанного, иначе детерминированный по tg-id.
             $user = $telegramUser?->user ?: $this->ensureWebUser($telegramId, $telegramUsername);
 
-            // 2) TelegramUser: создаём или до-привязываем к User.
             if (!$telegramUser) {
                 $telegramUser = new TelegramUser();
                 $telegramUser->telegram_id = $telegramId;
@@ -43,8 +37,7 @@ class SuperAdminProvisioner
                 $telegramUser->save();
             }
 
-            // 3) Роль superadmin (Spatie), идемпотентно. findOrCreate — чтобы не упасть,
-            // если роль ещё не засижена (assignRole иначе бросает RoleDoesNotExist).
+            // findOrCreate: на незасиженной базе assignRole бросает RoleDoesNotExist
             if (method_exists($user, 'assignRole') && method_exists($user, 'hasRole')) {
                 \Spatie\Permission\Models\Role::findOrCreate('superadmin');
                 if (!$user->hasRole('superadmin')) {

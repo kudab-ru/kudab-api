@@ -22,10 +22,8 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         return TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcastId)
             ->where('event_id', $eventId)
-            // Только событийные: это вопрос «какую строку оживить», а НЕ
-            // «показывал ли канал событие» — на второй отвечает связь
-            // «пост → события». Без фильтра enqueue() мог бы вернуть запись
-            // рубрики и оживить подборку как обычный пост.
+            // только событийные: ищем запись очереди, а «показывал ли канал событие»
+            // спрашивать у связи «пост → события»
             ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
             ->first();
     }
@@ -44,10 +42,8 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
             return $existing;
         }
 
-        // В транзакции: на сохранении висит обсервер, пишущий связь
-        // «пост → события». Без неё запись и её связь могли бы разъехаться,
-        // если между ними что-то упадёт, — а недостающую строку связи не видно
-        // ничем, кроме broadcast:links:backfill --check.
+        // в транзакции вместе со связью «пост → события», которую пишет обсервер на save:
+        // недостачу связи видно только в broadcast:links:backfill --check
         return DB::transaction(function () use ($broadcastId, $eventId, $plannedAt) {
             $item = new TelegramChatBroadcastItem;
             $item->broadcast_id = $broadcastId;
@@ -163,17 +159,13 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
 
     /**
      * {@inheritdoc}
-     *
-     * Если lease истёк и айтем реклеймил другой поллер, наш токен не совпадёт
-     * → 0 строк → false: не двигаем last_run за чужой пост.
      */
     public function markPostedIfClaimed(int $itemId, string $claimToken, ?DateTimeInterface $moment = null): bool
     {
         $affected = TelegramChatBroadcastItem::query()
             ->where('id', $itemId)
             ->where('claim_token', $claimToken)
-            // status-guard: помечаем posted только из публикуемого статуса — не
-            // флипаем уже skipped/error/posted айтем, даже если токен совпал.
+            // и при своём токене закрытую запись (skipped, error, posted) не трогаем
             ->whereIn('status', [
                 TelegramChatBroadcastItem::STATUS_PENDING,
                 TelegramChatBroadcastItem::STATUS_PLANNED,
@@ -260,11 +252,7 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         if ($kind === TelegramChatBroadcastItem::KIND_VENUE) {
             $q->where('kind', TelegramChatBroadcastItem::KIND_VENUE);
         } elseif ($kind === 'event') {
-            // Явный тип, а не «всё, что не портрет площадки». Отрицание молча
-            // зачисляет в события ЛЮБУЮ новую рубрику: подборка недели съела бы
-            // ячейку feed_limit, и автонаполнение перестало бы докладывать
-            // события на день раньше срока. Про исторический NULL — колонка
-            // NOT NULL DEFAULT 'event', такой записи в базе быть не может.
+            // явный kind, а не «не venue»: иначе подборка займёт ячейку feed_limit
             $q->where('kind', TelegramChatBroadcastItem::KIND_EVENT);
         }
 
@@ -308,31 +296,15 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
                     ->orWhereNull('planned_at')
                     ->orWhere('planned_at', '<=', $now);
             })
-            // Назначенный день. До этого publish_at не читал НИКТО: поллер
-            // брал самый старый открытый пост по created_at, поэтому вся
-            // недельная сетка, перетаскивание и «отправить сейчас» на эфир
-            // не влияли, а вытесненный пост уходил в канал первым — он ведь
-            // старше того, кто его вытеснил.
-            //
-            // Ревью-задачу выпускаем заранее, не дожидаясь дня: иначе превью
-            // пришло бы рецензенту ровно в момент публикации и решать было бы
-            // уже нечего.
+            // publish_at — назначенный день; pending_review выпускаем раньше,
+            // чтобы превью пришло рецензенту до публикации
             ->where(function ($q) use ($now) {
                 $q->whereNull('publish_at')
                     ->orWhere('publish_at', '<=', $now)
                     ->orWhere('status', TelegramChatBroadcastItem::STATUS_PENDING_REVIEW);
             })
-            // Сначала назначенные на день, и только потом — те, кому дня не
-            // досталось. Одного COALESCE мало: у поста без дня подставляется
-            // его created_at, а он старше, поэтому вытесненный пост обгонял
-            // бы того, кто занял его день, — ровно наоборот обещанию «ждёт
-            // свободного дня».
-            // Номер записи последним ключом — не украшение. `created_at` имеет
-            // точность до секунды, и два поста, заведённых в одну секунду,
-            // дают полную ничью: что вернёт Postgres, не определено ничем.
-            // На проде это «какой из двух постов одного слота уйдёт первым»,
-            // а в тестах — падение раз через раз, в зависимости от того,
-            // успели ли две вставки в одну секунду.
+            // сначала записи с publish_at: иначе пост без дня по старому created_at
+            // обгонит занявшего его день; id последним, created_at точен до секунды
             ->orderByRaw('(publish_at IS NULL) ASC, COALESCE(publish_at, planned_at, created_at) ASC, id ASC')
             ->first();
     }
@@ -365,8 +337,7 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
         string $action,
         DateTimeInterface $now,
     ): bool {
-        // Атомарный guard по status: если timeout-sweeper / другой запрос уже увёл item
-        // из pending_review — наш UPDATE его не тронет (0 затронутых), решение не теряется.
+        // запись могли увести из pending_review sweeper по таймауту или другой запрос
         $affected = TelegramChatBroadcastItem::query()
             ->where('id', $item->id)
             ->where('status', TelegramChatBroadcastItem::STATUS_PENDING_REVIEW)

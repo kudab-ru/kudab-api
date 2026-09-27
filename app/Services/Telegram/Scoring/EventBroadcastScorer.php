@@ -5,19 +5,14 @@ namespace App\Services\Telegram\Scoring;
 use App\Models\Event;
 
 /**
- * Контент-скоринг события для автопостинга в city-канал (P0.3, без LLM).
- *
- * Заменяет «ближайшее по start_time» на качественный выбор: карточка с фото и точным
- * адресом постится охотнее далёкой/безкартиночной. Чистая функция score(Event):int —
- * покрыта unit-тестами; жёсткие фильтры (sold_out / official-religious / status) живут
- * в SQL-выборке кандидатов (TelegramChatBroadcastService::pickBestEventIdForChat).
- *
- * Сигналы читаются из загруженного события: фото — через images() (нужен eager-load
- * `sources`), интересы — через interests_count (withCount('interests')).
+ * Оценка события для автопостинга, без LLM. Жёсткие фильтры в выборке кандидатов
+ * (TelegramChatBroadcastService::pickBestEventIdForChat). Без withCount('interests')
+ * или with('interests') балл за интересы 0, без with('sources') images() идёт в базу
+ * на каждое событие.
  */
 class EventBroadcastScorer
 {
-    // Веса факторов (см. ROADMAP, эпик P0, scoring_design).
+    // SQL-копия весов в EventRepository::addTopScore, правятся вместе
     public const W_PHOTO        = 40; // фото = главный драйвер CTR в TG
     public const W_FIAS         = 20; // подтверждённый дом-адрес
     public const W_VENUE        = 15; // узнаваемая площадка
@@ -29,10 +24,7 @@ class EventBroadcastScorer
 
     public const MIN_DESCRIPTION_LEN = 120;
 
-    /**
-     * Штраф за дальность старта (daily-канал не любит далёкие события).
-     * [максимум_дней => штраф]; всё, что дальше последнего порога — последний штраф.
-     */
+    /** Штраф за дальность старта: [максимум_дней => штраф], дальше последнего порога — FRESHNESS_FAR. */
     private const FRESHNESS_TIERS = [
         2  => 0,    // сегодня / завтра / послезавтра
         7  => -5,
@@ -75,8 +67,7 @@ class EventBroadcastScorer
     }
 
     /**
-     * Лучшее событие из набора: максимальный score, при равенстве — ближайшее по
-     * start_time (детерминированный tie-break — защита от гонок параллельных тиков).
+     * Максимальный score, при равенстве — ближайшее по start_time.
      *
      * @param iterable<Event> $events
      */
@@ -111,7 +102,6 @@ class EventBroadcastScorer
 
     private function interestsCount(Event $e): int
     {
-        // interests_count проставляет withCount('interests'); fallback — посчитать связь.
         $count = $e->getAttribute('interests_count');
         if ($count !== null) {
             return (int) $count;
@@ -121,20 +111,8 @@ class EventBroadcastScorer
     }
 
     /**
-     * Цена известна — то есть в посте на её месте будет ЧИСЛО или «Бесплатно».
-     *
-     * СТАТУСА `priced` НЕ СУЩЕСТВУЕТ. Он стоял здесь с первого дня, и такой
-     * строки нет ни в одной записи: реальные статусы — free, paid, range,
-     * external, donation, unknown. То есть весь признак держался на одной
-     * проверке `price_min !== null`, а собственный тест скорера подставлял
-     * `'priced'` и потому подтверждал несуществующее поведение.
-     *
-     * ПОЧЕМУ НЕ ПРОСТО `priced` → `paid`. Цена «известна» не там, где
-     * источник назвал событие платным, а там, где подписчик увидит сумму:
-     * `paid` без price_min печатается как «Уточняется» (см.
-     * [[EventCaptionBuilder]]::priceLabel), и балл за такую строку был бы
-     * баллом за пустое место. Бесплатно и донат — знание о цене, число там
-     * не нужно.
+     * Цена известна, если в посте будет сумма, «Бесплатно» или донат. paid без суммы
+     * печатается как «Уточняется» (EventCaptionBuilder::priceLabel), балла не даёт.
      */
     private function hasKnownPrice(Event $e): bool
     {

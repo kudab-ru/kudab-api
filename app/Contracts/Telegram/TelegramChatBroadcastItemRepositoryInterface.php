@@ -18,14 +18,8 @@ interface TelegramChatBroadcastItemRepositoryInterface
 
 
     /**
-     * Поставить событие в очередь для данного broadcast'а.
-     *
-     * Если элемент для (broadcast_id, event_id) уже существует —
-     * он возвращается как есть (без изменения статуса).
-     *
-     * plannedAt:
-     *   - null  → элемент создаётся со статусом "pending";
-     *   - !null → статус "planned" и planned_at = plannedAt.
+     * Если событийная запись (broadcast_id, event_id) уже есть, она возвращается как есть.
+     * plannedAt null — статус pending, иначе planned с planned_at = plannedAt.
      */
     public function enqueue(
         int $broadcastId,
@@ -34,9 +28,8 @@ interface TelegramChatBroadcastItemRepositoryInterface
     ): TelegramChatBroadcastItem;
 
     /**
-     * Поставить событие в очередь под ревью-гейт (P0.5): status=pending_review,
-     * snapshot reviewer-telegram-id и дедлайн авто-постинга. Идемпотентно по
-     * (broadcast_id, event_id) — существующий элемент возвращается как есть.
+     * Идемпотентен, как enqueue(); запись встаёт в pending_review с ревьюером
+     * и дедлайном авто-одобрения.
      */
     public function enqueueForReview(
         int $broadcastId,
@@ -89,9 +82,7 @@ interface TelegramChatBroadcastItemRepositoryInterface
     ): Collection;
 
     /**
-     * Сколько незакрытых записей у канала. Событийные и venue считаются
-     * раздельно: у портретов площадок свой каденс, и общий счёт заблокировал
-     * бы их при заполненной ленте.
+     * Сколько незакрытых записей у канала; null — всех видов.
      *
      * @param  'event'|'venue'|null  $kind
      */
@@ -102,10 +93,7 @@ interface TelegramChatBroadcastItemRepositoryInterface
         array $statuses,
     ): int;
 
-    /**
-     * Активный (в полёте) элемент канала: pending/planned/pending_review/approved/
-     * auto_approved. pending/planned уважают planned_at; ревью-статусы готовы сразу.
-     */
+    /** Следующая открытая запись канала, до которой дошла очередь. */
     public function findActiveForBroadcast(
         int $broadcastId,
         DateTimeInterface $now,
