@@ -4101,7 +4101,11 @@ class AdminBroadcastController extends Controller
             'event_id' => $i->event_id ? (int) $i->event_id : null,
             'title' => $event?->title ?? match ($i->kind) {
                 TelegramChatBroadcastItem::KIND_VENUE => $venue ? 'Портрет: '.$venue->name : null,
-                TelegramChatBroadcastItem::KIND_DIGEST => 'Подборка недели',
+                // Рубрика, а не общее слово: подборок в неделю бывает
+                // несколько, и по «Подборка недели» их не различить.
+                TelegramChatBroadcastItem::KIND_DIGEST => trim((string) (
+                    ($i->digest_meta ?? [])['theme_title'] ?? ''
+                )) ?: 'Подборка',
                 default => null,
             },
             // Имя чистим тем же правилом, что печатает пост, — [[VenueName]].
@@ -4240,6 +4244,7 @@ class AdminBroadcastController extends Controller
                 : null,
             // Состав выбран руками — пересборка ленты его не тронет.
             'photos_manual' => is_array($i->photo_urls),
+            'is_off_grid' => (bool) $i->is_off_grid,
         ];
     }
 
