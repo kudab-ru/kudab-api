@@ -1098,9 +1098,16 @@ final class BroadcastDigestComposer
 
         // Форма даты решается ОДИН РАЗ на весь пост: вперемешку «сб 13:30» и
         // «сб 26 сентября, 18:00» читаются как сбой, а не как решение.
-        $sessions = $this->sessionsFor($picked['named'], $since, $to);
+        // Нижняя граница — $from, а не $since: у недельного окна $since пуст, и
+        // склейка тянула ПРОШЕДШИЕ сеансы («сб 12 сентября и сб 3 октября»).
+        $sessions = $this->sessionsFor($picked['named'], $from, $to);
         $shortDates = $this->weekdaysAreDistinct($picked['named'], $sessions);
-        $emoji = $this->emojiFor($picked['named'], $item);
+        // Значок у строки — только там, где строки РАЗНЫЕ по теме. В подборке
+        // одной темы столбец выходит из одинаковых значков, а иногда и
+        // противоречит рубрике: «🎵 Танцевальное шоу» в спектаклях.
+        $emoji = ($theme['pick'] ?? 'interest') === 'interest'
+            ? []
+            : $this->emojiFor($picked['named'], $item);
 
         $lines = [];
         $rich = [];

@@ -962,6 +962,30 @@ class BroadcastDigestRubricsTest extends TestCase
 
     /* ──────────────── сеансы в одной строке ──────────────── */
 
+    /**
+     * Прошедший сеанс в строку не попадает.
+     *
+     * У недельного окна нижней границы нет, и склейка тянула прошлое:
+     * в живом посте 28.09 стояло «сб 12 сентября и сб 3 октября».
+     */
+    #[Test]
+    public function a_past_session_is_not_merged_in(): void
+    {
+        $this->onlyRubric('besplatno');
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $group = $this->group();
+
+        $past = $this->event('Серия', -14, free: true, hour: 18, description: $long, groupId: $group);
+        DB::table('events')->where('id', $past)->update(['status' => 'active']);
+        $this->event('Серия', 2, free: true, hour: 18, description: $long, groupId: $group);
+        $this->fill('Бесплатное', free: true);
+
+        $caption = $this->caption();
+
+        $this->assertStringNotContainsString(' и ', explode("\n", $caption)[3] ?? '',
+            'прошедший сеанс в строке не склеен');
+    }
+
     /** Одно время, разные дни: «сб и вс с 12:00». */
     #[Test]
     public function one_time_on_two_days_merges(): void
@@ -1124,13 +1148,25 @@ class BroadcastDigestRubricsTest extends TestCase
     #[Test]
     public function a_line_keeps_its_emoji_even_when_the_title_says_the_theme(): void
     {
-        $this->onlyRubric('spektakli');
-        $this->fill('Спектакль', free: false, priceMin: 700);
+        // Смешанная рубрика: в тематической значка у строки нет вовсе —
+        // столбец из одинаковых ничего не сообщает.
+        $this->onlyRubric('besplatno');
+        $this->fill('Спектакль', free: true);
 
         $caption = $this->caption();
 
         $this->assertMatchesRegularExpression('/\x{1F3AD} <b><a /u', $caption,
             'значок театра стоит перед названием, хотя «Спектакль» есть в заголовке');
+    }
+
+    /** В подборке одной темы значка у строки нет: столбец был бы из одинаковых. */
+    #[Test]
+    public function a_themed_digest_has_no_per_line_emoji(): void
+    {
+        $this->onlyRubric('spektakli');
+        $this->fill('Спектакль', free: false, priceMin: 700);
+
+        $this->assertDoesNotMatchRegularExpression('/\x{1F3AD} <b><a /u', $this->caption());
     }
 
     /**
