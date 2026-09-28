@@ -39,6 +39,7 @@ class TelegramChatBroadcastItem extends Model
         'is_pinned',
         'is_off_grid',
         'text_requested_at',
+        'text_fail_reason',
         'text_hint',
         'edited_at',
         'edited_fields',

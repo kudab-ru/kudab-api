@@ -596,6 +596,7 @@ class AdminBroadcastController extends Controller
             $item->planned_at = $waitForText ? Carbon::now()->addMinutes($this->textGraceMinutes()) : null;
             if ($waitForText) {
                 $item->text_requested_at = Carbon::now();
+                $item->text_fail_reason = null;
             }
             $item->save();
 
@@ -2867,6 +2868,7 @@ class AdminBroadcastController extends Controller
             : null;
         if ($waitForText) {
             $item->text_requested_at = Carbon::now();
+            $item->text_fail_reason = null;
         }
         $item->error_message = null;
         $item->claimed_at = null;
@@ -3169,6 +3171,7 @@ class AdminBroadcastController extends Controller
         $hint = trim((string) ($data['hint'] ?? ''));
 
         $item->text_requested_at = Carbon::now();
+        $item->text_fail_reason = null;
         $item->text_hint = $hint !== '' ? $hint : null;
         $item->save();
 
@@ -3198,6 +3201,7 @@ class AdminBroadcastController extends Controller
         }
 
         $item->text_requested_at = Carbon::now();
+        $item->text_fail_reason = null;
         $item->text_hint = $hint !== '' ? $hint : null;
         $item->save();
 
@@ -3273,6 +3277,7 @@ class AdminBroadcastController extends Controller
         $item->caption = null;
         $item->caption_source = null;
         $item->text_requested_at = Carbon::now();
+        $item->text_fail_reason = null;
         $item->planned_at = Carbon::now()->addMinutes($this->textGraceMinutes());
         $item->save();
     }
@@ -4237,6 +4242,7 @@ class AdminBroadcastController extends Controller
                 default => null,
             },
             'text_pending' => $i->text_requested_at !== null,
+            'text_fail_reason' => $i->text_fail_reason,
             // Сколько будущих повторов события делят один анонс. null и 1 —
             // событие одиночное, говорить не о чем.
             'text_repeats' => $repeats !== null && $repeats > 1 ? $repeats : null,
