@@ -815,6 +815,43 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertGreaterThan(40, (int) $meta['hook_budget']);
     }
 
+    /** Выключатель подводки: пост начинается сразу со строк. */
+    #[Test]
+    public function the_intro_can_be_switched_off(): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+
+        $channel = $this->channel();
+        $draft = app(BroadcastDigestComposer::class)->compose($channel, Carbon::now());
+        $this->assertNotNull($draft);
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $channel->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = Carbon::now()->addDay();
+        $item->save();
+
+        app(\App\Services\Telegram\TelegramChatBroadcastService::class)
+            ->applyDigestDraft($item, $draft);
+
+        $meta = (array) $item->fresh()->digest_meta;
+        $meta['intro'] = 'Подводка, которой быть не должно.';
+        $meta['roster'] = $draft['event_ids'];
+        $item->digest_meta = $meta;
+        $item->save();
+
+        config(['broadcast_digest.intro' => false]);
+        $off = app(BroadcastDigestComposer::class)->recompose($item->fresh(), $channel, Carbon::now());
+        $this->assertNotNull($off);
+        $this->assertStringNotContainsString('Подводка, которой быть не должно.', $off['caption']);
+
+        config(['broadcast_digest.intro' => true]);
+        $on = app(BroadcastDigestComposer::class)->recompose($item->fresh(), $channel, Carbon::now());
+        $this->assertStringContainsString('Подводка, которой быть не должно.', $on['caption']);
+    }
+
     /* ──────────────── форма шапки ──────────────── */
 
     /**

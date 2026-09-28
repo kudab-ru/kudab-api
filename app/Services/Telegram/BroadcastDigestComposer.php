@@ -1094,7 +1094,9 @@ final class BroadcastDigestComposer
         // подводка уходит в подпись, а из меты потом исчезает: в админке
         // видно одно, в канал уезжает другое.
         $namedIds = array_map(fn ($r) => (int) $r->id, $picked['named']);
-        $lead = $item?->digestIntroFor($namedIds);
+        $lead = config('broadcast_digest.intro', true)
+            ? $item?->digestIntroFor($namedIds)
+            : null;
 
         // Форма даты решается ОДИН РАЗ на весь пост: вперемешку «сб 13:30» и
         // «сб 26 сентября, 18:00» читаются как сбой, а не как решение.
