@@ -1106,7 +1106,7 @@ class AdminBroadcastController extends Controller
         $item->status = $reject
             ? TelegramChatBroadcastItem::STATUS_REJECTED
             : TelegramChatBroadcastItem::STATUS_SKIPPED;
-        $item->error_message = $reject ? 'отклонено в админке' : 'снято из ленты';
+        $item->error_message = $reject ? 'отклонено в админке' : TelegramChatBroadcastItem::REMOVED_BY_HAND;
         $item->claimed_at = null;
         $item->claim_token = null;
         $item->save();
@@ -3848,7 +3848,7 @@ class AdminBroadcastController extends Controller
         return match (true) {
             str_contains($m, 'пересборк'), str_contains($m, 'разбавлен') => 'rebuild',
             str_contains($m, 'прошло'), str_contains($m, 'недоступно') => 'stale',
-            str_contains($m, 'снято из ленты') => 'manual',
+            str_contains($m, TelegramChatBroadcastItem::REMOVED_BY_HAND) => 'manual',
             default => 'other',
         };
     }

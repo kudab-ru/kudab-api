@@ -1523,17 +1523,23 @@ class TelegramChatBroadcastService
                     // полным именем: в подзапросе ещё таблица связи
                     ->where('telegram.chat_broadcast_items.updated_at', '>=', $rejectedSince);
             })
+            // Снятое крестиком обратно не ставим: по тому же баллу оно вернулось бы в тот же слот.
+            ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId) {
+                $q->where('broadcast_id', $broadcastId)
+                    ->where('status', TelegramChatBroadcastItem::STATUS_SKIPPED)
+                    ->where('error_message', TelegramChatBroadcastItem::REMOVED_BY_HAND);
+            })
             ->whereHas('community', function ($q) use ($chat) {
                 $q->where('city_id', $chat->city_id);
             })
-            // Жёсткие фильтры (NULL-safe): не распроданное, не официоз/религия.
+            // Жёсткие фильтры (NULL-safe): не распроданное, не скрытый для канала вид.
             ->where(function ($q) {
                 $q->whereNull('tickets_status')
                     ->orWhere('tickets_status', '!=', 'sold_out');
             })
             ->where(function ($q) {
                 $q->whereNull('content_kind')
-                    ->orWhereNotIn('content_kind', ['official', 'religious']);
+                    ->orWhereNotIn('content_kind', Event::CHANNEL_HIDDEN_KINDS);
             })
             // Анти-дубль по группе (Layer 2): не предлагать событие, чья event_group
             // уже занята в этом канале (другой источник того же события).

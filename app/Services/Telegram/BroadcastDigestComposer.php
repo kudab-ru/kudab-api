@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Telegram;
 
+use App\Models\Event;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Support\CityCase;
@@ -640,7 +641,7 @@ final class BroadcastDigestComposer
             })
             ->where(function ($q) {
                 $q->whereNull('e.content_kind')
-                    ->orWhereNotIn('e.content_kind', ['official', 'religious']);
+                    ->orWhereNotIn('e.content_kind', Event::CHANNEL_HIDDEN_KINDS);
             })
             ->orderBy('e.start_time')
             ->get([

@@ -151,12 +151,19 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertSame(0, TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->count());
     }
 
-    public function test_does_not_pick_official_content_kind(): void
+    /** @return array<string, array{string}> */
+    public static function hiddenKinds(): array
+    {
+        return ['официоз' => ['official'], 'религия' => ['religious'], 'гражданское' => ['civic']];
+    }
+
+    /** @dataProvider hiddenKinds */
+    public function test_does_not_pick_hidden_content_kind(string $kind): void
     {
         $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $community = $this->createCommunity($city->id, 'Организатор');
-        $e = $this->createEvent($city->id, $community->id, 'Официальное', now()->addDay());
-        $e->content_kind = 'official';
+        $e = $this->createEvent($city->id, $community->id, 'Скрытое', now()->addDay());
+        $e->content_kind = $kind;
         $e->save();
 
         $chat = $this->createChannelChat($city->id, -1008);

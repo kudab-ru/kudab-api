@@ -82,6 +82,9 @@ class TelegramChatBroadcastItem extends Model
 
     public const STATUS_SKIPPED = 'skipped'; // пропущено (дубль/устарело)
 
+    /** Причина у поста, снятого крестиком в админке: автоподбор это событие обратно не ставит. */
+    public const REMOVED_BY_HAND = 'снято из ленты';
+
     public const STATUS_ERROR = 'error';   // была ошибка при отправке
 
     /** см. TelegramChatBroadcastService::withdrawPostedItem() */

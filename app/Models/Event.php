@@ -13,6 +13,9 @@ class Event extends Model
 {
     use HasFactory, SoftDeletes;
 
+    /** Виды событий, которых нет в телеграм-канале: ни в ленте, ни в подборке. */
+    public const CHANNEL_HIDDEN_KINDS = ['official', 'religious', 'civic'];
+
     /**
      * Заполняемые поля (ручной апдейт/создание).
      * 'location', 'dedup_key', 'lat_round', 'lon_round' — вне fillable (служебные/генерятся SQL).

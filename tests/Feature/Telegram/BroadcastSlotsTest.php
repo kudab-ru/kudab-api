@@ -1320,6 +1320,30 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
+    public function test_event_removed_by_hand_is_not_put_back_by_the_filler(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 06:00:00', 'UTC')); // 09:00 МСК
+
+        \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
+        $user = \App\Models\User::factory()->create();
+        $user->assignRole('superadmin');
+        \Laravel\Sanctum\Sanctum::actingAs($user);
+
+        [$broadcast] = $this->channelWithEvents(1);
+        $broadcast->slots = [10];
+        $broadcast->save();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+        $item = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->firstOrFail();
+
+        $this->deleteJson("/api/admin/broadcast/items/{$item->id}")->assertOk();
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $item->fresh()->status);
+
+        Carbon::setTestNow();
+    }
+
     public function test_overdue_off_grid_portrait_takes_its_new_slot_alone(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-09-15 09:00:00', 'UTC')); // 12:00 МСК
