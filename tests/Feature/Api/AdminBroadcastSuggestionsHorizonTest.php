@@ -97,12 +97,26 @@ class AdminBroadcastSuggestionsHorizonTest extends TestCase
         $this->assertNotContains('Событие через 30 дней', $titles);
     }
 
+    public function test_evening_slot_does_not_suggest_an_event_that_starts_before_it(): void
+    {
+        $broadcast = $this->makeChannel();
+        $event = $this->event('Дневной концерт', 1);
+        $event->start_time = Carbon::parse('2026-09-16 16:00', 'Europe/Moscow')->utc();
+        $event->save();
+
+        $this->assertContains('Дневной концерт', $this->suggest($broadcast->id, '2026-09-16'));
+        $this->assertNotContains('Дневной концерт', $this->suggest($broadcast->id, '2026-09-16', 19));
+    }
+
     /** @return list<string> */
-    private function suggest(int $broadcastId, ?string $date): array
+    private function suggest(int $broadcastId, ?string $date, ?int $hour = null): array
     {
         $url = "/api/admin/broadcast/channels/{$broadcastId}/suggestions";
         if ($date !== null) {
             $url .= '?date='.$date;
+        }
+        if ($hour !== null) {
+            $url .= '&hour='.$hour;
         }
 
         return collect($this->getJson($url)->assertOk()->json('data'))

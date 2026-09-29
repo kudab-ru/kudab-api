@@ -544,6 +544,8 @@ class TelegramChatBroadcastService
                 // событие без дня ждёт суточного окна расписания; портрету день назначаем заново,
                 // иначе он уйдёт в это же окно и собьёт свой недельный каденс
                 $item->publish_at = null;
+                // опоздавшая отправка «сейчас» становится обычной записью очереди, иначе её ждёт только кнопка
+                $item->is_off_grid = false;
 
                 if ($item->kind === TelegramChatBroadcastItem::KIND_VENUE) {
                     $slot = $this->slotPlanner->nextFreeSlot($broadcast, $now);

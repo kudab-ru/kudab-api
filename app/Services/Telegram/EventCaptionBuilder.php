@@ -493,13 +493,9 @@ final class EventCaptionBuilder
             return $caption;
         }
 
-        $text = $ctx['price_text'] !== '' ? $ctx['price_text'] : 'Цена по ссылке';
-        if (mb_strlen($text) > 120) {
-            $text = rtrim(mb_substr($text, 0, 119))."\u{2026}";
-        }
-
-        $anchor = '<a href="'.htmlspecialchars($href, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'">'
-            .htmlspecialchars($text, ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8').'</a>';
+        // price_text здесь не цена, а фраза организатора вроде «Купить билеты можно
+        // в кассе театра и по ссылке.», и в строке 💸 она читается как сбой.
+        $anchor = '<a href="'.htmlspecialchars($href, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'">Цена по ссылке</a>';
 
         // 1. Цена отдельной строкой «💸 {price_label}» — заменяем строку целиком.
         $lines = explode("\n", $caption);

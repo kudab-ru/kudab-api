@@ -299,7 +299,8 @@ class TelegramChatBroadcastItemRepository implements TelegramChatBroadcastItemRe
             // publish_at — назначенный день; pending_review выпускаем раньше,
             // чтобы превью пришло рецензенту до публикации
             ->where(function ($q) use ($now) {
-                $q->whereNull('publish_at')
+                // Запись вне очереди без дня — черновик: уходит только по кнопке, не в суточное окно.
+                $q->where(fn ($w) => $w->whereNull('publish_at')->where('is_off_grid', false))
                     ->orWhere('publish_at', '<=', $now)
                     ->orWhere('status', TelegramChatBroadcastItem::STATUS_PENDING_REVIEW);
             })

@@ -1077,6 +1077,74 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
+    public function test_off_grid_post_given_a_day_by_hand_takes_that_slot(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 16:05:00', 'UTC')); // 19:05 МСК
+
+        \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
+        $user = \App\Models\User::factory()->create();
+        $user->assignRole('superadmin');
+        \Laravel\Sanctum\Sanctum::actingAs($user);
+
+        [$broadcast, $events] = $this->channelWithEvents(6);
+        $broadcast->slots = [10, 19];
+        $broadcast->horizon_days = 2;
+        $broadcast->save();
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $broadcast->id;
+        $item->event_id = $events[0]->id;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = Carbon::now();
+        $item->is_off_grid = true;
+        $item->save();
+
+        $slot = Carbon::now('Europe/Moscow')->addDay()->setTime(10, 0);
+        $this->patchJson("/api/admin/broadcast/items/{$item->id}", [
+            'publish_at' => $slot->format('Y-m-d\TH:i:sP'),
+        ])->assertOk();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $inSlot = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('publish_at', $slot->copy()->utc())
+            ->count();
+
+        $this->assertSame(1, $inSlot);
+
+        Carbon::setTestNow();
+    }
+
+    public function test_saving_an_off_grid_post_without_moving_it_keeps_it_off_grid(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 16:05:37', 'UTC')); // 19:05:37 МСК
+
+        \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
+        $user = \App\Models\User::factory()->create();
+        $user->assignRole('superadmin');
+        \Laravel\Sanctum\Sanctum::actingAs($user);
+
+        [$broadcast, $events] = $this->channelWithEvents(1);
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $broadcast->id;
+        $item->event_id = $events[0]->id;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = Carbon::now();
+        $item->is_off_grid = true;
+        $item->save();
+
+        // Форма правки шлёт время без секунд.
+        $this->patchJson("/api/admin/broadcast/items/{$item->id}", [
+            'publish_at' => Carbon::now('Europe/Moscow')->format('Y-m-d\TH:i').':00+03:00',
+        ])->assertOk();
+
+        $this->assertTrue($item->fresh()->is_off_grid);
+
+        Carbon::setTestNow();
+    }
+
     private function channelWithEvents(int $count): array
     {
         $city = $this->insertCity();
@@ -1248,6 +1316,42 @@ class BroadcastSlotsTest extends TestCase
             array_column($tasks, 'item_id'),
             'придержанный портрет в эфир не выдан',
         );
+
+        Carbon::setTestNow();
+    }
+
+    public function test_overdue_off_grid_portrait_takes_its_new_slot_alone(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 09:00:00', 'UTC')); // 12:00 МСК
+
+        [$broadcast] = $this->channelWithEvents(6);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10, 19],
+            'horizon_days' => 3,
+            'min_gap_minutes' => 0,
+        ]);
+        $broadcast->save();
+        $broadcast = $broadcast->fresh();
+
+        $portrait = new TelegramChatBroadcastItem;
+        $portrait->broadcast_id = $broadcast->id;
+        $portrait->kind = TelegramChatBroadcastItem::KIND_VENUE;
+        $portrait->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $portrait->caption = '🏛 <b>Площадка</b>';
+        $portrait->publish_at = Carbon::parse('2026-09-15 08:00', 'Europe/Moscow')->utc();
+        $portrait->is_off_grid = true;
+        $portrait->save();
+
+        $this->service()->collectDueSingleRuns(now(), 20);
+        $slot = $portrait->fresh()->publish_at;
+        $this->assertNotNull($slot);
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame(1, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('publish_at', $slot)
+            ->count());
 
         Carbon::setTestNow();
     }

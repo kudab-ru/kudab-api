@@ -331,15 +331,16 @@ class AdminBroadcastController extends Controller
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
         $chat = $broadcast->chat;
 
-        // МОМЕНТ публикации, под который подбираем: день слота плюс час
-        // расписания канала. Сравнивать с началом дня мало — пост уходит в
-        // 10:00, и событие, которое было в 08:00 того же дня, предлагать
-        // нельзя. День в день можно, но только пока событие не началось.
+        // Подбираем под час поста: день и час слота, а без часа — час расписания
+        // канала. Иначе в вечернюю клетку попадёт событие, которое к вечеру начнётся.
         $publishAt = null;
         if ($request->query('date')) {
             $hour = 10;
             if (preg_match('/_(\d{1,2})$/', (string) $broadcast->period, $m)) {
                 $hour = max(0, min(23, (int) $m[1]));
+            }
+            if (is_numeric($request->query('hour'))) {
+                $hour = max(0, min(23, (int) $request->query('hour')));
             }
             $publishAt = Carbon::parse((string) $request->query('date'), 'Europe/Moscow')
                 ->startOfDay()
@@ -829,6 +830,8 @@ class AdminBroadcastController extends Controller
             $item->claimed_at = null;
             $item->claim_token = null;
             $item->publish_at = $publishAt;
+            // Строка могла остаться от прежней отправки «сейчас»: поставленный пост — обычный.
+            $item->is_off_grid = false;
             if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
                 $item->caption = null;
                 $item->caption_source = null;
@@ -967,15 +970,23 @@ class AdminBroadcastController extends Controller
         if ($request->has('publish_at')) {
             $newAt = $this->toUtc($data['publish_at']);
 
+            // Форма шлёт время при любом сохранении, даже если правили один текст, и без секунд.
+            $moved = $newAt !== null
+                && optional($item->publish_at)?->format('Y-m-d H:i') !== $newAt->format('Y-m-d H:i');
+
             // Те же две проверки, что при постановке и переносе. Раньше их
             // здесь не было ни одной, и через карточку правки можно было
             // поставить два поста на один день или увести анонс за событие —
             // мимо всех защит, которые стоят на соседних путях.
             if ($newAt !== null) {
-                $refusal = DB::transaction(function () use ($item, $newAt) {
+                $refusal = DB::transaction(function () use ($item, $newAt, $moved) {
                     $itemEvents = $this->itemEvents($item);
                     if (! PostTiming::fitsAll($itemEvents, $newAt)) {
                         return [$this->tooLateMessageForEvents($itemEvents), 422];
+                    }
+
+                    if (! $moved) {
+                        return null;
                     }
 
                     $broadcast = TelegramChatBroadcast::query()->find($item->broadcast_id);
@@ -1018,6 +1029,11 @@ class AdminBroadcastController extends Controller
             // или переставил человек.
             if ($wasAt !== optional($item->publish_at)?->toIso8601String()) {
                 $edited[] = TelegramChatBroadcastItem::EDIT_TIME;
+            }
+
+            // Время назначено рукой — теперь это обычный пост в слоте, а не отправка «сейчас».
+            if ($moved) {
+                $item->is_off_grid = false;
             }
 
             // Дата поменялась — шаблонный текст пересобираем: в нём есть
@@ -2586,6 +2602,7 @@ class AdminBroadcastController extends Controller
             ->whereIn('status', [...$this->openStatuses(), TelegramChatBroadcastItem::STATUS_ERROR])
             ->whereNull('posted_at')
             ->whereNotNull('publish_at')
+            ->where('is_off_grid', false)
             ->where('id', '<>', $item->id)
             ->get()
             ->first(fn (TelegramChatBroadcastItem $x) => Carbon::parse($x->publish_at)
@@ -2598,7 +2615,8 @@ class AdminBroadcastController extends Controller
             ], 409);
         }
 
-        $from = $item->publish_at;
+        // У отправки «сейчас» время — момент нажатия, а не слот: соседу его не отдаём.
+        $from = $item->is_off_grid ? null : $item->publish_at;
 
         // Обмен двусторонний: второй пост тоже не должен уехать за своё
         // событие. Иначе одним перетаскиванием ломается соседний день.
@@ -2622,6 +2640,7 @@ class AdminBroadcastController extends Controller
 
         DB::transaction(function () use ($item, $occupant, $target, $from) {
             $item->publish_at = $target;
+            $item->is_off_grid = false; // см. update: день назначен рукой
             // Перетащили мышью — это ручная правка ровно в той же мере, что и
             // правка даты в карточке.
             $item->markEdited([TelegramChatBroadcastItem::EDIT_TIME]);
@@ -2640,7 +2659,10 @@ class AdminBroadcastController extends Controller
             $this->regenerateCaption($changed, $broadcast);
         }
 
-        return response()->json(['ok' => true, 'data' => ['swapped' => $occupant !== null]]);
+        return response()->json(['ok' => true, 'data' => [
+            'swapped' => $occupant !== null && $from !== null,
+            'displaced' => $occupant !== null && $from === null,
+        ]]);
     }
 
     /**
@@ -2997,6 +3019,7 @@ class AdminBroadcastController extends Controller
         $item->claimed_at = null;
         $item->claim_token = null;
         $item->publish_at = $slot?->copy()->utc();
+        $item->is_off_grid = false;
 
         // Подборку возвращают спустя дни, и её прежний состав к этому моменту
         // наполовину прошёл. Снимаем состав и текст целиком: на новом слоте она
@@ -3863,6 +3886,8 @@ class AdminBroadcastController extends Controller
             ->whereIn('status', [...$this->openStatuses(), TelegramChatBroadcastItem::STATUS_ERROR])
             ->whereNull('posted_at')
             ->whereNotNull('publish_at')
+            // Отправка «сейчас» слот не занимает, как и в сетке с наполнителем.
+            ->where('is_off_grid', false)
             ->get()
             ->first(fn (TelegramChatBroadcastItem $x) => Carbon::parse($x->publish_at)
                 ->setTimezone('Europe/Moscow')->format($format) === $targetDay);
@@ -3883,7 +3908,8 @@ class AdminBroadcastController extends Controller
         if ((int) ($filled['feed_limit'] ?? 0) > 0) {
             return sprintf(
                 '%s: лента уже держит предел канала — %d открытых записей при капе %d. '
-                .'Подними «Сколько постов держать» в настройках канала или дождись, пока часть выйдет.',
+                .'Его заняли посты без дня и за горизонтом: разбери группы под сеткой '
+                .'или увеличь «Насколько вперёд собирать ленту» в настройках канала.',
                 $prefix,
                 // Тот же счёт, что у наполнителя: открытые СОБЫТИЙНЫЕ записи.
                 // Через openStatuses() — список статусов в контроллере уже
@@ -4479,7 +4505,8 @@ class AdminBroadcastController extends Controller
         try {
             $fresh = $this->captions->build(
                 $event,
-                (string) $broadcast->template_code,
+                // Форма дня та же, что при отправке, см. ensureEventCaption.
+                $broadcast->templateCodeForDate($item->publish_at ?? $item->planned_at),
                 // «Сегодня»/«завтра» — от дня публикации, а не от дня сборки.
                 $item->publish_at
                     ? \Carbon\CarbonImmutable::parse($item->publish_at)->setTimezone('Europe/Moscow')

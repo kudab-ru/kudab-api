@@ -933,6 +933,9 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->onlyRubric('besplatno');
         $this->fill('Бесплатное', free: true);
         $channel = $this->channel();
+        // Суточное окно открыто: через него уходят записи без дня.
+        $channel->period = 'daily_10';
+        $channel->save();
         $this->actingAsSuperadmin();
 
         $this->postJson("/api/admin/broadcast/channels/{$channel->id}/digest-now")->assertCreated();

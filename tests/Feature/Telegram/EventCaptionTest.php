@@ -303,18 +303,18 @@ class EventCaptionTest extends TestCase
             tgDescription: 'Бим ждёт и верит, пока люди решают свои дела.',
             priceStatus: 'external',
             priceUrl: 'https://tickets.example/bim',
-            priceText: 'Билеты уже в продаже',
+            priceText: 'Купить билеты можно в кассе театра и по ссылке.',
         );
     }
 
-    /** Цена отдельной строкой — как в нынешних шаблонах. */
-    public function test_price_line_becomes_a_link(): void
+    public function test_price_line_is_a_link_without_the_organizer_phrase(): void
     {
         $body = "🎟 <b>{title}</b>\n{lead}\n\n📍 {address}\n🗓 {start_time|human}\n💸 {price_label}";
 
         $caption = $this->builder()->buildWithBody($this->paidEvent(), $body, $this->asOf());
 
-        $this->assertStringContainsString('💸 <a href="https://tickets.example/bim">Билеты уже в продаже</a>', $caption);
+        $this->assertStringContainsString('💸 <a href="https://tickets.example/bim">', $caption);
+        $this->assertStringNotContainsString('Купить билеты можно', $caption);
     }
 
     /**
