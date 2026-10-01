@@ -714,6 +714,64 @@ class BroadcastSlotsTest extends TestCase
         ])->assertOk();
     }
 
+    /** @return array<string, array{int, int, bool, string}> */
+    public static function runningShowAgainstAConcert(): array
+    {
+        return [
+            'выставка закрывается через 2 дня' => [10, 2, false, 'Выставка'],
+            'выставка закрывается через 20 дней' => [10, 20, false, 'Концерт'],
+            'прокат короче недели' => [4, 2, false, 'Концерт'],
+            'сеансы с общим концом' => [10, 2, true, 'Концерт'],
+        ];
+    }
+
+    #[DataProvider('runningShowAgainstAConcert')]
+    public function test_running_show_competes_by_days_to_its_closing(int $openedDaysAgo, int $closesInDays, bool $sharedEnd, string $picked): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 19:05', 'Europe/Moscow')->utc());
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10],
+            'pick_mode' => TelegramChatBroadcast::PICK_MODE_EVE,
+        ]);
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $slot = Carbon::parse('2026-09-16 10:00', 'Europe/Moscow');
+
+        // карточки одинаковые, решает свежесть: у концерта через три дня после слота −5
+        $this->eventAt($city->id, 'Концерт', $slot->copy()->addDays(3)->setTime(19, 0)->utc(), rich: true);
+
+        $show = $this->eventAt($city->id, 'Выставка', $slot->copy()->subDays($openedDaysAgo)->setTime(11, 0)->utc(), rich: true);
+        $show->end_time = $slot->copy()->addDays($closesInDays)->setTime(18, 0)->utc();
+        $show->event_group_id = (int) DB::table('event_groups')->insertGetId([
+            'community_id' => $show->community_id,
+            'group_key' => 'show-'.$show->id,
+            'title_norm' => 'выставка',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $show->save();
+
+        if ($sharedEnd) {
+            $session = $this->eventAt($city->id, 'Выставка', Carbon::parse($show->start_time)->addDay(), rich: true);
+            $session->end_time = $show->end_time;
+            $session->event_group_id = $show->event_group_id;
+            $session->save();
+        }
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame([$picked], Event::query()
+            ->whereIn('id', TelegramChatBroadcastItem::query()
+                ->where('broadcast_id', $broadcast->id)
+                ->where('publish_at', $slot->copy()->utc())
+                ->pluck('event_id'))
+            ->pluck('title')
+            ->all());
+    }
+
     /**
      * Возврат снятого не ставит пост в слот, до которого событие уже пройдёт.
      *

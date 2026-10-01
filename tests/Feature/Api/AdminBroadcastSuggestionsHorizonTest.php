@@ -13,6 +13,7 @@ use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
@@ -106,6 +107,42 @@ class AdminBroadcastSuggestionsHorizonTest extends TestCase
 
         $this->assertContains('Дневной концерт', $this->suggest($broadcast->id, '2026-09-16'));
         $this->assertNotContains('Дневной концерт', $this->suggest($broadcast->id, '2026-09-16', 19));
+    }
+
+    /** @return array<string, array{bool, bool}> */
+    public static function runningShowForTheSlot(): array
+    {
+        return [
+            'идущая выставка' => [false, true],
+            'сеанс с общим для серии концом' => [true, false],
+        ];
+    }
+
+    #[DataProvider('runningShowForTheSlot')]
+    public function test_slot_suggests_a_running_show_but_not_a_past_session(bool $sharedEnd, bool $suggested): void
+    {
+        $broadcast = $this->makeChannel();
+        $show = $this->event('Выставка', -10);
+        $show->end_time = Carbon::now()->addDays(10);
+        $show->event_group_id = (int) DB::table('event_groups')->insertGetId([
+            'community_id' => $show->community_id,
+            'group_key' => 'show-'.$show->id,
+            'title_norm' => 'выставка',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $show->save();
+
+        if ($sharedEnd) {
+            $session = $this->event('Выставка, второй сеанс', -9);
+            $session->end_time = $show->end_time;
+            $session->event_group_id = $show->event_group_id;
+            $session->save();
+        }
+
+        $titles = $this->suggest($broadcast->id, Carbon::now('Europe/Moscow')->addDay()->format('Y-m-d'));
+
+        $this->assertSame($suggested, in_array('Выставка', $titles, true));
     }
 
     /** @return list<string> */

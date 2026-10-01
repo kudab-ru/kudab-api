@@ -383,7 +383,8 @@ class AdminBroadcastController extends Controller
 
         $candidates = Event::query()
             ->active()
-            ->upcoming()
+            // под слот срок проверяет applyFits ниже, а upcoming() отрезал бы идущие выставки
+            ->when($publishAt === null, fn ($q) => $q->upcoming())
             ->with(['venue:id,name', 'primaryInterests:id,name'])
             ->whereHas('community', fn ($q) => $q->where('city_id', $chat->city_id))
             ->whereNotIn('id', $inFeed)
@@ -411,12 +412,9 @@ class AdminBroadcastController extends Controller
             ->where('start_time', '<=', ($publishAt ?? now())->copy()->addDays(self::SUGGESTIONS_HORIZON_DAYS))
             ->when(
                 $publishAt !== null,
-                // Правило общее со всеми дверями и буквально одним выражением
-                // ([[PostTiming]]::applyFits): не позже начала, а у многодневки
-                // — не позже закрытия. Своя копия здесь пускала в предложения
-                // уже начавшееся однодневное, а порог многодневки был зашит
-                // числом мимо константы.
-                fn ($q) => PostTiming::applyFits($q, $publishAt),
+                // срок по общему правилу, а прокат — как у автоподбора: иначе прошедшие сеансы
+                // спектакля с общим концом вставали бы первыми в каждую пустую клетку
+                fn ($q) => PostTiming::applyFits($q, $publishAt, strictRuns: true),
             )
             ->orderBy('start_time')
             ->limit(self::SUGGESTIONS_LIMIT)
@@ -4445,7 +4443,7 @@ class AdminBroadcastController extends Controller
         if ($e->price_status === 'free') {
             $out[] = 'бесплатно';
         }
-        if ($e->start_time && Carbon::parse($e->start_time)->lessThan(now()->addDays(3))) {
+        if ($e->start_time && Carbon::parse($e->start_time)->between(now(), now()->addDays(3), false)) {
             $out[] = 'скоро начнётся';
         }
 

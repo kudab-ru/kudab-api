@@ -1511,7 +1511,7 @@ class TelegramChatBroadcastService
         ?int $repeatCap = null,
         ?int $avoidInterestId = null,
     ): ?int {
-        $query = $this->channelCandidates($chat, $broadcastId)->upcoming();
+        $query = $this->channelCandidates($chat, $broadcastId);
 
         if (! empty($excludeEventIds)) {
             $query->whereNotIn('id', array_values(array_unique(array_map('intval', $excludeEventIds))));
@@ -1536,10 +1536,12 @@ class TelegramChatBroadcastService
             ($notBefore ?? Carbon::now())->copy()->addDays(self::CANDIDATE_HORIZON_DAYS),
         );
 
-        // нижняя граница от момента публикации, а не от «сейчас» (upcoming): к дню поста событие
-        // может пройти. Многодневке фора считается до закрытия, см. PostTiming
+        // нижняя граница от момента публикации, а не от «сейчас»: к дню поста событие может пройти.
+        // upcoming() тут не нужен — он отрезал бы идущие выставки. Срок проката — закрытие, см. PostTiming
         if ($notBefore !== null) {
-            PostTiming::applyFits($query, $notBefore, self::MIN_LEAD_HOURS);
+            PostTiming::applyFits($query, $notBefore, self::MIN_LEAD_HOURS, strictRuns: true);
+        } else {
+            $query->upcoming();
         }
 
         // Кандидатный пул — ближайшие, кап; качество выбираем скорингом в PHP.
@@ -1589,7 +1591,7 @@ class TelegramChatBroadcastService
             }
         }
 
-        return $this->scorer->pickBest($pool)?->id;
+        return $this->scorer->pickBest($pool, $notBefore ?? Carbon::now())?->id;
     }
 
     /**

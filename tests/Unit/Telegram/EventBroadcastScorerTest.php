@@ -6,6 +6,7 @@ use App\Models\Event;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -20,7 +21,7 @@ class EventBroadcastScorerTest extends TestCase
     {
         parent::setUp();
         Carbon::setTestNow(Carbon::create(2026, 3, 22, 12, 0, 0, 'Europe/Moscow'));
-        $this->scorer = new EventBroadcastScorer();
+        $this->scorer = new EventBroadcastScorer;
     }
 
     protected function tearDown(): void
@@ -32,28 +33,28 @@ class EventBroadcastScorerTest extends TestCase
     public function test_minimal_event_scores_zero(): void
     {
         $e = $this->makeEvent(start: now()->addDay()); // без факторов, ближайший → 0
-        $this->assertSame(0, $this->scorer->score($e));
+        $this->assertSame(0, $this->scorer->score($e, now()));
     }
 
     public function test_photo_adds_its_weight(): void
     {
         $e = $this->makeEvent(photo: true, start: now()->addDay());
-        $this->assertSame(EventBroadcastScorer::W_PHOTO, $this->scorer->score($e));
+        $this->assertSame(EventBroadcastScorer::W_PHOTO, $this->scorer->score($e, now()));
     }
 
     public function test_all_factors_sum_up(): void
     {
         $e = $this->makeEvent(
             attrs: [
-                'house_fias_id'  => 'fias-123',
-                'venue_id'       => 7,
+                'house_fias_id' => 'fias-123',
+                'venue_id' => 7,
                 'tickets_status' => 'available',
                 // Цена известна = подписчик увидит число. Здесь стоял
                 // несуществующий статус 'priced', и тест подтверждал
                 // поведение, которого в базе нет ни у одной записи.
-                'price_status'   => 'paid',
-                'price_min'      => 500,
-                'description'    => str_repeat('я', EventBroadcastScorer::MIN_DESCRIPTION_LEN),
+                'price_status' => 'paid',
+                'price_min' => 500,
+                'description' => str_repeat('я', EventBroadcastScorer::MIN_DESCRIPTION_LEN),
                 'time_precision' => 'datetime',
             ],
             photo: true,
@@ -70,48 +71,100 @@ class EventBroadcastScorerTest extends TestCase
             + EventBroadcastScorer::W_DESCRIPTION
             + EventBroadcastScorer::W_TIME_EXACT; // freshness +1д = 0
 
-        $this->assertSame($expected, $this->scorer->score($e));
+        $this->assertSame($expected, $this->scorer->score($e, now()));
     }
 
     public function test_freshness_penalty_tiers(): void
     {
-        $this->assertSame(0,   $this->scorer->score($this->makeEvent(start: now()->addDay())));
-        $this->assertSame(-5,  $this->scorer->score($this->makeEvent(start: now()->addDays(5))));
-        $this->assertSame(-12, $this->scorer->score($this->makeEvent(start: now()->addDays(20))));
-        $this->assertSame(-25, $this->scorer->score($this->makeEvent(start: now()->addDays(40))));
+        $this->assertSame(0, $this->scorer->score($this->makeEvent(start: now()->addDay()), now()));
+        $this->assertSame(-5, $this->scorer->score($this->makeEvent(start: now()->addDays(5)), now()));
+        $this->assertSame(-12, $this->scorer->score($this->makeEvent(start: now()->addDays(20)), now()));
+        $this->assertSame(-25, $this->scorer->score($this->makeEvent(start: now()->addDays(40)), now()));
     }
 
     public function test_pick_best_takes_highest_score(): void
     {
         $withPhotoFar = $this->makeEvent(photo: true, start: now()->addDays(3)); // 40 - 5 = 35
-        $noPhotoSoon  = $this->makeEvent(start: now()->addDay());                // 0
+        $noPhotoSoon = $this->makeEvent(start: now()->addDay());                // 0
 
-        $best = $this->scorer->pickBest(new Collection([$noPhotoSoon, $withPhotoFar]));
+        $best = $this->scorer->pickBest(new Collection([$noPhotoSoon, $withPhotoFar]), now());
 
         $this->assertSame($withPhotoFar, $best);
     }
 
     public function test_pick_best_tie_break_earliest_start(): void
     {
-        $later   = $this->makeEvent(start: now()->addDays(2)); // 0
+        $later = $this->makeEvent(start: now()->addDays(2)); // 0
         $earlier = $this->makeEvent(start: now()->addDay());   // 0 — при равенстве выигрывает
 
-        $best = $this->scorer->pickBest(new Collection([$later, $earlier]));
+        $best = $this->scorer->pickBest(new Collection([$later, $earlier]), now());
 
         $this->assertSame($earlier, $best);
     }
 
     public function test_pick_best_of_empty_is_null(): void
     {
-        $this->assertNull($this->scorer->pickBest(new Collection()));
+        $this->assertNull($this->scorer->pickBest(new Collection, now()));
+    }
+
+    /** @return array<string, array{string, array<string, array{string, string|null, bool}>, string}> */
+    public static function pickedForTheSlot(): array
+    {
+        return [
+            'билеты не обходят ту же карточку ступенью ближе' => [
+                '2026-03-23 10:00',
+                ['ближе' => ['2026-03-24 19:00', null, false], 'с билетами' => ['2026-03-27 19:00', null, true]],
+                'ближе',
+            ],
+            // от «сейчас» оба на ступени месяца, а в UTC ночное событие на день ближе
+            'свежесть от дня слота по Москве' => [
+                '2026-03-31 10:00',
+                ['ближе' => ['2026-04-01 19:00', null, false], 'с билетами' => ['2026-04-03 01:00', null, true]],
+                'ближе',
+            ],
+            'при равном балле обычное событие раньше проката' => [
+                '2026-03-23 10:00',
+                ['прокат' => ['2026-03-13 11:00', '2026-03-24 18:00', false], 'обычное' => ['2026-03-25 19:00', null, false]],
+                'обычное',
+            ],
+        ];
+    }
+
+    /** @param array<string, array{string, string|null, bool}> $events */
+    #[DataProvider('pickedForTheSlot')]
+    public function test_pick_best_for_the_slot(string $slot, array $events, string $expected): void
+    {
+        $made = [];
+        foreach ($events as $label => [$start, $end, $tickets]) {
+            // даты по Москве: при московском «сейчас» модель читает время без пояса как московское
+            $made[$label] = $this->makeEvent(
+                attrs: [
+                    'house_fias_id' => 'fias-123',
+                    'venue_id' => 7,
+                    'price_status' => 'paid',
+                    'price_min' => 500,
+                    'description' => str_repeat('я', EventBroadcastScorer::MIN_DESCRIPTION_LEN),
+                    'time_precision' => 'datetime',
+                    'tickets_status' => $tickets ? 'available' : null,
+                    'end_time' => $end === null ? null : Carbon::parse($end, 'Europe/Moscow'),
+                ],
+                photo: true,
+                interests: 1,
+                start: Carbon::parse($start, 'Europe/Moscow'),
+            );
+        }
+
+        $best = $this->scorer->pickBest(new Collection(array_values($made)), Carbon::parse($slot, 'Europe/Moscow'));
+
+        $this->assertSame($made[$expected], $best);
     }
 
     /**
-     * @param array<string,mixed> $attrs
+     * @param  array<string,mixed>  $attrs
      */
     private function makeEvent(array $attrs = [], bool $photo = false, int $interests = 0, ?Carbon $start = null): Event
     {
-        $e = new Event();
+        $e = new Event;
         $e->start_time = $start ?? now()->addDay();
 
         foreach ($attrs as $k => $v) {
@@ -121,7 +174,7 @@ class EventBroadcastScorerTest extends TestCase
 
         $e->setRelation('sources', $photo
             ? new Collection([(object) ['images' => ['http://example.test/p.jpg']]])
-            : new Collection());
+            : new Collection);
 
         return $e;
     }
