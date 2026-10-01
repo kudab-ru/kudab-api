@@ -16,6 +16,9 @@ class BroadcastSlotPlanner
 {
     public const TZ = 'Europe/Moscow';
 
+    /** В `eve` завтрашние посты выбираются после последнего сегодняшнего, на ближайшем пятиминутном прогоне. */
+    public const EVE_DELAY_MINUTES = 5;
+
     /**
      * Часы публикации канала по возрастанию. Без slots — один час из period.
      *
@@ -42,10 +45,42 @@ class BroadcastSlotPlanner
     }
 
     /**
-     * Ближайший свободный слот в пределах horizon_days, null — всё занято.
+     * С какого момента слот открыт автоподбору; null — открыт, как только попал в горизонт.
+     * В `eve` — накануне, через EVE_DELAY_MINUTES после последнего слота дня по Москве,
+     * fill_lead_days там не действует. В `week` поздние слоты дня ждут fill_lead_days:
+     * половина афиши объявляется поздно, а первый слот дня собирается на весь горизонт.
+     */
+    public function opensAt(TelegramChatBroadcast $broadcast, Carbon $slotAt, int $slotIndex): ?Carbon
+    {
+        if ($broadcast->picksOnEve()) {
+            $slots = $this->slots($broadcast);
+
+            return $slotAt->copy()->setTimezone(self::TZ)->subDay()
+                ->setTime(max($slots), self::EVE_DELAY_MINUTES, 0);
+        }
+
+        $lead = $broadcast->fill_lead_days;
+        if ($slotIndex === 0 || $lead === null) {
+            return null;
+        }
+
+        return $slotAt->copy()->subDays($lead);
+    }
+
+    /**
+     * Сколько дней от сегодняшнего смотрит автоподбор. В `eve` дальше завтра слоты
+     * закрыты, а горизонт в этом режиме не настраивается: при горизонте в сутки завтра не выбралось бы.
+     */
+    public function autoPickDays(TelegramChatBroadcast $broadcast): int
+    {
+        return $broadcast->picksOnEve() ? 2 : $broadcast->horizon_days;
+    }
+
+    /**
+     * Ближайший свободный слот, null — всё занято.
      *
-     * @param  bool  $respectLead  закрывать поздние слоты дальше fill_lead_days;
-     *                             false передают пути, где пост ставит человек
+     * @param  bool  $respectLead  держать закрытыми слоты, которые автоподбору ещё рано занимать
+     *                             (см. opensAt); false передают пути, где пост ставит человек
      */
     public function nextFreeSlot(
         TelegramChatBroadcast $broadcast,
@@ -66,30 +101,43 @@ class BroadcastSlotPlanner
             ->map(fn ($d) => $this->key($d))
             ->all();
 
-        $slots = $this->slots($broadcast);
-        $lead = $respectLead ? $broadcast->fill_lead_days : null;
-        $leadEdge = $lead !== null ? $now->copy()->addDays($lead) : null;
+        $days = $respectLead ? $this->autoPickDays($broadcast) : $broadcast->horizon_days;
 
-        for ($i = 0; $i < $broadcast->horizon_days; $i++) {
+        for ($i = 0; $i < $days; $i++) {
             $day = $now->copy()->setTimezone(self::TZ)->addDays($i)->startOfDay();
 
-            foreach ($slots as $slotIndex => $hour) {
-                $at = $day->copy()->setTime($hour, 0, 0);
-                if ($at->lt($now)) {
-                    continue;
+            foreach ($this->openSlots($broadcast, $day, $now, $respectLead) as $at) {
+                if (! in_array($this->key($at), $taken, true)) {
+                    return $at;
                 }
-                // копия правила fill_lead_days из fillFeedDays, правятся вместе
-                if ($leadEdge !== null && $slotIndex > 0 && $at->gt($leadEdge)) {
-                    continue;
-                }
-                if (in_array($this->key($at), $taken, true)) {
-                    continue;
-                }
-
-                return $at;
             }
         }
 
         return null;
+    }
+
+    /**
+     * Слоты дня, которые автоподбору уже можно занимать, по Москве.
+     *
+     * @param  bool  $respectLead  false — все будущие слоты дня: пост ставит человек
+     * @return list<Carbon>
+     */
+    public function openSlots(TelegramChatBroadcast $broadcast, Carbon $day, Carbon $now, bool $respectLead = true): array
+    {
+        $open = [];
+        foreach ($this->slots($broadcast) as $slotIndex => $hour) {
+            $at = $day->copy()->setTimezone(self::TZ)->setTime($hour, 0, 0);
+            // прошедший слот не заполняем: пост встал бы просроченным и тут же потерял бы день
+            if ($at->lt($now)) {
+                continue;
+            }
+            $opensAt = $respectLead ? $this->opensAt($broadcast, $at, $slotIndex) : null;
+            if ($opensAt !== null && $now->lt($opensAt)) {
+                continue;
+            }
+            $open[] = $at;
+        }
+
+        return $open;
     }
 }

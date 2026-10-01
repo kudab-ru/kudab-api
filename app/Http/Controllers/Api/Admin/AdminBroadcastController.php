@@ -3600,6 +3600,7 @@ class AdminBroadcastController extends Controller
             // null — «заполнять вместе с первым слотом», то есть как было до
             // появления ручки.
             'fill_lead_days' => ['sometimes', 'nullable', 'integer', 'min:1', 'max:31'],
+            'pick_mode' => ['sometimes', 'string', 'in:'.TelegramChatBroadcast::PICK_MODE_WEEK.','.TelegramChatBroadcast::PICK_MODE_EVE],
             'portrait_every_days' => ['sometimes', 'integer', 'min:1', 'max:90'],
             'min_gap_minutes' => ['sometimes', 'integer', 'min:0', 'max:1440'],
             'ai_text' => ['sometimes', 'boolean'],
@@ -3666,6 +3667,9 @@ class AdminBroadcastController extends Controller
                 ? null
                 : (int) $data['fill_lead_days'];
         }
+        if ($request->has('pick_mode')) {
+            $broadcast->pick_mode = (string) $data['pick_mode'];
+        }
         if ($request->has('horizon_days')) {
             $broadcast->horizon_days = (int) $data['horizon_days'];
         }
@@ -3677,6 +3681,11 @@ class AdminBroadcastController extends Controller
         }
         if ($request->has('text_lead_minutes')) {
             $broadcast->text_lead_minutes = (int) $data['text_lead_minutes'];
+        }
+        // В `eve` анонс пишется сразу после выбора накануне. Значение формы не берём: она шлёт его
+        // при каждом сохранении. И пишем в настройки, а не подставляем в аксессоре: парсер читает их как есть.
+        if ($broadcast->picksOnEve()) {
+            $broadcast->text_lead_minutes = 24 * 60;
         }
         $digestWas = $broadcast->digest_weekday;
         if ($request->has('digest_slots')) {
@@ -3987,6 +3996,7 @@ class AdminBroadcastController extends Controller
             'slots' => $b->slots,
             'horizon_days' => $b->horizon_days,
             'fill_lead_days' => $b->fill_lead_days,
+            'pick_mode' => $b->pick_mode,
             // Каденс портретов. Сверять его есть с чем: portrait_pool ниже,
             // потолок — TelegramVenuePortraitService::POOL_PER_WEEKLY_POST.
             'portrait_every_days' => $b->portrait_every_days,

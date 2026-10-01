@@ -13,6 +13,7 @@ use App\Services\Telegram\TelegramChatBroadcastService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -325,6 +326,30 @@ class BroadcastSlotsTest extends TestCase
             ->all();
     }
 
+    /**
+     * Часы постов по дням, по Москве. Сортируем сами: без ORDER BY Postgres порядок строк не обещает.
+     *
+     * @return array<string, list<int>>
+     */
+    private function hoursByDay(int $broadcastId): array
+    {
+        $byDay = [];
+        foreach (TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            ->whereNotNull('publish_at')
+            ->pluck('publish_at') as $at) {
+            $msk = Carbon::parse($at)->setTimezone('Europe/Moscow');
+            $byDay[$msk->toDateString()][] = (int) $msk->format('H');
+        }
+        foreach ($byDay as &$hours) {
+            sort($hours);
+        }
+        unset($hours);
+        ksort($byDay);
+
+        return $byDay;
+    }
+
     /** @return array{0: TelegramChatBroadcast, 1: list<Event>} */
     /**
      * Дальний слот выбирает из СВОЕГО горизонта, а не из сегодняшнего.
@@ -428,23 +453,6 @@ class BroadcastSlotsTest extends TestCase
 
         $this->service()->fillFeedDays($broadcast->fresh(), now());
 
-        $byDay = [];
-        foreach (TelegramChatBroadcastItem::query()
-            ->where('broadcast_id', $broadcast->id)
-            ->whereNotNull('publish_at')
-            ->pluck('publish_at') as $at) {
-            $msk = Carbon::parse($at)->setTimezone('Europe/Moscow');
-            $byDay[$msk->toDateString()][] = (int) $msk->format('H');
-        }
-        foreach ($byDay as &$hours) {
-            sort($hours);
-        }
-        unset($hours);
-        // По дням — иначе сравнение зависит от порядка строк, который Postgres
-        // не обещает: запрос выше без ORDER BY, и любая правка, задевающая
-        // физический порядок записей, роняла тест на идентичных данных.
-        ksort($byDay);
-
         $this->assertSame(
             [
                 '2026-09-15' => [10, 19],
@@ -453,9 +461,51 @@ class BroadcastSlotsTest extends TestCase
                 '2026-09-18' => [10],
                 '2026-09-19' => [10],
             ],
-            $byDay,
+            $this->hoursByDay($broadcast->id),
             'утро собирается на весь горизонт, вечер — только в пределах своих суток',
         );
+    }
+
+    /** @return array<string, array{string, array<string, list<int>>}> */
+    public static function eveBoundary(): array
+    {
+        return [
+            'за минуту до выбора' => ['2026-09-15 19:04', ['2026-09-16' => [10], '2026-09-17' => [15]]],
+            'в 19:05' => ['2026-09-15 19:05', ['2026-09-16' => [10, 15, 19], '2026-09-17' => [15]]],
+        ];
+    }
+
+    #[DataProvider('eveBoundary')]
+    public function test_eve_picks_tomorrow_right_after_the_last_slot(string $now, array $expected): void
+    {
+        Carbon::setTestNow(Carbon::parse($now, 'Europe/Moscow')->utc());
+
+        [$broadcast, $events] = $this->channelWithEvents(12);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10, 15, 19],
+            'horizon_days' => 7,
+            'pick_mode' => TelegramChatBroadcast::PICK_MODE_EVE,
+            // в ленте уже два поста: в режиме `eve` кап не действует
+            'feed_limit' => 1,
+        ]);
+        $broadcast->save();
+
+        $pinned = $this->makeItem($broadcast->id, $events[0]->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $pinned->publish_at = Carbon::parse('2026-09-16 10:00', 'Europe/Moscow')->utc();
+        $pinned->is_pinned = true;
+        $pinned->save();
+
+        $byHand = $this->makeItem($broadcast->id, $events[1]->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $byHand->publish_at = Carbon::parse('2026-09-17 15:00', 'Europe/Moscow')->utc();
+        $byHand->save();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame($expected, $this->hoursByDay($broadcast->id));
+        $this->assertSame($pinned->publish_at->toIso8601String(), $pinned->fresh()->publish_at->toIso8601String());
+        $this->assertSame($byHand->publish_at->toIso8601String(), $byHand->fresh()->publish_at->toIso8601String());
+
+        Carbon::setTestNow();
     }
 
     /** Без настройки оба слота заполняются как раньше — на весь горизонт. */

@@ -70,87 +70,100 @@ class TelegramVenuePortraitService
         foreach ($this->broadcastRepository->listEnabledWithSchedule() as $broadcast) {
             $summary['checked']++;
 
-            if (! $this->venuePortraitDue($broadcast, $now)) {
-                continue;
-            }
-            $summary['due']++;
-
+            // запрет стенда здесь, а не в enqueueDuePortrait: у наполнителя он свой, как и для событий
             $chat = $broadcast->chat;
-            if (! $chat instanceof TelegramChat || ! $chat->city_id || ! $chat->telegram_chat_id) {
-                $summary['skipped_no_city']++;
-
-                continue;
-            }
-
-            if (! BroadcastSafety::postingAllowed((int) $chat->telegram_chat_id)) {
+            if ($chat instanceof TelegramChat && $chat->telegram_chat_id
+                && ! BroadcastSafety::postingAllowed((int) $chat->telegram_chat_id)) {
                 $summary['skipped_not_allowed']++;
 
                 continue;
             }
 
-            if ($this->openVenueItemsCount($broadcast->id) > 0) {
-                $summary['skipped_queue_busy']++;
-
+            $result = $this->enqueueDuePortrait($broadcast, $now, $dryRun);
+            if ($result === self::PORTRAIT_NOT_DUE) {
                 continue;
             }
-
-            $venue = $this->pickNextVenueForChat((int) $chat->city_id, (int) $broadcast->id, $now);
-            if (! $venue) {
-                $summary['no_candidate']++;
-                Log::info('venue_portrait.enqueue.no_candidate', [
-                    'broadcast_id' => $broadcast->id,
-                    'city_id' => $chat->city_id,
-                    'hint' => 'нет площадки с tg_portrait вне кулдауна/кросс-формата',
-                ]);
-
-                continue;
-            }
-
-            // нет свободного слота — ждём следующего прогона, мимо расписания не ставим
-            $publishAt = $this->slotPlanner->nextFreeSlot($broadcast, $now);
-            if (! $publishAt) {
-                $summary['skipped_no_slot']++;
-                Log::info('venue_portrait.enqueue.no_free_slot', [
-                    'broadcast_id' => $broadcast->id,
-                    'venue_id' => $venue->id,
-                ]);
-
-                continue;
-            }
-
-            $caption = $this->buildVenueCaption($venue, $publishAt);
-            $photoUrl = $this->venueCoverUrl((int) $venue->id);
-
-            $reviewGate = (bool) config('services.bot.broadcast_review_gate');
-            if ($reviewGate) {
-                $reviewerTelegramId = $chat->owner?->telegram_id;
-                if (! $reviewerTelegramId) {
-                    $summary['skipped_no_reviewer']++;
-
-                    continue;
-                }
-                if (! $dryRun) {
-                    $deadline = $now->copy()->addMinutes(
-                        (int) config('services.bot.broadcast_review_timeout_minutes', 120),
-                    );
-                    $this->persist($broadcast->id, $venue->id, $caption, $photoUrl, [
-                        'status' => TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
-                        'review_reviewer_telegram_id' => (int) $reviewerTelegramId,
-                        'review_deadline_at' => $deadline,
-                        'publish_at' => $publishAt->copy()->utc(),
-                    ], captionAt: $publishAt);
-                }
-            } elseif (! $dryRun) {
-                $this->persist($broadcast->id, $venue->id, $caption, $photoUrl, [
-                    'status' => TelegramChatBroadcastItem::STATUS_PENDING,
-                    'publish_at' => $publishAt->copy()->utc(),
-                ], captionAt: $publishAt);
-            }
-
-            $summary['enqueued']++;
+            $summary['due']++;
+            $summary[$result]++;
         }
 
         return $summary;
+    }
+
+    public const PORTRAIT_NOT_DUE = 'not_due';
+
+    public const PORTRAIT_ENQUEUED = 'enqueued';
+
+    /**
+     * Поставить портрет одному каналу, если подошёл его срок; день — ближайший свободный слот.
+     *
+     * @return string PORTRAIT_NOT_DUE, PORTRAIT_ENQUEUED или ключ отказа из сводки enqueueDueVenuePortraits
+     */
+    public function enqueueDuePortrait(TelegramChatBroadcast $broadcast, Carbon $now, bool $dryRun = false): string
+    {
+        if (! $this->venuePortraitDue($broadcast, $now)) {
+            return self::PORTRAIT_NOT_DUE;
+        }
+
+        $chat = $broadcast->chat;
+        if (! $chat instanceof TelegramChat || ! $chat->city_id || ! $chat->telegram_chat_id) {
+            return 'skipped_no_city';
+        }
+
+        if ($this->openVenueItemsCount($broadcast->id) > 0) {
+            return 'skipped_queue_busy';
+        }
+
+        $venue = $this->pickNextVenueForChat((int) $chat->city_id, (int) $broadcast->id, $now);
+        if (! $venue) {
+            Log::info('venue_portrait.enqueue.no_candidate', [
+                'broadcast_id' => $broadcast->id,
+                'city_id' => $chat->city_id,
+                'hint' => 'нет площадки с tg_portrait вне кулдауна/кросс-формата',
+            ]);
+
+            return 'no_candidate';
+        }
+
+        // нет свободного слота — ждём следующего прогона, мимо расписания не ставим
+        $publishAt = $this->slotPlanner->nextFreeSlot($broadcast, $now);
+        if (! $publishAt) {
+            Log::info('venue_portrait.enqueue.no_free_slot', [
+                'broadcast_id' => $broadcast->id,
+                'venue_id' => $venue->id,
+            ]);
+
+            return 'skipped_no_slot';
+        }
+
+        $caption = $this->buildVenueCaption($venue, $publishAt);
+        $photoUrl = $this->venueCoverUrl((int) $venue->id);
+
+        $reviewGate = (bool) config('services.bot.broadcast_review_gate');
+        if ($reviewGate) {
+            $reviewerTelegramId = $chat->owner?->telegram_id;
+            if (! $reviewerTelegramId) {
+                return 'skipped_no_reviewer';
+            }
+            if (! $dryRun) {
+                $deadline = $now->copy()->addMinutes(
+                    (int) config('services.bot.broadcast_review_timeout_minutes', 120),
+                );
+                $this->persist($broadcast->id, $venue->id, $caption, $photoUrl, [
+                    'status' => TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                    'review_reviewer_telegram_id' => (int) $reviewerTelegramId,
+                    'review_deadline_at' => $deadline,
+                    'publish_at' => $publishAt->copy()->utc(),
+                ], captionAt: $publishAt);
+            }
+        } elseif (! $dryRun) {
+            $this->persist($broadcast->id, $venue->id, $caption, $photoUrl, [
+                'status' => TelegramChatBroadcastItem::STATUS_PENDING,
+                'publish_at' => $publishAt->copy()->utc(),
+            ], captionAt: $publishAt);
+        }
+
+        return self::PORTRAIT_ENQUEUED;
     }
 
     /** Каденс portrait_every_days от последнего отправленного портрета, не от last_run_at: тот у событий. */

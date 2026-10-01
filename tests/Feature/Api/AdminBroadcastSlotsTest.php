@@ -77,6 +77,22 @@ class AdminBroadcastSlotsTest extends TestCase
         ])->assertStatus(422);
     }
 
+    public function test_eve_keeps_the_text_lead_at_a_day_whatever_the_form_sends(): void
+    {
+        $broadcast = $this->makeChannel();
+
+        $this->patchJson("/api/admin/broadcast/channels/{$broadcast->id}", [
+            'pick_mode' => 'eve',
+            'text_lead_minutes' => 60,
+        ])->assertOk()->assertJsonPath('data.pick_mode', 'eve');
+
+        $this->patchJson("/api/admin/broadcast/channels/{$broadcast->id}", [
+            'text_lead_minutes' => 90,
+        ])->assertOk();
+
+        $this->assertSame(1440, $broadcast->fresh()->settings['text_lead_minutes'], 'парсер читает настройки как есть');
+    }
+
     private function makeChannel(): TelegramChatBroadcast
     {
         $owner = TelegramUser::create(['telegram_id' => 8307201745]);

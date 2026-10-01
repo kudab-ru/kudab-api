@@ -129,6 +129,44 @@ class VenuePortraitEnqueueTest extends TestCase
         Carbon::setTestNow();
     }
 
+    public function test_eve_puts_the_due_portrait_before_the_regular_posts(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 16:05:00', 'UTC')); // 19:05 МСК
+
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $this->createVenue($city->id, 'Зелёный театр', 'zeleny-teatr', 'Открытая летняя сцена.');
+        $community = $this->createCommunity($city->id, 'Организатор');
+        for ($i = 0; $i < 4; $i++) {
+            $this->createEvent($city->id, $community->id, 'Событие '.$i, now()->addDays(3 + $i));
+        }
+
+        $chat = $this->createChannelChat($city->id, -3014);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $broadcast->settings = array_merge($broadcast->settings, [
+            'slots' => [10, 19],
+            'pick_mode' => TelegramChatBroadcast::PICK_MODE_EVE,
+        ]);
+        $broadcast->save();
+
+        app(TelegramChatBroadcastService::class)->fillFeedDays($broadcast->fresh('chat'), now());
+
+        $portrait = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
+            ->firstOrFail();
+        $this->assertSame(
+            '2026-09-16 10',
+            Carbon::parse($portrait->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H'),
+        );
+        $this->assertSame(1, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
+            ->whereNotNull('publish_at')
+            ->count(), 'второй слот завтра занят обычным постом');
+
+        Carbon::setTestNow();
+    }
+
     /**
      * Отклонённый портрет не предлагается снова.
      *

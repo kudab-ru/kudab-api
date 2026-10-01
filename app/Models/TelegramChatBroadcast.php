@@ -159,6 +159,34 @@ class TelegramChatBroadcast extends Model
         $this->settings = $settings;
     }
 
+    public const PICK_MODE_WEEK = 'week';
+
+    public const PICK_MODE_EVE = 'eve';
+
+    /**
+     * Когда автоподбор выбирает посты: `week` — на горизонт вперёд, `eve` — накануне
+     * вечером на завтра (см. BroadcastSlotPlanner::opensAt). По умолчанию `week`:
+     * пока режим не переключили, канал выбирает как раньше.
+     */
+    public function getPickModeAttribute(): string
+    {
+        $raw = ($this->settings ?? [])['pick_mode'] ?? null;
+
+        return $raw === self::PICK_MODE_EVE ? self::PICK_MODE_EVE : self::PICK_MODE_WEEK;
+    }
+
+    public function setPickModeAttribute(string $mode): void
+    {
+        $settings = $this->settings ?? [];
+        $settings['pick_mode'] = $mode === self::PICK_MODE_EVE ? self::PICK_MODE_EVE : self::PICK_MODE_WEEK;
+        $this->settings = $settings;
+    }
+
+    public function picksOnEve(): bool
+    {
+        return $this->pick_mode === self::PICK_MODE_EVE;
+    }
+
     /**
      * Как часто канал публикует портрет площадки. Потолок частоты задаёт пул,
      * см. TelegramVenuePortraitService::POOL_PER_WEEKLY_POST.

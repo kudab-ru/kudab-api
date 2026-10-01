@@ -1904,15 +1904,16 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * Заполнить свободные слоты ленты на горизонт (broadcast:fill-feed и кнопки админки).
-     * publish_at ставим сразу: от него текст считает «сегодня» и «завтра».
+     * Заполнить свободные слоты ленты (broadcast:fill-feed и кнопки админки). Какие слоты уже
+     * можно занимать, решает BroadcastSlotPlanner::opensAt. publish_at ставим сразу:
+     * от него текст считает «сегодня» и «завтра».
      *
-     * @return array{filled: int, days: int, no_candidate: int}
+     * @return array{filled: int, days: int, no_candidate: int, feed_limit: int, picks: list<array<string, mixed>>}
      */
     public function fillFeedDays(TelegramChatBroadcast $broadcast, Carbon $now): array
     {
         $chat = $broadcast->chat;
-        $summary = ['filled' => 0, 'days' => 0, 'no_candidate' => 0, 'feed_limit' => 0];
+        $summary = ['filled' => 0, 'days' => 0, 'no_candidate' => 0, 'feed_limit' => 0, 'picks' => []];
 
         if (! $chat instanceof TelegramChat || ! $chat->city_id) {
             return $summary;
@@ -1921,28 +1922,9 @@ class TelegramChatBroadcastService
         // BroadcastSafety здесь нет: кнопка админки на стенде должна планировать,
         // запрет стоит в выдаче боту и в автоматических командах
 
-        $slots = $this->effectiveSlots($broadcast);
+        $eve = $broadcast->picksOnEve();
         $weekday = $this->periodWeekday($broadcast);
-
-        // карта «слот → событие»: занятость по слоту, а не по дню, а по событию узнаём тему соседа
-        $taken = [];
-        foreach (TelegramChatBroadcastItem::query()
-            ->where('broadcast_id', $broadcast->id)
-            ->whereIn('status', [
-                TelegramChatBroadcastItem::STATUS_PENDING,
-                TelegramChatBroadcastItem::STATUS_PLANNED,
-                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
-                TelegramChatBroadcastItem::STATUS_APPROVED,
-                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
-            ])
-            ->whereNotNull('publish_at')
-            // вне сетки слот не занимают: их publish_at — момент нажатия, в час слота он попадает случайно
-            ->where('is_off_grid', false)
-            ->get(['publish_at', 'event_id']) as $row) {
-            $taken[$this->slotKey(Carbon::parse($row->publish_at))] = $row->event_id !== null
-                ? (int) $row->event_id
-                : null;
-        }
+        $taken = $this->takenSlots($broadcast->id);
 
         // тема поста перед горизонтом: первый слот недели тоже чей-то сосед.
         // У брони подборки темы нет (null): её выбирают накануне слота
@@ -1990,7 +1972,8 @@ class TelegramChatBroadcastService
         );
 
         $exclude = [];
-        for ($i = 0; $i < $broadcast->horizon_days; $i++) {
+        $days = $this->slotPlanner->autoPickDays($broadcast);
+        for ($i = 0; $i < $days; $i++) {
             $day = $now->copy()->setTimezone(self::SCHEDULE_TZ)->addDays($i)->startOfDay();
 
             if ($weekday !== null && $day->dayOfWeek !== $weekday) {
@@ -1998,22 +1981,73 @@ class TelegramChatBroadcastService
             }
             $summary['days']++;
 
-            foreach ($slots as $slotIndex => $hour) {
-                $publishAt = $day->copy()->setTime($hour, 0, 0);
+            $open = $this->slotPlanner->openSlots($broadcast, $day, $now);
+            if ($open === []) {
+                continue;
+            }
 
-                // Слот, который уже прошёл, не заполняем: пост встал бы
-                // просроченным и тут же потерял бы день.
-                if ($publishAt->lt($now)) {
+            foreach ($open as $publishAt) {
+                $slotKey = $this->slotKey($publishAt);
+                if (array_key_exists($slotKey, $taken)) {
                     continue;
                 }
 
-                // поздний слот занимаем не раньше чем за fill_lead_days (если задан): половина афиши объявляется поздно.
-                // Первый слот дня плановый всегда
-                $lead = $broadcast->fill_lead_days;
-                if ($slotIndex > 0 && $lead !== null
-                    && $publishAt->gt($now->copy()->addDays($lead))) {
+                $fromWaiting = $this->takeWaiting($waiting, $publishAt);
+                if ($fromWaiting === null) {
                     continue;
                 }
+
+                $fromWaiting->publish_at = $publishAt->copy()->utc();
+                if ($fromWaiting->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
+                    $fromWaiting->caption = null;
+                    $fromWaiting->caption_source = null;
+                }
+                $fromWaiting->save();
+
+                if ($fromWaiting->hasReadyCaption()) {
+                    // Текст портрета собирается своим сборщиком: события,
+                    // от которого считается «сегодня», у него нет.
+                    $venue = $fromWaiting->venue_id ? Venue::query()->find($fromWaiting->venue_id) : null;
+                    if ($venue && $fromWaiting->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
+                        $fromWaiting->caption = $this->venuePortraitService->buildVenueCaption(
+                            $venue,
+                            $publishAt,
+                            (int) $fromWaiting->id,
+                        );
+                        $fromWaiting->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
+                        $fromWaiting->save();
+                    }
+                } else {
+                    $this->ensureEventCaption($fromWaiting, $broadcast);
+                    $exclude = array_merge($exclude, $this->linkedEventIds((int) $fromWaiting->id));
+                }
+
+                // тему соседа отсюда возьмёт проход по слотам ниже
+                $taken[$slotKey] = $fromWaiting->event_id !== null ? (int) $fromWaiting->event_id : null;
+                $summary['filled']++;
+                $summary['picks'][] = $this->pickRow($publishAt, $fromWaiting, 'waiting', 'waiting');
+            }
+
+            // Портрет — после ждущих, но раньше обычных постов: в 19:05 наполнитель занял бы все
+            // слоты завтра раньше часового прогона портретов, и портрет без слота уехал бы на сутки.
+            if ($eve && $this->venuePortraitService->enqueueDuePortrait($broadcast, $now)
+                === TelegramVenuePortraitService::PORTRAIT_ENQUEUED) {
+                $portrait = TelegramChatBroadcastItem::query()
+                    ->where('broadcast_id', $broadcast->id)
+                    ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
+                    ->whereNotNull('publish_at')
+                    ->whereNull('posted_at')
+                    ->latest('id')
+                    ->first();
+                if ($portrait !== null) {
+                    $at = Carbon::parse($portrait->publish_at);
+                    $taken[$this->slotKey($at)] = null;
+                    $summary['filled']++;
+                    $summary['picks'][] = $this->pickRow($at, $portrait, 'portrait', 'portrait_due');
+                }
+            }
+
+            foreach ($open as $publishAt) {
                 $slotKey = $this->slotKey($publishAt);
                 if (array_key_exists($slotKey, $taken)) {
                     // Сосед следующего слота — тот, кто стоит здесь.
@@ -2022,87 +2056,9 @@ class TelegramChatBroadcastService
                     continue;
                 }
 
-                // Сначала пробуем закрыть слот тем, что уже ждёт дня.
-                $fromWaiting = null;
-                $sameDayKey = null;
-                foreach ($waiting as $k => $candidate) {
-                    // готовый текст (портрет, подборка) занимает слот как есть: события для проверки срока нет
-                    if ($candidate->hasReadyCaption()) {
-                        $fromWaiting = $candidate;
-                        $sameDayKey = null;
-                        unset($waiting[$k]);
-                        break;
-                    }
-
-                    $event = Event::query()->find($candidate->event_id);
-                    if (! $event) {
-                        unset($waiting[$k]);
-
-                        continue;
-                    }
-                    if (! PostTiming::fits($event, $publishAt, self::MIN_LEAD_HOURS)) {
-                        continue;
-                    }
-
-                    // событие в день слота — только запасной вариант, если другого ждущего нет
-                    $startsAt = $event->start_time ? Carbon::parse($event->start_time) : null;
-                    $sameDay = $startsAt
-                        && $startsAt->copy()->setTimezone(self::SCHEDULE_TZ)->toDateString()
-                            === $publishAt->copy()->setTimezone(self::SCHEDULE_TZ)->toDateString();
-
-                    if ($sameDay && $fromWaiting === null) {
-                        $fromWaiting = $candidate;
-                        $sameDayKey = $k;
-
-                        continue;
-                    }
-
-                    $fromWaiting = $candidate;
-                    $sameDayKey = null;
-                    unset($waiting[$k]);
-                    break;
-                }
-
-                // Никого, кроме «день в день», не нашлось — берём его.
-                if ($fromWaiting !== null && isset($sameDayKey) && $sameDayKey !== null) {
-                    unset($waiting[$sameDayKey]);
-                }
-                $sameDayKey = null;
-
-                if ($fromWaiting !== null) {
-                    $fromWaiting->publish_at = $publishAt->copy()->utc();
-                    if ($fromWaiting->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
-                        $fromWaiting->caption = null;
-                        $fromWaiting->caption_source = null;
-                    }
-                    $fromWaiting->save();
-
-                    if ($fromWaiting->hasReadyCaption()) {
-                        // Текст портрета собирается своим сборщиком: события,
-                        // от которого считается «сегодня», у него нет.
-                        $venue = $fromWaiting->venue_id ? Venue::query()->find($fromWaiting->venue_id) : null;
-                        if ($venue && $fromWaiting->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
-                            $fromWaiting->caption = $this->venuePortraitService->buildVenueCaption(
-                                $venue,
-                                $publishAt,
-                                (int) $fromWaiting->id,
-                            );
-                            $fromWaiting->caption_source = TelegramChatBroadcastItem::CAPTION_TEMPLATE;
-                            $fromWaiting->save();
-                        }
-                    } else {
-                        $this->ensureEventCaption($fromWaiting, $broadcast);
-                        $exclude = array_merge($exclude, $this->linkedEventIds((int) $fromWaiting->id));
-                    }
-
-                    $prevTheme = $this->primaryInterestId($fromWaiting->event_id);
-                    $summary['filled']++;
-
-                    continue;
-                }
-
-                // кап канала, а не голодание пула (то — no_candidate)
-                if ($openEvents >= $broadcast->feed_limit) {
+                // Кап канала, а не голодание пула (то — no_candidate). В `eve` не действует:
+                // автопостов там не больше чем на сутки, а кап считает и ручные посты на дальние дни.
+                if (! $eve && $openEvents >= $broadcast->feed_limit) {
                     if ($summary['feed_limit'] === 0) {
                         Log::info('broadcast.feed.limit_reached', [
                             'broadcast_id' => $broadcast->id,
@@ -2117,6 +2073,7 @@ class TelegramChatBroadcastService
                 }
 
                 // не та же тема, что у соседа: два концерта подряд читаются как одна новость
+                $rule = 'best';
                 $eventId = $this->pickBestEventIdForChat(
                     $chat,
                     $broadcast->id,
@@ -2137,6 +2094,7 @@ class TelegramChatBroadcastService
                     );
 
                     if ($eventId) {
+                        $rule = 'theme_repeat';
                         Log::info('broadcast.feed.theme_repeat', [
                             'broadcast_id' => $broadcast->id,
                             'slot' => $publishAt->toIso8601String(),
@@ -2186,10 +2144,153 @@ class TelegramChatBroadcastService
                 // считаем в памяти: за прогон открытые событийные записи растут только здесь
                 $openEvents++;
                 $summary['filled']++;
+                $summary['picks'][] = $this->pickRow($publishAt, $item, 'auto', $rule);
+            }
+
+            if ($eve) {
+                $this->prepareDayDigests($broadcast, $day, $now, $summary);
             }
         }
 
         return $summary;
+    }
+
+    /**
+     * Карта «слот → событие» открытых записей канала: занятость по слоту, а не по дню,
+     * а по событию узнаём тему соседа. У портрета и подборки событие пустое.
+     *
+     * @return array<string, int|null>
+     */
+    private function takenSlots(int $broadcastId): array
+    {
+        $taken = [];
+        foreach (TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                TelegramChatBroadcastItem::STATUS_APPROVED,
+                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+            ])
+            ->whereNotNull('publish_at')
+            // вне сетки слот не занимают: их publish_at — момент нажатия, в час слота он попадает случайно
+            ->where('is_off_grid', false)
+            ->get(['publish_at', 'event_id']) as $row) {
+            $taken[$this->slotKey(Carbon::parse($row->publish_at))] = $row->event_id !== null
+                ? (int) $row->event_id
+                : null;
+        }
+
+        return $taken;
+    }
+
+    /**
+     * Ждущая запись для слота: готовый текст (портрет, подборка) встаёт как есть, событие —
+     * если успевает к слоту, а событие в день слота — только когда другого ждущего нет.
+     * Выбранную запись и записи удалённых событий убирает из списка.
+     *
+     * @param  array<int, TelegramChatBroadcastItem>  $waiting
+     */
+    private function takeWaiting(array &$waiting, Carbon $publishAt): ?TelegramChatBroadcastItem
+    {
+        $fromWaiting = null;
+        $sameDayKey = null;
+        foreach ($waiting as $k => $candidate) {
+            if ($candidate->hasReadyCaption()) {
+                $fromWaiting = $candidate;
+                $sameDayKey = null;
+                unset($waiting[$k]);
+                break;
+            }
+
+            $event = Event::query()->find($candidate->event_id);
+            if (! $event) {
+                unset($waiting[$k]);
+
+                continue;
+            }
+            if (! PostTiming::fits($event, $publishAt, self::MIN_LEAD_HOURS)) {
+                continue;
+            }
+
+            $startsAt = $event->start_time ? Carbon::parse($event->start_time) : null;
+            $sameDay = $startsAt
+                && $startsAt->copy()->setTimezone(self::SCHEDULE_TZ)->toDateString()
+                    === $publishAt->copy()->setTimezone(self::SCHEDULE_TZ)->toDateString();
+
+            if ($sameDay && $fromWaiting === null) {
+                $fromWaiting = $candidate;
+                $sameDayKey = $k;
+
+                continue;
+            }
+
+            $fromWaiting = $candidate;
+            $sameDayKey = null;
+            unset($waiting[$k]);
+            break;
+        }
+
+        // никого, кроме «день в день», не нашлось — берём его
+        if ($sameDayKey !== null) {
+            unset($waiting[$sameDayKey]);
+        }
+
+        return $fromWaiting;
+    }
+
+    /**
+     * Состав подборок дня в прогоне `eve`: после одиночных постов, потому что подборка
+     * вычитает стоящее в ленте. Окно prepare_hours у broadcast:prepare-digests остаётся запасным путём.
+     *
+     * @param  array{picks: list<array<string, mixed>>}  $summary
+     */
+    private function prepareDayDigests(TelegramChatBroadcast $broadcast, Carbon $day, Carbon $now, array &$summary): void
+    {
+        $digests = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->whereNull('posted_at')
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                TelegramChatBroadcastItem::STATUS_APPROVED,
+                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+            ])
+            ->where('publish_at', '>', $now->copy()->utc())
+            ->where('publish_at', '>=', $day->copy()->utc())
+            ->where('publish_at', '<', $day->copy()->addDay()->utc())
+            // заявка на текст ещё у парсера: вторую не шлём
+            ->whereNull('text_requested_at')
+            ->orderBy('publish_at')
+            ->get();
+
+        foreach ($digests as $digest) {
+            $at = Carbon::parse($digest->publish_at);
+            $result = $this->prepareDigestAhead($digest, $broadcast, $now);
+            $summary['picks'][] = $this->pickRow($at, $digest, 'digest', $result);
+        }
+    }
+
+    /**
+     * Один выбор наполнителя для сводки (её печатает broadcast:fill-feed). Время по Москве
+     * со сдвигом: сводку отдают и кнопки админки, а фронт местами режет часы из строки.
+     *
+     * @return array{at: string, by: string, rule: string, item_id: int, kind: string, event_id: int|null, venue_id: int|null}
+     */
+    private function pickRow(Carbon $at, TelegramChatBroadcastItem $item, string $by, string $rule): array
+    {
+        return [
+            'at' => $at->copy()->setTimezone(self::SCHEDULE_TZ)->toIso8601String(),
+            'by' => $by,
+            'rule' => $rule,
+            'item_id' => (int) $item->id,
+            'kind' => (string) $item->kind,
+            'event_id' => $item->event_id !== null ? (int) $item->event_id : null,
+            'venue_id' => $item->venue_id !== null ? (int) $item->venue_id : null,
+        ];
     }
 
     /**
