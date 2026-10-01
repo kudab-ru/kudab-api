@@ -274,6 +274,19 @@ class EventCaptionTest extends TestCase
         );
     }
 
+    public function test_running_exhibition_shows_its_closing_date(): void
+    {
+        $event = $this->makeEvent(
+            start: Carbon::parse('2026-09-01 11:00', 'Europe/Moscow'),
+            end: Carbon::parse('2026-10-03 00:00', 'Europe/Moscow'),
+        );
+
+        $lines = explode("\n", $this->builder()->build($event, 'basic', $this->asOf()));
+        $dateLine = collect($lines)->first(fn (string $line) => str_starts_with($line, '🗓'));
+
+        $this->assertSame('🗓️ до 3 окт', $dateLine);
+    }
+
     /** Строки тегов в посте нет: ключ пуст всегда, и строка убрана из шаблона. */
     public function test_tag_line_is_gone(): void
     {
@@ -367,6 +380,8 @@ class EventCaptionTest extends TestCase
         ?string $priceStatus = null,
         ?string $priceUrl = null,
         ?string $priceText = null,
+        ?Carbon $start = null,
+        ?Carbon $end = null,
     ): Event {
         $cityRow = City::query()->where('slug', 'voronezh')->first();
         if ($cityRow === null) {
@@ -402,8 +417,9 @@ class EventCaptionTest extends TestCase
         $event->city = $city;
         $event->address = $address;
         $event->venue_id = $venueId;
-        $event->start_time = Carbon::parse('2026-09-16 19:00', 'Europe/Moscow');
-        $event->start_date = '2026-09-16';
+        $event->start_time = $start ?? Carbon::parse('2026-09-16 19:00', 'Europe/Moscow');
+        $event->end_time = $end;
+        $event->start_date = $event->start_time->toDateString();
         $event->tg_description = $tgDescription;
         $event->description = $description;
         if ($priceStatus !== null) {

@@ -5,6 +5,7 @@ namespace App\Services\Telegram;
 use App\Models\Event;
 use App\Support\Telegram\CaptionTemplate;
 use App\Support\Telegram\VenueName;
+use Carbon\Carbon;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Log;
 
@@ -43,7 +44,7 @@ final class EventCaptionBuilder
     ): string {
         $body = $this->templateBody($templateCode);
 
-        return $this->assemble($this->raw($event), $body, $templateCode, $asOf, $itemId);
+        return $this->assemble($event, $body, $templateCode, $asOf, $itemId);
     }
 
     /**
@@ -51,7 +52,7 @@ final class EventCaptionBuilder
      */
     public function buildWithBody(Event $event, string $body, ?CarbonImmutable $asOf = null): string
     {
-        return $this->assemble($this->raw($event), $body, 'preview', $asOf);
+        return $this->assemble($event, $body, 'preview', $asOf);
     }
 
     /**
@@ -89,17 +90,15 @@ final class EventCaptionBuilder
         return $raw;
     }
 
-    /**
-     * @param  array<string, mixed>  $raw
-     */
     private function assemble(
-        array $raw,
+        Event $event,
         ?string $body,
         string $templateCode,
         ?CarbonImmutable $asOf,
         ?int $itemId = null,
     ): string {
-        $ctx = $this->context($raw, $asOf, $itemId);
+        $runsUntil = PostTiming::runningUntil($event, $asOf ?? CarbonImmutable::now(self::TZ));
+        $ctx = $this->context($this->raw($event), $asOf, $itemId, $runsUntil);
 
         if ($body === null || trim($body) === '') {
             // fallback-текста, как в боте, здесь нет: пустой шаблон — исключение
@@ -129,8 +128,12 @@ final class EventCaptionBuilder
      * @param  array<string, mixed>  $raw
      * @return array<string, string>
      */
-    private function context(array $raw, ?CarbonImmutable $asOf = null, ?int $itemId = null): array
-    {
+    private function context(
+        array $raw,
+        ?CarbonImmutable $asOf = null,
+        ?int $itemId = null,
+        ?Carbon $runsUntil = null,
+    ): array {
         $city = $this->firstNonEmpty($raw, ['city', 'city_name']);
         $addressRaw = trim((string) ($raw['address'] ?? ''));
         $address = $this->normalizeAddress($city, $addressRaw);
@@ -173,7 +176,7 @@ final class EventCaptionBuilder
             'address' => $locSafe,
             'place' => $locSafe,
             'location' => $locSafe,
-            'start_time' => $this->startHuman($raw, $asOf),
+            'start_time' => $runsUntil !== null ? $this->untilHuman($runsUntil) : $this->startHuman($raw, $asOf),
             'kind_emoji' => self::kindEmoji($raw),
             'price_label' => $this->priceLabel($raw, $canonicalUrl),
             'price_url' => trim((string) ($raw['price_url'] ?? '')),
@@ -234,7 +237,6 @@ final class EventCaptionBuilder
         return PostLink::utm($base.'/events/'.$eventId, PostLink::MEDIUM_EVENT, $itemId);
     }
 
-
     /**
      * @param  array<string, mixed>  $raw
      */
@@ -270,6 +272,14 @@ final class EventCaptionBuilder
         return $hasTime ? "{$date} {$time}" : $date;
     }
 
+    /** Всегда числом: «до сегодня» по-русски не говорят. */
+    private function untilHuman(Carbon $until): string
+    {
+        $day = $until->copy()->setTimezone(self::TZ);
+
+        return 'до '.$day->day.' '.self::MONTHS[$day->month];
+    }
+
     private function parseMsk(string $s): ?CarbonImmutable
     {
         $s = trim($s);
@@ -296,7 +306,6 @@ final class EventCaptionBuilder
             ? $dt->setTimezone(self::TZ)
             : CarbonImmutable::parse($s, self::TZ);
     }
-
 
     /**
      * @param  array<string, mixed>  $raw
@@ -369,7 +378,6 @@ final class EventCaptionBuilder
             default => $code,
         };
     }
-
 
     /**
      * «394036, Воронежская обл, г Воронеж, пр-кт Революции, д 46»
@@ -457,7 +465,6 @@ final class EventCaptionBuilder
 
         return implode(', ', array_slice($parts, -2));
     }
-
 
     /**
      * Пустая строка с 📍 заполняется местом. $loc уже экранирован (то же, что {address}),
