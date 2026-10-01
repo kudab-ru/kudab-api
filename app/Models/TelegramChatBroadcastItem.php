@@ -44,6 +44,7 @@ class TelegramChatBroadcastItem extends Model
         'edited_at',
         'edited_fields',
         'digest_meta',
+        'pick_meta',
         'message_id',
         'clicks',
         'clicks_at',
@@ -64,6 +65,7 @@ class TelegramChatBroadcastItem extends Model
         'edited_fields' => 'array',
         // Подборка: тема состава и текст модели (intro + hooks по event_id).
         'digest_meta' => 'array',
+        'pick_meta' => 'array',
         'clicks_at' => 'datetime',
         // разбивка по эмодзи: [{"emoji":"🔥","count":4}]
         'reactions_meta' => 'array',
