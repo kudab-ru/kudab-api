@@ -541,31 +541,35 @@ class TelegramChatBroadcastService
                     continue;
                 }
 
-                // событие без дня ждёт суточного окна расписания; портрету день назначаем заново,
-                // иначе он уйдёт в это же окно и собьёт свой недельный каденс
-                $item->publish_at = null;
-                // опоздавшая отправка «сейчас» становится обычной записью очереди, иначе её ждёт только кнопка
-                $item->is_off_grid = false;
+                DB::transaction(function () use ($broadcast, $item, $now) {
+                    TelegramChatBroadcast::lockFeed((int) $broadcast->id);
 
-                if ($item->kind === TelegramChatBroadcastItem::KIND_VENUE) {
-                    $slot = $this->slotPlanner->nextFreeSlot($broadcast, $now);
-                    $item->publish_at = $slot?->utc();
+                    // событие без дня ждёт суточного окна расписания; портрету день назначаем заново,
+                    // иначе он уйдёт в это же окно и собьёт свой недельный каденс
+                    $item->publish_at = null;
+                    // опоздавшая отправка «сейчас» становится обычной записью очереди, иначе её ждёт только кнопка
+                    $item->is_off_grid = false;
 
-                    // свободного слота может не быть (лента занята, поздние закрыты fill_lead_days): держим час
-                    // до наполнителя, иначе портрет без дня займёт суточное окно событийного поста
-                    if ($slot === null) {
-                        $item->planned_at = $now->copy()->addHour();
+                    if ($item->kind === TelegramChatBroadcastItem::KIND_VENUE) {
+                        $slot = $this->slotPlanner->nextFreeSlot($broadcast, $now);
+                        $item->publish_at = $slot?->utc();
 
-                        Log::info('broadcast.venue.no_free_slot_on_reschedule', [
-                            'broadcast_id' => $broadcast->id,
-                            'item_id' => $item->id,
-                            'held_until' => $item->planned_at->toIso8601String(),
-                            'why' => 'свободных слотов нет — портрет придержан до наполнителя',
-                        ]);
+                        // свободного слота может не быть (лента занята, поздние закрыты fill_lead_days): держим час
+                        // до наполнителя, иначе портрет без дня займёт суточное окно событийного поста
+                        if ($slot === null) {
+                            $item->planned_at = $now->copy()->addHour();
+
+                            Log::info('broadcast.venue.no_free_slot_on_reschedule', [
+                                'broadcast_id' => $broadcast->id,
+                                'item_id' => $item->id,
+                                'held_until' => $item->planned_at->toIso8601String(),
+                                'why' => 'свободных слотов нет — портрет придержан до наполнителя',
+                            ]);
+                        }
                     }
-                }
 
-                $item->save();
+                    $item->save();
+                });
 
                 continue;
             }
@@ -1911,6 +1915,16 @@ class TelegramChatBroadcastService
      * @return array{filled: int, days: int, no_candidate: int, feed_limit: int, picks: list<array<string, mixed>>}
      */
     public function fillFeedDays(TelegramChatBroadcast $broadcast, Carbon $now): array
+    {
+        return DB::transaction(function () use ($broadcast, $now) {
+            TelegramChatBroadcast::lockFeed((int) $broadcast->id);
+
+            return $this->fillLockedFeed($broadcast, $now);
+        });
+    }
+
+    /** @return array{filled: int, days: int, no_candidate: int, feed_limit: int, picks: list<array<string, mixed>>} */
+    private function fillLockedFeed(TelegramChatBroadcast $broadcast, Carbon $now): array
     {
         $chat = $broadcast->chat;
         $summary = ['filled' => 0, 'days' => 0, 'no_candidate' => 0, 'feed_limit' => 0, 'picks' => []];

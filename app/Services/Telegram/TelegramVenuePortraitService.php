@@ -101,6 +101,15 @@ class TelegramVenuePortraitService
      */
     public function enqueueDuePortrait(TelegramChatBroadcast $broadcast, Carbon $now, bool $dryRun = false): string
     {
+        return DB::transaction(function () use ($broadcast, $now, $dryRun) {
+            TelegramChatBroadcast::lockFeed((int) $broadcast->id);
+
+            return $this->enqueueLockedPortrait($broadcast, $now, $dryRun);
+        });
+    }
+
+    private function enqueueLockedPortrait(TelegramChatBroadcast $broadcast, Carbon $now, bool $dryRun): string
+    {
         if (! $this->venuePortraitDue($broadcast, $now)) {
             return self::PORTRAIT_NOT_DUE;
         }
@@ -536,6 +545,21 @@ class TelegramVenuePortraitService
         bool $force = false,
         bool $reviewGate = false,
         ?int $reviewerTelegramId = null,
+    ): TelegramChatBroadcastItem {
+        return DB::transaction(function () use ($broadcastId, $venueId, $now, $force, $reviewGate, $reviewerTelegramId) {
+            TelegramChatBroadcast::lockFeed($broadcastId);
+
+            return $this->enqueueLockedVenue($broadcastId, $venueId, $now, $force, $reviewGate, $reviewerTelegramId);
+        });
+    }
+
+    private function enqueueLockedVenue(
+        int $broadcastId,
+        int $venueId,
+        Carbon $now,
+        bool $force,
+        bool $reviewGate,
+        ?int $reviewerTelegramId,
     ): TelegramChatBroadcastItem {
         if (! $force && $this->openVenueItemsCount($broadcastId) > 0) {
             throw new RuntimeException('В очереди уже есть незакрытый портрет площадки — дождитесь отправки (защита от двойного поста). --force чтобы всё равно.');

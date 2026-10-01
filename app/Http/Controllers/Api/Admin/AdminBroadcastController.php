@@ -550,7 +550,7 @@ class AdminBroadcastController extends Controller
         }
 
         return DB::transaction(function () use ($broadcast, $event) {
-            TelegramChatBroadcast::query()->whereKey($broadcast->id)->lockForUpdate()->first();
+            TelegramChatBroadcast::lockFeed((int) $broadcast->id);
 
             $item = TelegramChatBroadcastItem::query()
                 ->where('broadcast_id', $broadcast->id)
@@ -655,9 +655,7 @@ class AdminBroadcastController extends Controller
         $publishAt = ! empty($data['publish_at']) ? $this->toUtc($data['publish_at']) : null;
 
         return DB::transaction(function () use ($broadcast, $data, $publishAt) {
-            // Тот же замок, что у постановки события: две вкладки иначе
-            // положат два поста в один слот.
-            TelegramChatBroadcast::query()->whereKey($broadcast->id)->lockForUpdate()->first();
+            TelegramChatBroadcast::lockFeed((int) $broadcast->id);
 
             $displaced = null;
             if ($publishAt !== null) {
@@ -735,15 +733,8 @@ class AdminBroadcastController extends Controller
             return response()->json(['ok' => false, 'error' => 'Событие не найдено.'], 404);
         }
 
-        // Всё, что читает и меняет ленту, — под одной блокировкой. Между
-        // поиском занявшего день и записью нового поста вторая вкладка
-        // успевала вклиниться: обе не находили занявшего, обе писали свой
-        // день, и на дне оказывалось два поста.
         return DB::transaction(function () use ($broadcast, $event, $data) {
-            TelegramChatBroadcast::query()
-                ->whereKey($broadcast->id)
-                ->lockForUpdate()
-                ->first();
+            TelegramChatBroadcast::lockFeed((int) $broadcast->id);
 
             // На (broadcast_id, event_id) стоит UNIQUE, поэтому вторую запись под
             // то же событие создать нельзя. А записи копятся: у канала Воронежа
@@ -876,6 +867,16 @@ class AdminBroadcastController extends Controller
 
         $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
 
+        return DB::transaction(function () use ($request, $data, $item) {
+            TelegramChatBroadcast::lockFeed((int) $item->broadcast_id);
+
+            return $this->updateItem($request, $data, $item->refresh());
+        });
+    }
+
+    /** @param  array<string, mixed>  $data */
+    private function updateItem(Request $request, array $data, TelegramChatBroadcastItem $item): JsonResponse
+    {
         if ($item->posted_at !== null) {
             return response()->json([
                 'ok' => false,
@@ -1096,22 +1097,26 @@ class AdminBroadcastController extends Controller
     public function remove(Request $request, int $itemId): JsonResponse
     {
         $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
-
-        if ($item->posted_at !== null) {
-            return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
-        }
-
         $reject = $request->boolean('reject');
 
-        $item->status = $reject
-            ? TelegramChatBroadcastItem::STATUS_REJECTED
-            : TelegramChatBroadcastItem::STATUS_SKIPPED;
-        $item->error_message = $reject ? 'отклонено в админке' : TelegramChatBroadcastItem::REMOVED_BY_HAND;
-        $item->claimed_at = null;
-        $item->claim_token = null;
-        $item->save();
+        return DB::transaction(function () use ($item, $reject) {
+            TelegramChatBroadcast::lockFeed((int) $item->broadcast_id);
+            $item->refresh();
 
-        return response()->json(['ok' => true, 'data' => ['rejected' => $reject]]);
+            if ($item->posted_at !== null) {
+                return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
+            }
+
+            $item->status = $reject
+                ? TelegramChatBroadcastItem::STATUS_REJECTED
+                : TelegramChatBroadcastItem::STATUS_SKIPPED;
+            $item->error_message = $reject ? 'отклонено в админке' : TelegramChatBroadcastItem::REMOVED_BY_HAND;
+            $item->claimed_at = null;
+            $item->claim_token = null;
+            $item->save();
+
+            return response()->json(['ok' => true, 'data' => ['rejected' => $reject]]);
+        });
     }
 
     /**
@@ -2377,6 +2382,7 @@ class AdminBroadcastController extends Controller
         }
 
         DB::beginTransaction();
+        TelegramChatBroadcast::lockFeed((int) $broadcast->id);
 
         // Сколько из снимаемого — те, что ждали свободного дня. Их человек
         // положил туда руками (вытеснив предложением), и молча выметать их
@@ -2457,6 +2463,7 @@ class AdminBroadcastController extends Controller
     private function diversify(TelegramChatBroadcast $broadcast): JsonResponse
     {
         DB::beginTransaction();
+        TelegramChatBroadcast::lockFeed((int) $broadcast->id);
 
         // Только записи С ДНЁМ и только БЛИЖАЙШЕЙ НЕДЕЛИ. Про неделю здесь
         // говорилось и раньше, но окна в запросе не было: кнопка гребла весь
@@ -2559,6 +2566,16 @@ class AdminBroadcastController extends Controller
 
         $broadcast = TelegramChatBroadcast::query()->findOrFail($broadcastId);
 
+        return DB::transaction(function () use ($broadcast, $data) {
+            TelegramChatBroadcast::lockFeed((int) $broadcast->id);
+
+            return $this->moveItem($broadcast, $data);
+        });
+    }
+
+    /** @param  array<string, mixed>  $data */
+    private function moveItem(TelegramChatBroadcast $broadcast, array $data): JsonResponse
+    {
         $item = TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
             ->findOrFail((int) $data['item_id']);
@@ -2954,7 +2971,11 @@ class AdminBroadcastController extends Controller
             return response()->json(['ok' => false, 'error' => 'Канал не найден.'], 404);
         }
 
-        $error = $this->restoreItem($item, $broadcast);
+        $error = DB::transaction(function () use ($item, $broadcast) {
+            TelegramChatBroadcast::lockFeed((int) $broadcast->id);
+
+            return $this->restoreItem($item->refresh(), $broadcast);
+        });
         if ($error !== null) {
             return response()->json(['ok' => false, 'error' => $error], 422);
         }
@@ -3059,24 +3080,30 @@ class AdminBroadcastController extends Controller
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
 
-        $items = TelegramChatBroadcastItem::query()
-            ->where('broadcast_id', $broadcast->id)
-            ->whereIn('id', $data['ids'])
-            ->whereNull('posted_at')
-            ->orderBy('id')
-            ->get();
+        [$restored, $failed] = DB::transaction(function () use ($broadcast, $data) {
+            TelegramChatBroadcast::lockFeed((int) $broadcast->id);
 
-        $restored = 0;
-        $failed = [];
-        foreach ($items as $item) {
-            $error = $this->restoreItem($item, $broadcast);
-            if ($error === null) {
-                $restored++;
+            $items = TelegramChatBroadcastItem::query()
+                ->where('broadcast_id', $broadcast->id)
+                ->whereIn('id', $data['ids'])
+                ->whereNull('posted_at')
+                ->orderBy('id')
+                ->get();
 
-                continue;
+            $restored = 0;
+            $failed = [];
+            foreach ($items as $item) {
+                $error = $this->restoreItem($item, $broadcast);
+                if ($error === null) {
+                    $restored++;
+
+                    continue;
+                }
+                $failed[] = ['id' => (int) $item->id, 'error' => $error];
             }
-            $failed[] = ['id' => (int) $item->id, 'error' => $error];
-        }
+
+            return [$restored, $failed];
+        });
 
         return response()->json(['data' => ['restored' => $restored, 'failed' => $failed]]);
     }

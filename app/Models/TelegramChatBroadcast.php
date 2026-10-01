@@ -34,6 +34,16 @@ class TelegramChatBroadcast extends Model
         return $this->belongsTo(TelegramChat::class, 'chat_id');
     }
 
+    /**
+     * Первая строка транзакции у всех, кто назначает или снимает день поста. Порядок везде один:
+     * сначала канал, потом записи. Иначе два пути положат два поста в один слот или
+     * заблокируют друг друга. Вне транзакции блокировка снимается сразу и ничего не держит.
+     */
+    public static function lockFeed(int $broadcastId): void
+    {
+        static::query()->whereKey($broadcastId)->lockForUpdate()->first();
+    }
+
     /** Больше четырёх постов в день канал-афиша не выдержит по содержанию. */
     public const MAX_SLOTS = 4;
 

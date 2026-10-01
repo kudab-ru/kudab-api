@@ -7,6 +7,7 @@ namespace App\Services\Telegram;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -36,7 +37,10 @@ final class BroadcastDigestBooking
             $summary['checked']++;
 
             try {
-                $this->bookOne($broadcast, $now, $dryRun, $summary);
+                DB::transaction(function () use ($broadcast, $now, $dryRun, &$summary) {
+                    TelegramChatBroadcast::lockFeed((int) $broadcast->id);
+                    $this->bookOne($broadcast, $now, $dryRun, $summary);
+                });
             } catch (\Throwable $e) {
                 // один канал не роняет прогон остальных
                 $summary['failed']++;
