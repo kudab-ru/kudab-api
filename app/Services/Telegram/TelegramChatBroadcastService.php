@@ -17,6 +17,7 @@ use App\Support\BroadcastSafety;
 use Carbon\Carbon;
 use DateTimeInterface;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -56,6 +57,12 @@ class TelegramChatBroadcastService
      * без явного приведения daily_10 открылся бы в 13:00 МСК.
      */
     private const SCHEDULE_TZ = 'Europe/Moscow';
+
+    /** Сколько ждать после открытия завтрашних слотов, прежде чем пустой слот считать сбоем: три прогона наполнителя. */
+    private const EVE_EMPTY_GRACE_MINUTES = 15;
+
+    /** С этого часа по Москве о пустом завтра пишет бот; плашка в админке видна раньше. */
+    private const EVE_ALARM_HOUR = 21;
 
     /**
      * Lease claim'а на публикацию (сек). ≫ времени поста (тик поллера 60с) —
@@ -494,6 +501,11 @@ class TelegramChatBroadcastService
             $idleNotice = $this->buildIdleNoticeTask($broadcast, $chat, $now);
             if ($idleNotice !== null) {
                 $tasks[] = $idleNotice;
+            }
+
+            $tomorrowNotice = $this->buildTomorrowNoticeTask($broadcast, $chat, $now);
+            if ($tomorrowNotice !== null) {
+                $tasks[] = $tomorrowNotice;
             }
 
             // тоже до поиска активной записи: подписчиков считаем и у канала без неё
@@ -2630,6 +2642,95 @@ class TelegramChatBroadcastService
                 (string) $broadcast->period,
             ),
         ];
+    }
+
+    /**
+     * Задача «на завтра не выбрано» или null. В `eve` пустой завтрашний слот после EVE_ALARM_HOUR
+     * значит, что наполнитель не отработал. Не чаще раза на дату: поллер тикает каждую минуту.
+     */
+    private function buildTomorrowNoticeTask(
+        TelegramChatBroadcast $broadcast,
+        TelegramChat $chat,
+        Carbon $now,
+    ): ?array {
+        $ownerTelegramId = $chat->owner?->telegram_id ?? null;
+        if (! $ownerTelegramId || $now->copy()->setTimezone(self::SCHEDULE_TZ)->hour < self::EVE_ALARM_HOUR) {
+            return null;
+        }
+
+        $empty = $this->emptySlotsTomorrow($broadcast, $now);
+        if ($empty === []) {
+            return null;
+        }
+
+        $day = $empty[0]->toDateString();
+        if (! Cache::add('broadcast:tomorrow-empty:'.$broadcast->id.':'.$day, 1, $now->copy()->addDays(2))) {
+            return null;
+        }
+
+        $hours = implode(', ', array_map(fn (Carbon $at) => $at->format('H:i'), $empty));
+
+        Log::warning('broadcast.tomorrow_empty', [
+            'broadcast_id' => $broadcast->id,
+            'telegram_chat_id' => $chat->telegram_chat_id,
+            'day' => $day,
+            'empty_slots' => $hours,
+        ]);
+
+        $where = $chat->username ? '@'.$chat->username : (string) $chat->telegram_chat_id;
+
+        return [
+            'type' => 'notice',
+            'kind' => 'tomorrow_empty',
+            'broadcast_id' => (int) $broadcast->id,
+            'telegram_chat_id' => (int) $chat->telegram_chat_id,
+            'notify_telegram_id' => (int) $ownerTelegramId,
+            'text' => sprintf(
+                "⚠️ Канал %s: посты на завтра, %s, не выбраны — пусто в %s\n\n"
+                .'Их выбирают сразу после последнего поста дня и потом каждые 5 минут. Обычно это значит, '
+                .'что стоит планировщик api или в городе не нашлось подходящих событий — посмотри ленту канала в админке.',
+                $where,
+                $empty[0]->format('d.m'),
+                $hours,
+            ),
+        ];
+    }
+
+    /**
+     * Пустые слоты завтрашнего дня в `eve`, когда выбор на завтра уже должен был пройти:
+     * с открытия слотов прошло EVE_EMPTY_GRACE_MINUTES. Админка показывает их плашкой, бот
+     * пишет владельцу (buildTomorrowNoticeTask). В `week` и у выключенного канала — пусто.
+     *
+     * @return list<Carbon> начало слота по Москве
+     */
+    public function emptySlotsTomorrow(TelegramChatBroadcast $broadcast, Carbon $now): array
+    {
+        if (! $broadcast->picksOnEve() || ! $broadcast->enabled || $broadcast->period === 'off') {
+            return [];
+        }
+
+        $day = $now->copy()->setTimezone(self::SCHEDULE_TZ)->addDay()->startOfDay();
+        $weekday = $this->periodWeekday($broadcast);
+        if ($weekday !== null && $day->dayOfWeek !== $weekday) {
+            return [];
+        }
+
+        $slots = $this->effectiveSlots($broadcast);
+        $opensAt = $this->slotPlanner->opensAt($broadcast, $day->copy()->setTime($slots[0], 0), 0);
+        if ($opensAt === null || $now->lt($opensAt->copy()->addMinutes(self::EVE_EMPTY_GRACE_MINUTES))) {
+            return [];
+        }
+
+        $taken = $this->takenSlots((int) $broadcast->id);
+        $empty = [];
+        foreach ($slots as $hour) {
+            $at = $day->copy()->setTime($hour, 0);
+            if (! array_key_exists($this->slotKey($at), $taken)) {
+                $empty[] = $at;
+            }
+        }
+
+        return $empty;
     }
 
     /**

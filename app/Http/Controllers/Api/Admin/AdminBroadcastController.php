@@ -4198,6 +4198,19 @@ class AdminBroadcastController extends Controller
             ];
         }
 
+        $emptyTomorrow = $this->broadcasts->emptySlotsTomorrow($b, Carbon::now());
+        if ($emptyTomorrow !== []) {
+            $out[] = [
+                'level' => 'danger',
+                'text' => sprintf(
+                    'Посты на завтра, %s, не выбраны — пусто в %s. Их выбирают сразу после последнего поста дня '
+                    .'и потом каждые 5 минут: скорее всего, стоит планировщик api или в городе нет подходящих событий.',
+                    $emptyTomorrow[0]->format('d.m'),
+                    implode(', ', array_map(fn (Carbon $at) => $at->format('H:i'), $emptyTomorrow)),
+                ),
+            ];
+        }
+
         if ($openEvents === 0) {
             $out[] = ['level' => 'warning', 'text' => 'Лента пуста — следующего поста нет.'];
         }

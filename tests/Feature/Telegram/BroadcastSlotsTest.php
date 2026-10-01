@@ -508,6 +508,43 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
+    /** @return array<string, array{list<int>, int}> */
+    public static function tomorrowAtNight(): array
+    {
+        return [
+            'завтра пусто' => [[], 1],
+            'завтра заполнено' => [[10, 15, 19], 0],
+        ];
+    }
+
+    #[DataProvider('tomorrowAtNight')]
+    public function test_owner_hears_once_that_tomorrow_was_not_picked(array $filledHours, int $notices): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 21:10', 'Europe/Moscow')->utc());
+
+        [$broadcast, $events] = $this->channelWithEvents(3);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10, 15, 19],
+            'pick_mode' => TelegramChatBroadcast::PICK_MODE_EVE,
+        ]);
+        $broadcast->save();
+
+        foreach ($filledHours as $i => $hour) {
+            $item = $this->makeItem($broadcast->id, $events[$i]->id, TelegramChatBroadcastItem::STATUS_PENDING);
+            $item->publish_at = Carbon::parse('2026-09-16', 'Europe/Moscow')->setTime($hour, 0)->utc();
+            $item->save();
+        }
+
+        $tasks = array_merge(
+            $this->service()->collectDueSingleRuns(now()),
+            $this->service()->collectDueSingleRuns(now()),
+        );
+
+        $this->assertCount($notices, array_filter($tasks, fn (array $task) => $task['type'] === 'notice'));
+
+        Carbon::setTestNow();
+    }
+
     /** Без настройки оба слота заполняются как раньше — на весь горизонт. */
     public function test_without_the_setting_both_slots_fill_the_horizon(): void
     {
