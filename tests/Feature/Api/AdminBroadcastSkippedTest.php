@@ -94,6 +94,8 @@ class AdminBroadcastSkippedTest extends TestCase
 
         $occupant = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_PENDING);
         $occupant->publish_at = $day;
+        // поставлен руками: автовыбор при вытеснении снимается, а не ждёт дня
+        $occupant->pick_meta = ['by' => 'hand'];
         $occupant->save();
 
         $moving = $this->makeItem($broadcast->id, TelegramChatBroadcastItem::STATUS_PENDING);

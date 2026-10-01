@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Telegram\PickReason;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -84,8 +85,11 @@ class TelegramChatBroadcastItem extends Model
 
     public const STATUS_SKIPPED = 'skipped'; // пропущено (дубль/устарело)
 
-    /** Причина у поста, снятого крестиком в админке: автоподбор это событие обратно не ставит. */
+    /** Причина у поста, снятого крестиком или заменой в админке: автоподбор это событие обратно не ставит. */
     public const REMOVED_BY_HAND = 'снято из ленты';
+
+    /** Ключ `pick_meta` с моментом снятия руками; см. removeByHand. */
+    public const PICK_REMOVED_AT = 'removed_at';
 
     public const STATUS_ERROR = 'error';   // была ошибка при отправке
 
@@ -137,6 +141,52 @@ class TelegramChatBroadcastItem extends Model
         if ($left === []) {
             $this->edited_at = null;
         }
+    }
+
+    /**
+     * Снять крестиком или заменой. Момент снятия держит остальные даты серии события
+     * (TelegramChatBroadcastService::REMOVED_SERIES_PAUSE_DAYS); updated_at для этого не годится,
+     * его сдвигает любая правка записи.
+     */
+    public function removeByHand(bool $reject = false): void
+    {
+        $this->status = $reject ? self::STATUS_REJECTED : self::STATUS_SKIPPED;
+        $this->error_message = $reject ? 'отклонено в админке' : self::REMOVED_BY_HAND;
+        $this->claimed_at = null;
+        $this->claim_token = null;
+        $this->pick_meta = [
+            ...(array) ($this->pick_meta ?? []),
+            self::PICK_REMOVED_AT => now()->setTimezone('Europe/Moscow')->toIso8601String(),
+        ];
+    }
+
+    /**
+     * Пост выбрал автомат, и человек его не правил. Такой, вытесненный заменой, снимается, а ручной ждёт
+     * свободного дня. Пост без `pick_meta` считаем автоматическим: ручная постановка тогда следа не оставляла.
+     */
+    public function pickedByMachine(): bool
+    {
+        return $this->kind === self::KIND_EVENT
+            && $this->edited_at === null
+            && in_array($this->pick_meta['by'] ?? null, [PickReason::BY_AUTO, null], true);
+    }
+
+    /** Запись осталась без дня и ждёт его: от этого момента причина «Ждало свободного дня с …». */
+    public function startWaiting(): void
+    {
+        $this->publish_at = null;
+        $this->pick_meta = [
+            ...(array) ($this->pick_meta ?? []),
+            'waiting_since' => now()->setTimezone('Europe/Moscow')->toIso8601String(),
+        ];
+    }
+
+    /** С какого момента запись ждёт дня. Поставленная сразу без дня ждёт с момента постановки. */
+    public function waitingSince(): ?string
+    {
+        $meta = (array) ($this->pick_meta ?? []);
+
+        return $meta['waiting_since'] ?? $meta['at'] ?? null;
     }
 
     public const KIND_VENUE = 'venue';  // портрет площадки (готовый caption)

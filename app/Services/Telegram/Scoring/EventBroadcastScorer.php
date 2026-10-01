@@ -8,7 +8,7 @@ use Carbon\Carbon;
 
 /**
  * Оценка события для автопостинга, без LLM. Жёсткие фильтры в выборке кандидатов
- * (TelegramChatBroadcastService::pickBestEventIdForChat). Без withCount('interests')
+ * (TelegramChatBroadcastService::rankCandidatesForChat). Без withCount('interests')
  * или with('interests') балл за интересы 0, без with('sources') images() идёт в базу
  * на каждое событие.
  */
@@ -55,64 +55,71 @@ class EventBroadcastScorer
     /** $at — момент поста: от его дня считается свежесть. */
     public function score(Event $e, Carbon $at): int
     {
-        $score = 0;
-
-        if ($this->hasPhoto($e)) {
-            $score += self::W_PHOTO;
-        }
-        if (! empty($e->house_fias_id)) {
-            $score += self::W_FIAS;
-        }
-        if (! empty($e->venue_id)) {
-            $score += self::W_VENUE;
-        }
-        if ($this->interestsCount($e) >= 1) {
-            $score += self::W_INTERESTS;
-        }
-        if ($e->tickets_status === 'available') {
-            $score += self::W_TICKETS;
-        }
-        if ($this->hasKnownPrice($e)) {
-            $score += self::W_PRICE;
-        }
-        if (mb_strlen((string) $e->description) >= self::MIN_DESCRIPTION_LEN) {
-            $score += self::W_DESCRIPTION;
-        }
-        if ($e->time_precision === 'datetime') {
-            $score += self::W_TIME_EXACT;
-        }
-
-        $score += $this->freshnessDelta($e, $at);
-
-        return $score;
+        return array_sum($this->breakdown($e, $at));
     }
 
     /**
-     * Максимальный балл. При равном обычное событие раньше идущего проката: начало у проката
-     * всегда раньше, и ничья уходила бы ему. Дальше — ближайшее начало, у проката закрытие.
+     * Балл по слагаемым, сумма — score(). Ноль у части карточки значит, что её нет: по этому
+     * PickReason пишет, чего в карточке не хватает.
      *
-     * @param  iterable<Event>  $events
+     * @return array{photo: int, address: int, venue: int, theme: int, tickets: int, price: int, description: int, time: int, freshness: int}
      */
+    public function breakdown(Event $e, Carbon $at): array
+    {
+        return [
+            'photo' => $this->hasPhoto($e) ? self::W_PHOTO : 0,
+            'address' => ! empty($e->house_fias_id) ? self::W_FIAS : 0,
+            'venue' => ! empty($e->venue_id) ? self::W_VENUE : 0,
+            'theme' => $this->interestsCount($e) >= 1 ? self::W_INTERESTS : 0,
+            'tickets' => $e->tickets_status === 'available' ? self::W_TICKETS : 0,
+            'price' => $this->hasKnownPrice($e) ? self::W_PRICE : 0,
+            'description' => mb_strlen((string) $e->description) >= self::MIN_DESCRIPTION_LEN ? self::W_DESCRIPTION : 0,
+            'time' => $e->time_precision === 'datetime' ? self::W_TIME_EXACT : 0,
+            'freshness' => $this->freshnessDelta($e, $at),
+        ];
+    }
+
+    /** @param  iterable<Event>  $events */
     public function pickBest(iterable $events, Carbon $at): ?Event
     {
-        $best = null;
-        $bestRank = null;
+        return $this->rank($events, $at)[0] ?? null;
+    }
 
+    /**
+     * От лучшего к худшему: балл, при равном обычное событие раньше идущего проката (начало у проката
+     * всегда раньше, и ничья уходила бы ему), дальше ближайшее начало, у проката закрытие.
+     * При полном равенстве меньший номер события: порядок строк с одним началом база не обещает.
+     *
+     * @param  iterable<Event>  $events
+     * @return list<Event>
+     */
+    public function rank(iterable $events, Carbon $at): array
+    {
+        $rows = [];
         foreach ($events as $e) {
             $closesAt = PostTiming::runningUntil($e, $at);
-            $rank = [
-                -$this->score($e, $at),
-                $closesAt === null ? 0 : 1,
-                ($closesAt ?? $e->start_time)?->getTimestamp() ?? PHP_INT_MAX,
+            $rows[] = [
+                [
+                    -$this->score($e, $at),
+                    $closesAt === null ? 0 : 1,
+                    ($closesAt ?? $e->start_time)?->getTimestamp() ?? PHP_INT_MAX,
+                    (int) $e->id,
+                ],
+                $e,
             ];
-
-            if ($bestRank === null || $rank < $bestRank) {
-                $best = $e;
-                $bestRank = $rank;
-            }
         }
 
-        return $best;
+        usort($rows, fn (array $a, array $b) => $a[0] <=> $b[0]);
+
+        return array_column($rows, 1);
+    }
+
+    /** Через сколько дней после дня поста закрывается прокат, который к посту уже идёт; иначе null. */
+    public function runDaysLeft(Event $e, Carbon $at): ?int
+    {
+        $closesAt = PostTiming::runningUntil($e, $at);
+
+        return $closesAt === null ? null : $this->daysAfter($at, $closesAt);
     }
 
     private function hasPhoto(Event $e): bool
@@ -149,9 +156,9 @@ class EventBroadcastScorer
             return self::FRESHNESS_FAR;
         }
 
-        $closesAt = PostTiming::runningUntil($e, $at);
-        if ($closesAt !== null) {
-            return $this->penalty($this->daysAfter($at, $closesAt), self::RUN_TIERS, self::RUN_FAR);
+        $daysLeft = $this->runDaysLeft($e, $at);
+        if ($daysLeft !== null) {
+            return $this->penalty($daysLeft, self::RUN_TIERS, self::RUN_FAR);
         }
 
         return $this->penalty($this->daysAfter($at, $e->start_time), self::FRESHNESS_TIERS, self::FRESHNESS_FAR);

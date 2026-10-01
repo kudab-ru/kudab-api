@@ -9,6 +9,7 @@ use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\Venue;
 use App\Services\Telegram\BroadcastSlotPlanner;
+use App\Services\Telegram\PickReason;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Support\BroadcastSafety;
 use Carbon\Carbon;
@@ -31,12 +32,8 @@ class FillFeedCommand extends Command
 
     protected $description = 'Заполнить свободные слоты ленты каналов (то же, что кнопка «Пересобрать», но только свободное)';
 
-    /** Как печатать правило выбора; коды — из сводки fillFeedDays. */
-    private const RULES = [
-        'best' => 'лучший балл среди кандидатов',
-        'theme_repeat' => 'лучший балл; тема как у соседнего поста — другой не нашлось',
-        'waiting' => 'ждал свободного дня',
-        'portrait_due' => 'подошёл срок портрета',
+    /** Что стало с составом подборки; коды — из prepareDigestAhead. */
+    private const DIGEST_OUTCOMES = [
         'composed' => 'собран состав',
         'text_requested' => 'собран состав, заказан текст',
         'ready' => 'состав уже готов',
@@ -207,16 +204,21 @@ class FillFeedCommand extends Command
 
         foreach ($picks as $pick) {
             $what = match ($pick['by']) {
-                'digest' => 'подборка',
-                'portrait' => sprintf('портрет площадки #%d «%s»', $pick['venue_id'], $venues[$pick['venue_id']] ?? '?'),
+                PickReason::BY_DIGEST => 'подборка',
+                PickReason::BY_PORTRAIT => sprintf('портрет площадки #%d «%s»', $pick['venue_id'], $venues[$pick['venue_id']] ?? '?'),
                 default => sprintf('событие #%d «%s»', $pick['event_id'], $titles[$pick['event_id']] ?? '?'),
             };
+
+            $reason = PickReason::forItem($pick['meta'] ?? null);
+            if ($pick['by'] === PickReason::BY_DIGEST) {
+                $reason .= ': '.(self::DIGEST_OUTCOMES[$pick['rule']] ?? $pick['rule']);
+            }
 
             $this->line(sprintf(
                 '    %s  %s — %s',
                 Carbon::parse($pick['at'])->format('d.m H:i'),
                 $what,
-                self::RULES[$pick['rule']] ?? $pick['rule'],
+                $reason,
             ));
         }
     }

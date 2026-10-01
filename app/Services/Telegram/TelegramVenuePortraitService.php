@@ -163,12 +163,14 @@ class TelegramVenuePortraitService
                     'review_reviewer_telegram_id' => (int) $reviewerTelegramId,
                     'review_deadline_at' => $deadline,
                     'publish_at' => $publishAt->copy()->utc(),
+                    'pick_meta' => PickReason::meta(PickReason::BY_PORTRAIT, 'portrait_due'),
                 ], captionAt: $publishAt);
             }
         } elseif (! $dryRun) {
             $this->persist($broadcast->id, $venue->id, $caption, $photoUrl, [
                 'status' => TelegramChatBroadcastItem::STATUS_PENDING,
                 'publish_at' => $publishAt->copy()->utc(),
+                'pick_meta' => PickReason::meta(PickReason::BY_PORTRAIT, 'portrait_due'),
             ], captionAt: $publishAt);
         }
 
@@ -589,6 +591,7 @@ class TelegramVenuePortraitService
         $attrs = [
             'status' => TelegramChatBroadcastItem::STATUS_PENDING,
             'publish_at' => $publishAt->copy()->utc(),
+            'pick_meta' => PickReason::meta(PickReason::BY_HAND, 'portrait'),
         ];
         if ($reviewGate) {
             if (! $reviewerTelegramId) {
@@ -599,6 +602,7 @@ class TelegramVenuePortraitService
                 'review_reviewer_telegram_id' => $reviewerTelegramId,
                 'review_deadline_at' => $now->copy()->addMinutes((int) config('services.bot.broadcast_review_timeout_minutes', 120)),
                 'publish_at' => $publishAt->copy()->utc(),
+                'pick_meta' => PickReason::meta(PickReason::BY_HAND, 'portrait'),
             ];
         }
 

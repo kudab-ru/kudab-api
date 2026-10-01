@@ -97,6 +97,7 @@ final class BroadcastDigestBooking
             $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
             $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
             $item->publish_at = $at->utc();
+            $item->pick_meta = PickReason::meta(PickReason::BY_DIGEST, 'schedule');
             // Рубрика слота: её возьмёт сборка состава, когда придёт время.
             if (! empty($slot['theme'])) {
                 $item->digest_meta = ['theme_wanted' => (string) $slot['theme']];

@@ -15,6 +15,7 @@ use App\Models\TelegramChatBroadcastItem;
 use App\Repositories\EventRepository;
 use App\Services\Telegram\BroadcastDigestComposer;
 use App\Services\Telegram\EventCaptionBuilder;
+use App\Services\Telegram\PickReason;
 use App\Services\Telegram\PostTiming;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Support\BroadcastSafety;
@@ -521,6 +522,47 @@ class AdminBroadcastController extends Controller
     }
 
     /**
+     * «Заменить»: три лучших на слот по правилу автоподбора, с причиной у каждого. Выбранное ставится
+     * обычной постановкой с днём слота. Предложения в клетке для замены не годятся: там другой отбор.
+     */
+    public function slotCandidates(Request $request, int $broadcastId): JsonResponse
+    {
+        $data = $request->validate(['at' => ['required', 'date']]);
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
+        $at = $this->toUtc($data['at']);
+        $meta = ['at' => $at->copy()->setTimezone('Europe/Moscow')->toIso8601String()];
+
+        if ($at->lte(Carbon::now())) {
+            return response()->json(['data' => [], 'meta' => $meta + ['reason' => 'слот уже прошёл']]);
+        }
+        if (! $broadcast->chat?->city_id) {
+            return response()->json(['data' => [], 'meta' => $meta + ['reason' => 'у канала не задан город']]);
+        }
+
+        $occupant = $this->dayOccupant((int) $broadcast->id, $at, bySlot: $broadcast->slots !== []);
+
+        $rows = array_map(function (array $c) {
+            /** @var Event $e */
+            $e = $c['event'];
+
+            return [
+                'event_id' => (int) $e->id,
+                'title' => (string) $e->title,
+                'venue' => VenueName::label($e->venue?->name) ?: null,
+                'start_time' => $e->start_time?->copy()->setTimezone('Europe/Moscow')->toIso8601String(),
+                'end_time' => $e->end_time?->copy()->setTimezone('Europe/Moscow')->toIso8601String(),
+                'theme' => $this->themePayload($e),
+                'cover' => $e->poster(),
+                'event_url' => $this->siteUrl().'/events/'.$e->id,
+                'reason' => PickReason::forCandidate($c['meta']),
+            ];
+        }, $this->broadcasts->slotCandidates($broadcast, $at, $occupant?->id));
+
+        return response()->json(['data' => $rows, 'meta' => $meta + ['occupant_item_id' => $occupant?->id]]);
+    }
+
+    /**
      * Опубликовать предложение вне очереди — одним действием.
      *
      * Иначе это два клика с промежуточным состоянием: «Поставить» (а при
@@ -584,6 +626,7 @@ class AdminBroadcastController extends Controller
             // занятость слота считалась бы по ЧАСУ нажатия, и кнопка,
             // нажатая в 19:05 при слоте 19:00, съедала бы вечерний пост.
             $item->is_off_grid = true;
+            $item->pick_meta = PickReason::meta(PickReason::BY_HAND, 'now');
             if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
                 $item->caption = null;
                 $item->caption_source = null;
@@ -652,68 +695,75 @@ class AdminBroadcastController extends Controller
 
         $publishAt = ! empty($data['publish_at']) ? $this->toUtc($data['publish_at']) : null;
 
-        return DB::transaction(function () use ($broadcast, $data, $publishAt) {
-            TelegramChatBroadcast::lockFeed((int) $broadcast->id);
+        $refusal = null;
+        try {
+            return DB::transaction(function () use ($broadcast, $data, $publishAt, &$refusal) {
+                TelegramChatBroadcast::lockFeed((int) $broadcast->id);
 
-            $displaced = null;
-            if ($publishAt !== null) {
-                $occupant = $this->dayOccupant(
-                    (int) $broadcast->id,
-                    $publishAt,
-                    bySlot: $broadcast->slots !== [],
-                );
+                $displaced = null;
+                if ($publishAt !== null) {
+                    $occupant = $this->dayOccupant(
+                        (int) $broadcast->id,
+                        $publishAt,
+                        bySlot: $broadcast->slots !== [],
+                    );
 
-                if ($occupant && $occupant->is_pinned) {
-                    return response()->json([
-                        'ok' => false,
-                        'error' => 'В этот день закреплён пост — сначала снимите закрепление.',
-                    ], 409);
+                    if ($occupant && $occupant->is_pinned) {
+                        return response()->json([
+                            'ok' => false,
+                            'error' => 'В этот день закреплён пост — сначала снимите закрепление.',
+                        ], 409);
+                    }
+
+                    if ($occupant) {
+                        $displaced = $this->displace($occupant, $broadcast);
+                    }
                 }
 
-                if ($occupant) {
-                    $occupant->publish_at = null;
-                    $occupant->save();
-                    $this->regenerateCaption($occupant, $broadcast);
-                    $displacedEvent = $occupant->event_id ? Event::query()->find($occupant->event_id) : null;
-                    $displaced = ['id' => $occupant->id, 'title' => $displacedEvent?->title];
+                try {
+                    $item = $this->venuePortraits->enqueueVenueManually(
+                        (int) $broadcast->id,
+                        (int) $data['venue_id'],
+                        Carbon::now(),
+                        // «Одно в полёте» среди портретов здесь не запрет: человек
+                        // ставит руками и осознанно, а повтор той же площадки уже
+                        // отклонён выше.
+                        force: true,
+                        reviewGate: (bool) config('services.bot.broadcast_review_gate'),
+                        reviewerTelegramId: $broadcast->chat?->owner?->telegram_id
+                            ? (int) $broadcast->chat->owner->telegram_id
+                            : null,
+                    );
+                } catch (\RuntimeException $e) {
+                    // исключением, а не ответом: ответ закрепил бы снятие поста, на чьё место портрет не встал
+                    $refusal = $e->getMessage();
+                    throw $e;
                 }
+
+                // День пришёл из интерфейса — ставим его. Не пришёл: постановка уже
+                // выбрала ближайший свободный слот сама.
+                if ($publishAt !== null) {
+                    $item->publish_at = $publishAt;
+                    $item->save();
+                    $this->buildCaptionFor($item, $broadcast);
+                }
+
+                return response()->json([
+                    'data' => $this->itemPayload(
+                        $item->fresh(),
+                        null,
+                        \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']),
+                    ),
+                    'meta' => ['displaced' => $displaced],
+                ]);
+            });
+        } catch (\RuntimeException $e) {
+            if ($refusal === null) {
+                throw $e;
             }
 
-            try {
-                $item = $this->venuePortraits->enqueueVenueManually(
-                    (int) $broadcast->id,
-                    (int) $data['venue_id'],
-                    Carbon::now(),
-                    // «Одно в полёте» среди портретов здесь не запрет: человек
-                    // ставит руками и осознанно, а повтор той же площадки уже
-                    // отклонён выше.
-                    force: true,
-                    reviewGate: (bool) config('services.bot.broadcast_review_gate'),
-                    reviewerTelegramId: $broadcast->chat?->owner?->telegram_id
-                        ? (int) $broadcast->chat->owner->telegram_id
-                        : null,
-                );
-            } catch (\RuntimeException $e) {
-                return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
-            }
-
-            // День пришёл из интерфейса — ставим его. Не пришёл: постановка уже
-            // выбрала ближайший свободный слот сама.
-            if ($publishAt !== null) {
-                $item->publish_at = $publishAt;
-                $item->save();
-                $this->buildCaptionFor($item, $broadcast);
-            }
-
-            return response()->json([
-                'data' => $this->itemPayload(
-                    $item->fresh(),
-                    null,
-                    \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']),
-                ),
-                'meta' => ['displaced' => $displaced],
-            ]);
-        });
+            return response()->json(['ok' => false, 'error' => $refusal], 422);
+        }
     }
 
     /** Поставить событие в ленту канала. */
@@ -775,12 +825,8 @@ class AdminBroadcastController extends Controller
                 ], 422);
             }
 
-            // Занятый день уступает место. Раньше сюда нельзя было поставить
-            // ничего: неделя собирается на все 7 дней, свободных слотов не
-            // остаётся, и любое перетаскивание карточки упиралось в отказ — со
-            // стороны это выглядело так, будто перетаскивание сломалось.
-            // Прежний пост не удаляем, а возвращаем в общую очередь: он остаётся
-            // в ленте без дня и его можно поставить обратно одним движением.
+            // Занятый день уступает место, иначе в собранную неделю нельзя было бы поставить ничего.
+            // Это и есть «Заменить»: выбранное ставится с днём занятого слота.
             $displaced = null;
             if ($publishAt !== null) {
                 $occupant = $this->dayOccupant(
@@ -798,16 +844,7 @@ class AdminBroadcastController extends Controller
                 }
 
                 if ($occupant) {
-                    $occupant->publish_at = null;
-                    $occupant->save();
-                    // Текст пересобираем: в шаблонном есть «сегодня»/«завтра»,
-                    // и без пересборки пост унёс бы их от прежнего дня.
-                    $this->regenerateCaption($occupant, $broadcast);
-                    $displacedEvent = $occupant->event_id ? Event::query()->find($occupant->event_id) : null;
-                    $displaced = [
-                        'id' => $occupant->id,
-                        'title' => $displacedEvent?->title,
-                    ];
+                    $displaced = $this->displace($occupant, $broadcast);
                 }
             }
 
@@ -825,6 +862,7 @@ class AdminBroadcastController extends Controller
                 $item->caption = null;
                 $item->caption_source = null;
             }
+            $item->pick_meta = PickReason::meta(PickReason::BY_HAND, $displaced !== null ? 'replace' : 'enqueue');
             $item->save();
 
             $this->fillCaption($item, $broadcast, $event);
@@ -1001,13 +1039,7 @@ class AdminBroadcastController extends Controller
                     }
 
                     if ($occupant) {
-                        // Как при постановке: прежний пост не удаляем, а
-                        // возвращаем в общую очередь без дня.
-                        $occupant->publish_at = null;
-                        $occupant->save();
-                        if ($broadcast) {
-                            $this->regenerateCaption($occupant, $broadcast);
-                        }
+                        $this->displace($occupant, $broadcast);
                     }
 
                     return null;
@@ -1018,9 +1050,17 @@ class AdminBroadcastController extends Controller
                 }
             }
 
+            $open = in_array($item->status, $this->openStatuses(), true);
             $before = optional($item->publish_at)?->toDateString();
             $wasAt = optional($item->publish_at)?->toIso8601String();
-            $item->publish_at = $newAt;
+            if ($newAt === null && $item->publish_at !== null && $open) {
+                $item->startWaiting();
+            } else {
+                $item->publish_at = $newAt;
+            }
+            if ($moved && $open) {
+                $item->pick_meta = PickReason::meta(PickReason::BY_HAND, 'day');
+            }
             $after = optional($item->publish_at)?->toDateString();
 
             // Перенос поста — тоже ручная правка, и до сих пор он не оставлял
@@ -1080,17 +1120,9 @@ class AdminBroadcastController extends Controller
     }
 
     /**
-     * Убрать пост из ленты.
-     *
-     * Два РАЗНЫХ действия, и путать их нельзя:
-     *   ?reject=0 (по умолчанию) — просто снять из очереди. Событие сразу
-     *     возвращается в пул предложений: человек переставляет ленту, а не
-     *     отказывается от события.
-     *   ?reject=1 — «больше не предлагать». Событие уходит из подбора на
-     *     30 дней (REJECTED_COOLDOWN_DAYS).
-     *
-     * Раньше «убрать» всегда ставило skipped и вместе с остыванием прятало
-     * событие на месяц — то есть переставить пост было нельзя, не потеряв его.
+     * Убрать пост из ленты крестиком: автоподбор событие не вернёт, а другие даты серии не возьмёт
+     * REMOVED_SERIES_PAUSE_DAYS (см. сервис); в предложениях оно остаётся. `?reject=1` — «больше не
+     * предлагать»: ещё и из предложений на REJECTED_COOLDOWN_DAYS. Открытый слот наполнитель занимает сразу.
      */
     public function remove(Request $request, int $itemId): JsonResponse
     {
@@ -1105,16 +1137,50 @@ class AdminBroadcastController extends Controller
                 return response()->json(['ok' => false, 'error' => 'Пост уже опубликован.'], 409);
             }
 
-            $item->status = $reject
-                ? TelegramChatBroadcastItem::STATUS_REJECTED
-                : TelegramChatBroadcastItem::STATUS_SKIPPED;
-            $item->error_message = $reject ? 'отклонено в админке' : TelegramChatBroadcastItem::REMOVED_BY_HAND;
-            $item->claimed_at = null;
-            $item->claim_token = null;
+            $item->removeByHand($reject);
             $item->save();
 
-            return response()->json(['ok' => true, 'data' => ['rejected' => $reject]]);
+            return response()->json(['ok' => true, 'data' => [
+                'rejected' => $reject,
+                'filled' => $this->refillFreedSlot($item),
+            ]]);
         });
+    }
+
+    /**
+     * Слот, освобождённый крестиком, наполнитель занимает сразу, как после пересборки. Запрет стенда
+     * и выключенный канал — как у broadcast:fill-feed: дозаполнение автоматическое, его не просили.
+     */
+    private function refillFreedSlot(TelegramChatBroadcastItem $item): int
+    {
+        if ($item->publish_at === null || $item->is_off_grid) {
+            return 0;
+        }
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat')->find($item->broadcast_id);
+        $chatId = $broadcast?->chat?->telegram_chat_id;
+        if (! $broadcast || ! $broadcast->enabled || $broadcast->period === 'off'
+            || ! $chatId || ! BroadcastSafety::postingAllowed((int) $chatId)) {
+            return 0;
+        }
+
+        $now = Carbon::now();
+        if (! app(\App\Services\Telegram\BroadcastSlotPlanner::class)->isOpen($broadcast, Carbon::parse($item->publish_at), $now)) {
+            return 0;
+        }
+
+        try {
+            return (int) ($this->broadcasts->fillFeedDays($broadcast, $now)['filled'] ?? 0);
+        } catch (\Throwable $e) {
+            // сбой дозаполнения не отменяет крестик: слот займёт ближайший прогон наполнителя
+            Log::warning('admin.broadcast.refill_failed', [
+                'item_id' => $item->id,
+                'broadcast_id' => $broadcast->id,
+                'error' => mb_substr($e->getMessage(), 0, 300),
+            ]);
+
+            return 0;
+        }
     }
 
     /**
@@ -1143,6 +1209,11 @@ class AdminBroadcastController extends Controller
 
         $item->status = TelegramChatBroadcastItem::STATUS_SKIPPED;
         $item->error_message = 'отказ отменён — событие снова в пуле';
+        // с отказом снимается и пауза серии
+        $item->pick_meta = array_diff_key(
+            (array) ($item->pick_meta ?? []),
+            [TelegramChatBroadcastItem::PICK_REMOVED_AT => true],
+        ) ?: null;
         $item->save();
 
         return response()->json(['ok' => true]);
@@ -1248,6 +1319,7 @@ class AdminBroadcastController extends Controller
         // минут, и форма открывалась поверх уже уехавшего. Срок ставит человек.
         $item->publish_at = null;
         $item->is_off_grid = true;
+        $item->pick_meta = PickReason::meta(PickReason::BY_HAND, 'digest');
         $item->save();
 
         $this->broadcasts->applyDigestDraft($item, $draft);
@@ -2372,6 +2444,18 @@ class AdminBroadcastController extends Controller
     {
         $broadcast = TelegramChatBroadcast::query()->findOrFail($broadcastId);
 
+        // в `eve` пересборка вернула бы те же посты: снятое ею подбор не исключает, а выбор без случайности
+        if ($broadcast->picksOnEve()) {
+            return response()->json([
+                'ok' => false,
+                'error' => $request->boolean('diversify')
+                    ? 'В режиме «накануне» кнопки «Разбавить» нет: предел площадок действует при самом выборе. '
+                        .'Не нравится пост — замените его.'
+                    : 'В режиме «накануне» пересборки нет: завтрашние посты выбираются сразу после последнего поста дня. '
+                        .'Не нравится пост — замените его или уберите крестиком.',
+            ], 409);
+        }
+
         // «Разбавить» — та же пересборка, но снимает только повторы одной
         // сети, оставляя первый пост каждой. Полная пересборка меняет всю
         // неделю, а человек жалуется на три квеста из семи, а не на неделю.
@@ -2653,30 +2737,35 @@ class AdminBroadcastController extends Controller
             }
         }
 
-        DB::transaction(function () use ($item, $occupant, $target, $from) {
+        $displaced = null;
+        DB::transaction(function () use ($item, $occupant, $target, $from, $broadcast, &$displaced) {
             $item->publish_at = $target;
             $item->is_off_grid = false; // см. update: день назначен рукой
             // Перетащили мышью — это ручная правка ровно в той же мере, что и
             // правка даты в карточке.
             $item->markEdited([TelegramChatBroadcastItem::EDIT_TIME]);
+            $item->pick_meta = PickReason::meta(PickReason::BY_HAND, 'move');
             $item->save();
 
-            if ($occupant) {
-                // Меняемся местами. Если у переносимого дня не было, соседу
-                // достаётся пустая дата — он вернётся в общую очередь.
-                // Соседа НЕ помечаем: его подвинули, он этого не просил.
+            if ($occupant && $from === null) {
+                // у переносимого дня не было: сосед вытеснен, как заменой
+                $displaced = $this->displace($occupant, $broadcast);
+            } elseif ($occupant) {
+                // Меняемся местами. Соседа как правленого НЕ помечаем: его подвинули, он этого не просил.
                 $occupant->publish_at = $from;
+                $occupant->pick_meta = PickReason::meta(PickReason::BY_HAND, 'move');
                 $occupant->save();
             }
         });
 
-        foreach (array_filter([$item, $occupant]) as $changed) {
+        foreach (array_filter([$item, $displaced === null ? $occupant : null]) as $changed) {
             $this->regenerateCaption($changed, $broadcast);
         }
 
         return response()->json(['ok' => true, 'data' => [
             'swapped' => $occupant !== null && $from !== null,
-            'displaced' => $occupant !== null && $from === null,
+            'displaced' => $displaced !== null,
+            'displaced_removed' => (bool) ($displaced['removed'] ?? false),
         ]]);
     }
 
@@ -3039,6 +3128,7 @@ class AdminBroadcastController extends Controller
         $item->claim_token = null;
         $item->publish_at = $slot?->copy()->utc();
         $item->is_off_grid = false;
+        $item->pick_meta = PickReason::meta(PickReason::BY_HAND, 'restore');
 
         // Подборку возвращают спустя дни, и её прежний состав к этому моменту
         // наполовину прошёл. Снимаем состав и текст целиком: на новом слоте она
@@ -3928,6 +4018,34 @@ class AdminBroadcastController extends Controller
     }
 
     /**
+     * Освободить слот под пост, поставленный руками. Автовыбор снимается как крестиком: иначе назавтра
+     * он первым занял бы слот как ждущий. Ручной пост ждёт свободного дня.
+     *
+     * @return array{id: int, title: string|null, removed: bool}
+     */
+    private function displace(TelegramChatBroadcastItem $occupant, ?TelegramChatBroadcast $broadcast): array
+    {
+        $removed = $occupant->pickedByMachine();
+        if ($removed) {
+            $occupant->removeByHand();
+            $occupant->save();
+        } else {
+            $occupant->startWaiting();
+            $occupant->save();
+            // в шаблонном тексте «сегодня» и «завтра» от прежнего дня
+            if ($broadcast) {
+                $this->regenerateCaption($occupant, $broadcast);
+            }
+        }
+
+        return [
+            'id' => (int) $occupant->id,
+            'title' => $occupant->event_id ? Event::query()->find($occupant->event_id)?->title : null,
+            'removed' => $removed,
+        ];
+    }
+
+    /**
      * Почему наполнитель вернул ноль — пустой пул или собственный кап ленты.
      *
      * Разница видна только по сводке наполнителя, а человеку у кнопки она
@@ -4329,6 +4447,7 @@ class AdminBroadcastController extends Controller
             'is_pinned' => (bool) $i->is_pinned,
             'publish_at' => optional($i->publish_at)?->toIso8601String(),
             'posted_at' => optional($i->posted_at)?->toIso8601String(),
+            'pick_reason' => PickReason::forItem($i->pick_meta),
             // Причина — и для ошибки, и для автоматического снятия: markSkipped
             // пишет её в то же поле, а человеку нужно понимать, почему поста
             // больше нет в ленте.

@@ -116,6 +116,24 @@ class BroadcastSlotPlanner
         return null;
     }
 
+    /** Открыт ли этот слот автоподбору сейчас: тот же отбор дней и слотов, что у наполнителя. */
+    public function isOpen(TelegramChatBroadcast $broadcast, Carbon $at, Carbon $now): bool
+    {
+        $day = $at->copy()->setTimezone(self::TZ)->startOfDay();
+        $offset = (int) $now->copy()->setTimezone(self::TZ)->startOfDay()->diffInDays($day, false);
+        if ($offset < 0 || $offset >= $this->autoPickDays($broadcast)) {
+            return false;
+        }
+
+        foreach ($this->openSlots($broadcast, $day, $now) as $slot) {
+            if ($this->key($slot) === $this->key($at)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /**
      * Слоты дня, которые автоподбору уже можно занимать, по Москве.
      *

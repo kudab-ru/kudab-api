@@ -9,6 +9,7 @@ use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\TelegramUser;
+use App\Services\Telegram\PickReason;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -1029,17 +1030,18 @@ class BroadcastSlotsTest extends TestCase
             ->count(), 'оба слота заняты, хотя тема одна на всех');
     }
 
-    /** @return array<string, array{int, bool}> */
-    public static function cardAtPostedConcertVenue(): array
+    /** @return array<string, array{string, int, bool}> */
+    public static function cardAtConcertVenue(): array
     {
         return [
-            'та же минута' => [0, false],
-            'на час позже' => [60, true],
+            'вышел, та же минута' => [TelegramChatBroadcastItem::STATUS_POSTED, 0, false],
+            'вышел, на час позже' => [TelegramChatBroadcastItem::STATUS_POSTED, 60, true],
+            'снят крестиком, та же минута' => [TelegramChatBroadcastItem::STATUS_SKIPPED, 0, false],
         ];
     }
 
-    #[DataProvider('cardAtPostedConcertVenue')]
-    public function test_second_card_of_a_posted_concert_is_not_picked(int $laterMinutes, bool $picked): void
+    #[DataProvider('cardAtConcertVenue')]
+    public function test_second_card_of_the_same_concert_is_not_picked(string $status, int $laterMinutes, bool $picked): void
     {
         Carbon::setTestNow(Carbon::parse('2026-09-15 06:00', 'Europe/Moscow')->utc());
 
@@ -1054,9 +1056,13 @@ class BroadcastSlotsTest extends TestCase
         $concert = $this->eventAt($city->id, 'Guf. Прощальный тур', $start);
         $concert->venue_id = $venue;
         $concert->save();
-        $posted = $this->makeItem($broadcast->id, $concert->id, TelegramChatBroadcastItem::STATUS_POSTED);
-        $posted->posted_at = now()->subDays(3);
-        $posted->save();
+        $first = $this->makeItem($broadcast->id, $concert->id, $status);
+        if ($status === TelegramChatBroadcastItem::STATUS_POSTED) {
+            $first->posted_at = now()->subDays(3);
+        } else {
+            $first->removeByHand();
+        }
+        $first->save();
 
         $card = $this->eventAt($city->id, 'Guf', $start->copy()->addMinutes($laterMinutes));
         $card->venue_id = $venue;
@@ -1616,6 +1622,148 @@ class BroadcastSlotsTest extends TestCase
         $this->service()->fillFeedDays($broadcast->fresh(), now());
 
         $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $item->fresh()->status);
+
+        Carbon::setTestNow();
+    }
+
+    public function test_replaced_auto_post_does_not_come_back_the_next_evening(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 19:05', 'Europe/Moscow')->utc());
+        $this->actAsSuperadmin();
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10],
+            'pick_mode' => TelegramChatBroadcast::PICK_MODE_EVE,
+        ]);
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $replaced = $this->eventAt($city->id, 'Заменённый', Carbon::parse('2026-09-18 19:00', 'Europe/Moscow')->utc(), rich: true);
+        $chosen = $this->eventAt($city->id, 'Выбранный рукой', Carbon::parse('2026-09-20 19:00', 'Europe/Moscow')->utc());
+        $revived = $this->eventAt($city->id, 'Снятый пересборкой', Carbon::parse('2026-09-19 19:00', 'Europe/Moscow')->utc(), rich: true);
+        $old = $this->makeItem($broadcast->id, $revived->id, TelegramChatBroadcastItem::STATUS_SKIPPED);
+        $old->error_message = 'снято при пересборке ленты';
+        // след прошлого выбора: при слиянии он остался бы причиной нового
+        $old->pick_meta = ['by' => PickReason::BY_HAND, 'moved' => ['by' => 'sweeper', 'at' => '2026-09-10T12:00:00+03:00']];
+        $old->save();
+
+        $slot = Carbon::parse('2026-09-16 10:00', 'Europe/Moscow')->utc();
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+        $auto = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->where('publish_at', $slot)->firstOrFail();
+        $this->assertSame($replaced->id, $auto->event_id);
+
+        $this->postJson("/api/admin/broadcast/channels/{$broadcast->id}/enqueue", [
+            'event_id' => $chosen->id,
+            'publish_at' => $slot->copy()->setTimezone('Europe/Moscow')->format('Y-m-d\TH:i:sP'),
+        ])->assertOk();
+
+        Carbon::setTestNow(Carbon::parse('2026-09-16 19:05', 'Europe/Moscow')->utc());
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $next = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('publish_at', Carbon::parse('2026-09-17 10:00', 'Europe/Moscow')->utc())
+            ->firstOrFail();
+        $this->assertSame($old->id, $next->id, 'слот занял следующий по баллу, а не заменённый');
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $auto->fresh()->status);
+        $this->assertSame(PickReason::BY_AUTO, $next->pick_meta['by'] ?? null);
+        $this->assertArrayNotHasKey('moved', $next->pick_meta);
+
+        Carbon::setTestNow();
+    }
+
+    /** @return array<string, array{int, bool}> */
+    public static function seriesAfterRemoval(): array
+    {
+        return [
+            'через 17 дней' => [17, false],
+            'через 19 дней' => [19, true],
+        ];
+    }
+
+    #[DataProvider('seriesAfterRemoval')]
+    public function test_other_dates_of_a_removed_series_wait_their_pause(int $daysLater, bool $picked): void
+    {
+        $removedAt = Carbon::parse('2026-09-15 09:00', 'Europe/Moscow');
+        Carbon::setTestNow($removedAt->copy()->utc());
+        $this->actAsSuperadmin();
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, ['slots' => [10], 'horizon_days' => 2]);
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $removed = $this->eventAt($city->id, 'Спектакль', Carbon::parse('2026-09-18 19:00', 'Europe/Moscow')->utc());
+        $otherDate = $this->eventAt($city->id, 'Спектакль', Carbon::parse('2026-10-06 19:00', 'Europe/Moscow')->utc());
+        $group = (int) DB::table('event_groups')->insertGetId([
+            'community_id' => $removed->community_id,
+            'group_key' => 'show-'.$removed->id,
+            'title_norm' => 'спектакль',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        foreach ([$removed, $otherDate] as $event) {
+            $event->event_group_id = $group;
+            $event->save();
+        }
+
+        $item = $this->makeItem($broadcast->id, $removed->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = Carbon::parse('2026-09-16 10:00', 'Europe/Moscow')->utc();
+        $item->save();
+        $this->deleteJson("/api/admin/broadcast/items/{$item->id}")->assertOk();
+
+        Carbon::setTestNow($removedAt->copy()->addDays($daysLater)->utc());
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame($picked, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('event_id', $otherDate->id)
+            ->exists());
+
+        Carbon::setTestNow();
+    }
+
+    public function test_replacement_offers_what_the_filler_would_pick_next(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 09:00', 'Europe/Moscow')->utc());
+        $this->actAsSuperadmin();
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, ['slots' => [10], 'horizon_days' => 2]);
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $slot = Carbon::parse('2026-09-16 10:00', 'Europe/Moscow');
+
+        $inSlot = $this->eventAt($city->id, 'Спектакль', $slot->copy()->addDay()->setTime(19, 0)->utc(), rich: true);
+        $sameShow = $this->eventAt($city->id, 'Спектакль', $slot->copy()->addDays(2)->setTime(19, 0)->utc(), rich: true);
+        $group = (int) DB::table('event_groups')->insertGetId([
+            'community_id' => $inSlot->community_id,
+            'group_key' => 'show-'.$inSlot->id,
+            'title_norm' => 'спектакль',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        foreach ([$inSlot, $sameShow] as $event) {
+            $event->event_group_id = $group;
+            $event->save();
+        }
+        $occupant = $this->makeItem($broadcast->id, $inSlot->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $occupant->publish_at = $slot->copy()->utc();
+        $occupant->save();
+
+        // по дате порядок был бы «Бедная ближняя», «Полная», «Полная дальняя»
+        $this->eventAt($city->id, 'Полная', $slot->copy()->addDay()->setTime(18, 0)->utc(), rich: true);
+        $this->eventAt($city->id, 'Полная дальняя', $slot->copy()->addDays(4)->setTime(19, 0)->utc(), rich: true);
+        $this->eventAt($city->id, 'Бедная ближняя', $slot->copy()->setTime(18, 0)->utc());
+
+        $rows = $this->getJson("/api/admin/broadcast/channels/{$broadcast->id}/slot-candidates?at="
+            .urlencode($slot->format('Y-m-d\TH:i:sP')))->assertOk()->json('data');
+
+        $this->assertSame(['Полная', 'Полная дальняя', 'Бедная ближняя'], array_column($rows, 'title'),
+            'порядок оценщика; стоящий в слоте и другая дата его серии в варианты не попадают');
+        $this->assertCount(3, array_filter(array_column($rows, 'reason')));
 
         Carbon::setTestNow();
     }

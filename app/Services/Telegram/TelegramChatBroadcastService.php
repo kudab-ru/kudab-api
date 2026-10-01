@@ -35,10 +35,13 @@ class TelegramChatBroadcastService
     private const MIN_LEAD_HOURS = PostTiming::MIN_LEAD_HOURS;
 
     /**
-     * Сколько дней не предлагать снова отклонённое (skipped не входит, см. pickBestEventIdForChat).
+     * Сколько дней не предлагать снова отклонённое (skipped не входит, см. channelCandidates).
      * Тот же срок читают AdminBroadcastController и BroadcastDigestComposer.
      */
     public const REJECTED_COOLDOWN_DAYS = 30;
+
+    /** Сколько дней после снятия руками автоподбор не берёт другие даты той же серии; само событие не вернётся никогда. */
+    private const REMOVED_SERIES_PAUSE_DAYS = 18;
 
     /** Окно cross-time анти-дубля: не повторять тот же заголовок в канале N дней. */
     private const CROSS_TIME_WINDOW_DAYS = 14;
@@ -184,6 +187,14 @@ class TelegramChatBroadcastService
             $eventId,
             $plannedAt,
         );
+
+        if ($item->pick_meta === null && in_array($item->status, [
+            TelegramChatBroadcastItem::STATUS_PENDING,
+            TelegramChatBroadcastItem::STATUS_PLANNED,
+        ], true)) {
+            $item->pick_meta = PickReason::meta(PickReason::BY_HAND, 'enqueue');
+            $item->save();
+        }
 
         $this->ensureEventCaption($item, $broadcast);
 
@@ -559,7 +570,7 @@ class TelegramChatBroadcastService
 
                     // событие без дня ждёт суточного окна расписания; портрету день назначаем заново,
                     // иначе он уйдёт в это же окно и собьёт свой недельный каденс
-                    $item->publish_at = null;
+                    $item->startWaiting();
                     // опоздавшая отправка «сейчас» становится обычной записью очереди, иначе её ждёт только кнопка
                     $item->is_off_grid = false;
 
@@ -822,14 +833,15 @@ class TelegramChatBroadcastService
                 continue;
             }
 
-            $eventId = $this->pickBestEventIdForChat(
+            $best = $this->rankCandidatesForChat(
                 $chat,
                 $broadcast->id,
                 // без notBefore подбор не проверяет срок, и upcoming() пустит начавшееся час назад
                 notBefore: $now,
                 repeatCap: $this->venueRepeatCap($broadcast),
-            );
-            if (! $eventId) {
+                limit: 1,
+            )[0] ?? null;
+            if ($best === null) {
                 $summary['no_candidate']++;
                 // Канал «созрел», но нет подходящего события — голодание (мониторим).
                 Log::warning('broadcast.enqueue.no_candidate', [
@@ -841,7 +853,9 @@ class TelegramChatBroadcastService
 
                 continue;
             }
+            $eventId = (int) $best['event']->id;
 
+            $item = null;
             if ((bool) config('services.bot.broadcast_review_gate')) {
                 $reviewerTelegramId = $chat->owner?->telegram_id;
                 if (! $reviewerTelegramId) {
@@ -858,7 +872,7 @@ class TelegramChatBroadcastService
                     $deadline = $now->copy()->addMinutes(
                         (int) config('services.bot.broadcast_review_timeout_minutes', 120),
                     );
-                    $this->broadcastItemRepository->enqueueForReview(
+                    $item = $this->broadcastItemRepository->enqueueForReview(
                         $broadcast->id,
                         $eventId,
                         (int) $reviewerTelegramId,
@@ -877,6 +891,16 @@ class TelegramChatBroadcastService
 
                 // текст сразу, чтобы админке было что показать и править до отправки
                 $this->ensureEventCaption($item, $broadcast);
+            }
+
+            // закрытую строку того же события постановка возвращает как есть: в ленту она не встала
+            if ($item !== null && in_array($item->status, [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+            ], true)) {
+                $item->pick_meta = $this->autoPickMeta($best, $now);
+                $item->save();
             }
 
             $summary['enqueued']++;
@@ -1495,38 +1519,28 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * Автономный подбор события для канала (без проверки прав и markPreview).
-     *
-     * Отличие от pickSingleEventId (ручной флоу): фильтр города через
-     * community.city_id == chat.city_id (надёжнее строкового LOWER(city)=name) и
-     * без user-контекста.
+     * Кандидаты автоподбора по порядку: первый — выбор, следующие — варианты «Заменить». У каждого
+     * разбор балла и мягкие слои, которые он нарушает. Мягкий слой уступает, только когда без
+     * нарушения кандидатов нет: порядок — сперва нарушения по старшинству слоёв, затем оценщик.
      *
      * @param  int[]  $excludeEventIds
+     * @param  int|null  $replacedItemId  заменяемый пост: его заголовок и площадка не мешают, серия и двойники заняты
+     * @return list<array{event: Event, score: array<string, int>, dropped: list<string>}>
      */
-    private function pickBestEventIdForChat(
+    private function rankCandidatesForChat(
         TelegramChat $chat,
         int $broadcastId,
         array $excludeEventIds = [],
         ?Carbon $notBefore = null,
         ?int $repeatCap = null,
         ?int $avoidInterestId = null,
-    ): ?int {
+        ?int $replacedItemId = null,
+        int $limit = 4,
+    ): array {
         $query = $this->channelCandidates($chat, $broadcastId);
 
         if (! empty($excludeEventIds)) {
             $query->whereNotIn('id', array_values(array_unique(array_map('intval', $excludeEventIds))));
-        }
-
-        // тема соседнего слота, только по первичному интересу (rank = 0): вторичных у события
-        // пачка, и «та же тема» совпала бы почти у всех
-        if ($avoidInterestId !== null) {
-            $query->whereNotExists(function ($q) use ($avoidInterestId) {
-                $q->selectRaw('1')
-                    ->from('event_interest as ei_theme')
-                    ->whereColumn('ei_theme.event_id', 'events.id')
-                    ->where('ei_theme.rank', 0)
-                    ->where('ei_theme.interest_id', $avoidInterestId);
-            });
         }
 
         // горизонт от дня слота: от «сейчас» окно у дальних слотов схлопывается
@@ -1545,53 +1559,105 @@ class TelegramChatBroadcastService
         }
 
         // Кандидатный пул — ближайшие, кап; качество выбираем скорингом в PHP.
-        $candidates = $query
-            ->with(['sources:id,event_id,images,published_at', 'venue:id,name'])
-            ->withCount('interests')
-            ->orderBy('start_time')
-            ->limit(self::SCORING_CANDIDATE_LIMIT)
-            ->get();
+        $candidates = DB::transaction(function () use ($query) {
+            // планировщик сильно переоценивает этот запрос и компилирует его секунды, а выполняется он за доли секунды
+            DB::statement('SET LOCAL jit = off');
+
+            return $query
+                ->with(['sources:id,event_id,images,published_at', 'venue:id,name'])
+                ->withCount('interests')
+                ->orderBy('start_time')
+                ->orderBy('id')
+                ->limit(self::SCORING_CANDIDATE_LIMIT)
+                ->get();
+        });
 
         if ($candidates->isEmpty()) {
-            return null;
+            return [];
         }
 
-        // Layer 3: не повторять заголовок за окно (один title в разные даты — разные группы).
-        // Мягкий: если свежих нет, берём из общего пула
-        $recentTitles = $this->recentlyPostedTitleNorms(
+        // тема соседнего слота, только по первичному интересу (rank = 0): вторичных у события
+        // пачка, и «та же тема» совпала бы почти у всех
+        $sameTheme = $avoidInterestId === null ? [] : array_flip(DB::table('event_interest')
+            ->whereIn('event_id', $candidates->modelKeys())
+            ->where('rank', 0)
+            ->where('interest_id', $avoidInterestId)
+            ->pluck('event_id')
+            ->map(fn ($id) => (int) $id)
+            ->all());
+
+        // один заголовок в разные даты — разные группы, проверка серии его не ловит
+        $recentTitles = array_flip($this->recentlyPostedTitleNorms(
             $broadcastId,
             now()->subDays(self::CROSS_TIME_WINDOW_DAYS),
-        );
+            $replacedItemId,
+        ));
 
-        $pool = $candidates;
-        if (! empty($recentTitles)) {
-            $fresh = $candidates->reject(
-                fn (Event $e) => in_array($this->normalizeTitle($e->title), $recentTitles, true),
-            );
-            if ($fresh->isNotEmpty()) {
-                $pool = $fresh;
-            }
+        // не больше repeatCap постов на площадку и сеть, повтор заголовков этого не ловит
+        [$venueUse, $chainUse] = $this->venueUsageInFeed($broadcastId, $replacedItemId);
+        $cap = $repeatCap ?? 1;
+
+        $tiers = [];
+        foreach ($candidates as $e) {
+            $chain = $this->venueChainKey((string) ($e->venue?->name ?? ''));
+            $dropped = array_keys(array_filter([
+                PickReason::LAYER_THEME => isset($sameTheme[(int) $e->id]),
+                PickReason::LAYER_TITLE => isset($recentTitles[$this->normalizeTitle($e->title)]),
+                PickReason::LAYER_VENUE => ($e->venue_id !== null && ($venueUse[(int) $e->venue_id] ?? 0) >= $cap)
+                    || ($chain !== '' && ($chainUse[$chain] ?? 0) >= $cap),
+            ]));
+            $tiers[implode(',', $dropped)][] = $e;
         }
+        uksort($tiers, fn (string $a, string $b) => $this->tierRank($a) <=> $this->tierRank($b));
 
-        // Layer 4: не больше repeatCap постов на площадку и сеть, повтор заголовков этого не ловит.
-        // Мягкий, как слой выше
-        [$venueUse, $chainUse] = $this->venueUsageInFeed($broadcastId);
-        if ($venueUse !== [] || $chainUse !== []) {
-            $cap = $repeatCap ?? 1;
-            $diverse = $pool->reject(function (Event $e) use ($venueUse, $chainUse, $cap) {
-                if ($e->venue_id !== null && ($venueUse[(int) $e->venue_id] ?? 0) >= $cap) {
-                    return true;
+        $at = $notBefore ?? Carbon::now();
+        $ranked = [];
+        foreach ($tiers as $tier => $events) {
+            foreach ($this->scorer->rank($events, $at) as $e) {
+                $ranked[] = [
+                    'event' => $e,
+                    'score' => $this->scorer->breakdown($e, $at),
+                    'dropped' => $tier === '' ? [] : explode(',', $tier),
+                ];
+                if (count($ranked) >= $limit) {
+                    return $ranked;
                 }
-                $chain = $this->venueChainKey((string) ($e->venue?->name ?? ''));
-
-                return $chain !== '' && ($chainUse[$chain] ?? 0) >= $cap;
-            });
-            if ($diverse->isNotEmpty()) {
-                $pool = $diverse;
             }
         }
 
-        return $this->scorer->pickBest($pool, $notBefore ?? Carbon::now())?->id;
+        return $ranked;
+    }
+
+    /** Ключ ступени для сравнения: нарушенный старший слой хуже любого набора младших. */
+    private function tierRank(string $tier): string
+    {
+        $dropped = $tier === '' ? [] : explode(',', $tier);
+
+        return implode('', array_map(
+            fn (string $layer) => in_array($layer, $dropped, true) ? '1' : '0',
+            [PickReason::LAYER_THEME, PickReason::LAYER_TITLE, PickReason::LAYER_VENUE],
+        ));
+    }
+
+    /**
+     * pick_meta выбора автоподбора; у вариантов «Заменить» та же форма.
+     *
+     * @param  array{event: Event, score: array<string, int>, dropped: list<string>}  $candidate
+     * @return array<string, mixed>
+     */
+    private function autoPickMeta(array $candidate, Carbon $publishAt): array
+    {
+        $daysLeft = $this->scorer->runDaysLeft($candidate['event'], $publishAt);
+
+        return PickReason::meta(
+            PickReason::BY_AUTO,
+            in_array(PickReason::LAYER_THEME, $candidate['dropped'], true) ? 'theme_repeat' : 'best',
+            array_filter([
+                'score' => $candidate['score'],
+                'dropped' => $candidate['dropped'],
+                'closes_in' => $daysLeft,
+            ], fn ($v) => $v !== null && $v !== []),
+        );
     }
 
     /**
@@ -1614,6 +1680,7 @@ class TelegramChatBroadcastService
 
         // отклонённое — только на REJECTED_COOLDOWN_DAYS, иначе каждый отказ навсегда отъедал бы пул
         $rejectedSince = Carbon::now()->subDays(self::REJECTED_COOLDOWN_DAYS);
+        $removedSince = Carbon::now()->subDays(self::REMOVED_SERIES_PAUSE_DAYS);
 
         return Event::query()
             ->active()
@@ -1634,6 +1701,25 @@ class TelegramChatBroadcastService
                 $q->where('broadcast_id', $broadcastId)
                     ->where('status', TelegramChatBroadcastItem::STATUS_SKIPPED)
                     ->where('error_message', TelegramChatBroadcastItem::REMOVED_BY_HAND);
+            })
+            // остальные даты серии снятого руками события ждут REMOVED_SERIES_PAUSE_DAYS
+            ->where(function ($q) use ($broadcastId, $removedSince) {
+                $q->whereNull('events.event_group_id')
+                    ->orWhereNotExists(function ($sub) use ($broadcastId, $removedSince) {
+                        $sub->selectRaw('1')
+                            ->from('telegram.chat_broadcast_items as r')
+                            ->join('events as e_removed', 'e_removed.id', '=', 'r.event_id')
+                            ->where('r.broadcast_id', $broadcastId)
+                            ->whereIn('r.status', [
+                                TelegramChatBroadcastItem::STATUS_SKIPPED,
+                                TelegramChatBroadcastItem::STATUS_REJECTED,
+                            ])
+                            ->whereRaw(
+                                "(r.pick_meta->>'".TelegramChatBroadcastItem::PICK_REMOVED_AT."')::timestamptz >= ?::timestamptz",
+                                [$removedSince->toIso8601String()],
+                            )
+                            ->whereColumn('e_removed.event_group_id', 'events.event_group_id');
+                    });
             })
             ->whereHas('community', function ($q) use ($chat) {
                 $q->where('city_id', $chat->city_id);
@@ -1666,16 +1752,24 @@ class TelegramChatBroadcastService
             })
             // Один концерт разные источники заводят в разные серии, и проверка серии выше его не ловит.
             // Удалённые события тоже в счёт: вышедший пост про слитую карточку держит и её двойника.
-            ->where(function ($q) use ($broadcastId, $usedStatuses, $exceptItemId) {
+            ->where(function ($q) use ($broadcastId, $usedStatuses, $exceptItemId, $rejectedSince) {
                 $q->whereNull('events.venue_id')
                     ->orWhereNull('events.start_time')
-                    ->orWhereNotExists(function ($sub) use ($broadcastId, $usedStatuses, $exceptItemId) {
+                    ->orWhereNotExists(function ($sub) use ($broadcastId, $usedStatuses, $exceptItemId, $rejectedSince) {
                         $sub->selectRaw('1')
                             ->from('telegram.chat_broadcast_items as i')
                             ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
                             ->join('events as e3', 'e3.id', '=', 'l.event_id')
                             ->where('i.broadcast_id', $broadcastId)
-                            ->whereIn('i.status', $usedStatuses)
+                            // снятое руками и отклонённое держат двойника столько же, сколько себя:
+                            // иначе убранный концерт вернулся бы другой карточкой
+                            ->where(function ($w) use ($usedStatuses, $rejectedSince) {
+                                $w->whereIn('i.status', $usedStatuses)
+                                    ->orWhere(fn ($x) => $x->where('i.status', TelegramChatBroadcastItem::STATUS_SKIPPED)
+                                        ->where('i.error_message', TelegramChatBroadcastItem::REMOVED_BY_HAND))
+                                    ->orWhere(fn ($x) => $x->where('i.status', TelegramChatBroadcastItem::STATUS_REJECTED)
+                                        ->where('i.updated_at', '>=', $rejectedSince));
+                            })
                             ->when($exceptItemId !== null, fn ($w) => $w->where('i.id', '<>', $exceptItemId))
                             ->whereColumn('e3.venue_id', 'events.venue_id')
                             ->whereRaw("date_trunc('minute', e3.start_time) = date_trunc('minute', events.start_time)");
@@ -1689,7 +1783,7 @@ class TelegramChatBroadcastService
      *
      * @return array{0: array<int, int>, 1: array<string, int>}
      */
-    private function venueUsageInFeed(int $broadcastId): array
+    private function venueUsageInFeed(int $broadcastId, ?int $exceptItemId = null): array
     {
         $rows = TelegramChatBroadcastItem::query()
             ->from('telegram.chat_broadcast_items as i')
@@ -1700,6 +1794,7 @@ class TelegramChatBroadcastService
             ->join('events as e', 'e.id', '=', 'l.event_id')
             ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
             ->where('i.broadcast_id', $broadcastId)
+            ->when($exceptItemId !== null, fn ($q) => $q->where('i.id', '<>', $exceptItemId))
             ->where(function ($q) {
                 $q->whereIn('i.status', [
                     TelegramChatBroadcastItem::STATUS_PENDING,
@@ -1764,7 +1859,7 @@ class TelegramChatBroadcastService
      *
      * @return string[]
      */
-    private function recentlyPostedTitleNorms(int $broadcastId, Carbon $since): array
+    private function recentlyPostedTitleNorms(int $broadcastId, Carbon $since, ?int $exceptItemId = null): array
     {
         $titles = TelegramChatBroadcastItem::query()
             ->from('telegram.chat_broadcast_items as i')
@@ -1773,6 +1868,7 @@ class TelegramChatBroadcastService
             ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
             ->join('events as e', 'e.id', '=', 'l.event_id')
             ->where('i.broadcast_id', $broadcastId)
+            ->when($exceptItemId !== null, fn ($q) => $q->where('i.id', '<>', $exceptItemId))
             ->where(function ($q) use ($since) {
                 $q->where(function ($w) use ($since) {
                     $w->where('i.status', TelegramChatBroadcastItem::STATUS_POSTED)
@@ -1982,22 +2078,8 @@ class TelegramChatBroadcastService
         $weekday = $this->periodWeekday($broadcast);
         $taken = $this->takenSlots($broadcast->id);
 
-        // тема поста перед горизонтом: первый слот недели тоже чей-то сосед.
-        // У брони подборки темы нет (null): её выбирают накануне слота
-        $prevTheme = $this->primaryInterestId((int) (TelegramChatBroadcastItem::query()
-            ->where('broadcast_id', $broadcast->id)
-            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
-            ->whereNotNull('event_id')
-            // Снятого поста в канале нет — соседом он быть не может.
-            ->where('status', '<>', TelegramChatBroadcastItem::STATUS_WITHDRAWN)
-            ->where(function ($w) use ($now) {
-                $w->where('posted_at', '<=', $now)
-                    ->orWhere(function ($x) use ($now) {
-                        $x->whereNotNull('publish_at')->where('publish_at', '<=', $now);
-                    });
-            })
-            ->orderByRaw('COALESCE(posted_at, publish_at) DESC')
-            ->value('event_id') ?? 0));
+        // тема поста перед горизонтом: первый слот недели тоже чей-то сосед
+        $prevTheme = $this->pastPostTheme($broadcast->id, $now);
 
         // ждущие дня занимают слоты первыми, иначе наполнитель всегда брал бы новое из пула
         $waiting = TelegramChatBroadcastItem::query()
@@ -2058,6 +2140,9 @@ class TelegramChatBroadcastService
                     $fromWaiting->caption = null;
                     $fromWaiting->caption_source = null;
                 }
+                $fromWaiting->pick_meta = PickReason::meta(PickReason::BY_WAITING, 'waiting', [
+                    'since' => $fromWaiting->waitingSince(),
+                ]);
                 $fromWaiting->save();
 
                 if ($fromWaiting->hasReadyCaption()) {
@@ -2129,41 +2214,32 @@ class TelegramChatBroadcastService
                 }
 
                 // не та же тема, что у соседа: два концерта подряд читаются как одна новость
-                $rule = 'best';
-                $eventId = $this->pickBestEventIdForChat(
+                $best = $this->rankCandidatesForChat(
                     $chat,
                     $broadcast->id,
                     $exclude,
                     $publishAt->copy()->utc(),
                     $this->venueRepeatCap($broadcast),
                     $prevTheme,
-                );
+                    limit: 1,
+                )[0] ?? null;
 
-                // правило мягкое: лучше повтор темы, чем пустой слот; повтор пишем в лог
-                if (! $eventId && $prevTheme !== null) {
-                    $eventId = $this->pickBestEventIdForChat(
-                        $chat,
-                        $broadcast->id,
-                        $exclude,
-                        $publishAt->copy()->utc(),
-                        $this->venueRepeatCap($broadcast),
-                    );
-
-                    if ($eventId) {
-                        $rule = 'theme_repeat';
-                        Log::info('broadcast.feed.theme_repeat', [
-                            'broadcast_id' => $broadcast->id,
-                            'slot' => $publishAt->toIso8601String(),
-                            'interest_id' => $prevTheme,
-                            'why' => 'другой темы на этот слот не нашлось',
-                        ]);
-                    }
-                }
-
-                if (! $eventId) {
+                if ($best === null) {
                     $summary['no_candidate']++;
 
                     continue;
+                }
+                $eventId = (int) $best['event']->id;
+                $meta = $this->autoPickMeta($best, $publishAt);
+
+                // правило мягкое: лучше повтор темы, чем пустой слот; повтор пишем в лог
+                if ($meta['rule'] === 'theme_repeat') {
+                    Log::info('broadcast.feed.theme_repeat', [
+                        'broadcast_id' => $broadcast->id,
+                        'slot' => $publishAt->toIso8601String(),
+                        'interest_id' => $prevTheme,
+                        'why' => 'другой темы на этот слот не нашлось',
+                    ]);
                 }
                 $exclude[] = $eventId;
                 $prevTheme = $this->primaryInterestId($eventId);
@@ -2194,13 +2270,15 @@ class TelegramChatBroadcastService
                     $item->caption = null;
                     $item->caption_source = null;
                 }
+                // целиком, а не слиянием: у оживлённой строки осталась бы причина прошлого выбора
+                $item->pick_meta = $meta;
                 $item->save();
 
                 $this->ensureEventCaption($item, $broadcast);
                 // считаем в памяти: за прогон открытые событийные записи растут только здесь
                 $openEvents++;
                 $summary['filled']++;
-                $summary['picks'][] = $this->pickRow($publishAt, $item, 'auto', $rule);
+                $summary['picks'][] = $this->pickRow($publishAt, $item, 'auto', $meta['rule']);
             }
 
             if ($eve) {
@@ -2333,8 +2411,9 @@ class TelegramChatBroadcastService
     /**
      * Один выбор наполнителя для сводки (её печатает broadcast:fill-feed). Время по Москве
      * со сдвигом: сводку отдают и кнопки админки, а фронт местами режет часы из строки.
+     * meta — pick_meta записи: сухой прогон откатывает запись, и причину печатают отсюда.
      *
-     * @return array{at: string, by: string, rule: string, item_id: int, kind: string, event_id: int|null, venue_id: int|null}
+     * @return array{at: string, by: string, rule: string, item_id: int, kind: string, event_id: int|null, venue_id: int|null, meta: array<string, mixed>|null}
      */
     private function pickRow(Carbon $at, TelegramChatBroadcastItem $item, string $by, string $rule): array
     {
@@ -2346,7 +2425,79 @@ class TelegramChatBroadcastService
             'kind' => (string) $item->kind,
             'event_id' => $item->event_id !== null ? (int) $item->event_id : null,
             'venue_id' => $item->venue_id !== null ? (int) $item->venue_id : null,
+            'meta' => $item->pick_meta,
         ];
+    }
+
+    /**
+     * Три лучших на слот по правилу автоподбора, для «Заменить»: что выбрал бы наполнитель, если
+     * пост из слота снять крестиком. Его событие, другие даты серии и двойники в варианты не попадают.
+     *
+     * @return list<array{event: Event, meta: array<string, mixed>}>
+     */
+    public function slotCandidates(TelegramChatBroadcast $broadcast, Carbon $at, ?int $occupantItemId, int $limit = 3): array
+    {
+        $chat = $broadcast->chat;
+        if (! $chat instanceof TelegramChat || ! $chat->city_id) {
+            return [];
+        }
+
+        $ranked = $this->rankCandidatesForChat(
+            $chat,
+            (int) $broadcast->id,
+            notBefore: $at->copy()->utc(),
+            repeatCap: $this->venueRepeatCap($broadcast),
+            avoidInterestId: $this->neighborTheme((int) $broadcast->id, $at, Carbon::now(), $occupantItemId),
+            replacedItemId: $occupantItemId,
+            limit: $limit,
+        );
+
+        return array_map(fn (array $c) => ['event' => $c['event'], 'meta' => $this->autoPickMeta($c, $at)], $ranked);
+    }
+
+    /** Тема последнего поста канала к этому моменту. */
+    private function pastPostTheme(int $broadcastId, Carbon $now): ?int
+    {
+        return $this->primaryInterestId((int) (TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
+            ->whereNotNull('event_id')
+            // Снятого поста в канале нет — соседом он быть не может.
+            ->where('status', '<>', TelegramChatBroadcastItem::STATUS_WITHDRAWN)
+            ->where(function ($w) use ($now) {
+                $w->where('posted_at', '<=', $now)
+                    ->orWhere(function ($x) use ($now) {
+                        $x->whereNotNull('publish_at')->where('publish_at', '<=', $now);
+                    });
+            })
+            ->orderByRaw('COALESCE(posted_at, publish_at) DESC')
+            ->value('event_id') ?? 0));
+    }
+
+    /** Тема соседа перед слотом так же, как её видит наполнитель: пост раньше в ленте, иначе последний вышедший. */
+    private function neighborTheme(int $broadcastId, Carbon $at, Carbon $now, ?int $exceptItemId): ?int
+    {
+        $before = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_PENDING,
+                TelegramChatBroadcastItem::STATUS_PLANNED,
+                TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                TelegramChatBroadcastItem::STATUS_APPROVED,
+                TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+            ])
+            ->where('is_off_grid', false)
+            ->where('publish_at', '>', $now)
+            ->where('publish_at', '<', $at)
+            ->when($exceptItemId !== null, fn ($q) => $q->whereKeyNot($exceptItemId))
+            ->orderByDesc('publish_at')
+            ->first(['kind', 'event_id']);
+
+        if ($before === null) {
+            return $this->pastPostTheme($broadcastId, $now);
+        }
+
+        return $before->event_id !== null ? $this->primaryInterestId((int) $before->event_id) : null;
     }
 
     /**
