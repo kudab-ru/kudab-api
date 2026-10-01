@@ -4,119 +4,101 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
-use App\Contracts\Telegram\TelegramChatBroadcastItemRepositoryInterface;
-use App\Models\Event;
 use App\Models\TelegramChatBroadcast;
-use App\Models\TelegramChatBroadcastItem;
-use App\Services\Telegram\PostTiming;
+use App\Services\Telegram\BroadcastQueueSweeper;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Снять из очереди ожидания то, что уже не выйдет.
- *
- * ЗАЧЕМ. Запись без дня ждёт, когда освободится слот. Её просроченность до сих
- * пор замечала ТОЛЬКО доставка — и только если запись доберётся до головы
- * очереди. У канала с заполненной лентой она туда не добирается никогда:
- * слотов нет, очередь не двигается, а ячейку `feed_limit` запись держит. То
- * есть мёртвая запись занимает живое место и молча урезает ленту.
- *
- * Живой пример со стенда: у боевого канала три записи без дня, одна ждёт с
- * 9 сентября при старте события в тот же вечер.
- *
- * ЧТО СЧИТАЕМ МЁРТВЫМ. Запись без дня можно поставить только в БУДУЩИЙ слот,
- * поэтому смерть — это «событие уже началось» (у многодневки — закрылось), то
- * есть [[PostTiming]]::deadline в прошлом. Правило то же, что у постановки, и
- * это не случайно: ждать дня для поста, который ни в один будущий день уже не
- * встанет, — значит держать место зря.
- *
- * ПОЧЕМУ НЕ ЧАСТЬ НАПОЛНИТЕЛЯ. Уборка и наполнение — разные работы с разной
- * ценой ошибки: наполнитель на стенде боевому каналу ленту не трогает (см.
- * BroadcastSafety), а подметать там можно и нужно. Плюс отдельную команду
- * видно в `schedule:list` и в логе.
+ * Уборщик ленты, правила — в BroadcastQueueSweeper. Отдельно от наполнителя: подметать можно
+ * и канал, куда стенду постить запрещено (см. BroadcastSafety), а наполнять его нельзя.
  */
 class SweepQueueCommand extends Command
 {
     protected $signature = 'broadcast:sweep-queue
         {--broadcast= : Только один канал, по id}
-        {--dry-run : Показать, что сняли бы, и ничего не писать}';
+        {--dry-run : Показать, что сняли бы и перевесили, и ничего не писать}';
 
-    protected $description = 'Снять из очереди ожидания записи, чьё событие уже началось или удалено';
+    protected $description = 'Снять из ленты записи, которые уже не выйдут; запись удалённого события перевесить на выжившее';
 
-    public function handle(TelegramChatBroadcastItemRepositoryInterface $items): int
+    private const VIA = [
+        'link' => 'по журналу склеек',
+        'dedup_key' => 'по общему ключу склейки',
+    ];
+
+    public function handle(BroadcastQueueSweeper $sweeper): int
     {
         $now = Carbon::now();
         $dry = (bool) $this->option('dry-run');
 
-        $query = TelegramChatBroadcast::query();
+        $query = TelegramChatBroadcast::query()->with('chat');
         if ($this->option('broadcast') !== null) {
             $query->where('id', (int) $this->option('broadcast'));
         }
 
-        $summary = ['checked' => 0, 'gone' => 0, 'passed' => 0];
+        $summary = ['checked' => 0, BroadcastQueueSweeper::SKIPPED => 0, BroadcastQueueSweeper::MOVED => 0];
 
-        foreach ($query->pluck('id') as $broadcastId) {
-            $waiting = TelegramChatBroadcastItem::query()
-                ->where('broadcast_id', $broadcastId)
-                ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
-                ->whereIn('status', [
-                    TelegramChatBroadcastItem::STATUS_PENDING,
-                    TelegramChatBroadcastItem::STATUS_PLANNED,
-                ])
-                ->whereNull('publish_at')
-                ->whereNull('posted_at')
-                ->whereNull('claimed_at')
-                ->get();
+        foreach ($query->get() as $broadcast) {
+            $result = $dry ? $this->dryRun($sweeper, $broadcast, $now) : $sweeper->sweep($broadcast, $now);
+            $summary['checked'] += $result['checked'];
 
-            foreach ($waiting as $item) {
-                $summary['checked']++;
+            foreach ($result['done'] as $row) {
+                $summary[$row['action']]++;
+                $this->line($this->describe($row));
 
-                $event = $item->event_id ? Event::query()->find($item->event_id) : null;
-
-                $reason = match (true) {
-                    $event === null => 'события больше нет — снято из очереди ожидания',
-                    ! PostTiming::fits($event, $now) => 'событие началось, пока запись ждала свободного дня',
-                    default => null,
-                };
-
-                if ($reason === null) {
-                    continue;
+                if (! $dry) {
+                    Log::info(
+                        $row['action'] === BroadcastQueueSweeper::MOVED ? 'broadcast.queue.moved' : 'broadcast.queue.swept',
+                        ['broadcast_id' => $broadcast->id] + $row,
+                    );
                 }
-
-                $this->line(sprintf(
-                    '<fg=yellow>#%d</> (событие %s) — %s',
-                    $item->id,
-                    $item->event_id ?? '?',
-                    $reason,
-                ));
-
-                if ($dry) {
-                    $summary['gone']++;
-
-                    continue;
-                }
-
-                $items->markSkipped($item, $reason);
-                $summary['gone']++;
-
-                Log::info('broadcast.queue.swept', [
-                    'broadcast_id' => $broadcastId,
-                    'item_id' => $item->id,
-                    'event_id' => $item->event_id,
-                    'reason' => $reason,
-                ]);
             }
         }
 
-        $summary['passed'] = $summary['checked'] - $summary['gone'];
-
         $this->info(sprintf(
-            'sweep-queue: в ожидании %d, снято %d, живых %d%s',
-            $summary['checked'], $summary['gone'], $summary['passed'],
-            $dry ? ' [DRY-RUN]' : '',
+            'sweep-queue: проверено %d, %s %d, %s %d, живых %d%s',
+            $summary['checked'],
+            $dry ? 'сняли бы' : 'снято',
+            $summary[BroadcastQueueSweeper::SKIPPED],
+            $dry ? 'перевесили бы' : 'перевешено',
+            $summary[BroadcastQueueSweeper::MOVED],
+            $summary['checked'] - $summary[BroadcastQueueSweeper::SKIPPED],
+            $dry ? ' [DRY-RUN, ничего не записано]' : '',
         ));
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Тот же код в транзакции с откатом: отдельная сухая ветка быстро разошлась бы с настоящей.
+     *
+     * @return array{checked: int, done: list<array<string, mixed>>}
+     */
+    private function dryRun(BroadcastQueueSweeper $sweeper, TelegramChatBroadcast $broadcast, Carbon $now): array
+    {
+        DB::beginTransaction();
+
+        try {
+            return $sweeper->sweep($broadcast, $now);
+        } finally {
+            DB::rollBack();
+        }
+    }
+
+    /** @param  array<string, mixed>  $row */
+    private function describe(array $row): string
+    {
+        $where = sprintf(
+            '<fg=yellow>#%d</> (событие %s%s)',
+            $row['item_id'],
+            $row['event_id'] ?? '?',
+            $row['at'] !== null ? ', слот '.Carbon::parse($row['at'])->format('d.m H:i') : ', без дня',
+        );
+
+        return $row['action'] === BroadcastQueueSweeper::MOVED
+            ? sprintf('%s — перевешено на событие %d %s', $where, $row['to_event_id'], self::VIA[$row['via']] ?? $row['via'])
+            : sprintf('%s — %s', $where, $row['reason']);
     }
 }

@@ -16,6 +16,7 @@ use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Support\BroadcastSafety;
 use Carbon\Carbon;
 use DateTimeInterface;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -1498,69 +1499,7 @@ class TelegramChatBroadcastService
         ?int $repeatCap = null,
         ?int $avoidInterestId = null,
     ): ?int {
-        // Навсегда исключаем только то, что уже прозвучало или стоит в ленте.
-        // (error — НЕ включаем: отправку можно ретраить.)
-        $usedStatuses = [
-            TelegramChatBroadcastItem::STATUS_PENDING,
-            TelegramChatBroadcastItem::STATUS_PLANNED,
-            TelegramChatBroadcastItem::STATUS_POSTED,
-            TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
-            TelegramChatBroadcastItem::STATUS_APPROVED,
-            TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
-        ];
-
-        // отклонённое — только на REJECTED_COOLDOWN_DAYS, иначе каждый отказ навсегда отъедал бы пул
-        $rejectedSince = Carbon::now()->subDays(self::REJECTED_COOLDOWN_DAYS);
-
-        $query = Event::query()
-            ->active()
-            ->upcoming()
-            ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId, $usedStatuses) {
-                $q->where('broadcast_id', $broadcastId)
-                    ->whereIn('status', $usedStatuses);
-            })
-            ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId, $rejectedSince) {
-                $q->where('broadcast_id', $broadcastId)
-                    // только rejected: skipped значит «снято из ленты» (руками, пересборкой), а не отказ,
-                    // и прятать такое на месяц нельзя
-                    ->where('status', TelegramChatBroadcastItem::STATUS_REJECTED)
-                    // полным именем: в подзапросе ещё таблица связи
-                    ->where('telegram.chat_broadcast_items.updated_at', '>=', $rejectedSince);
-            })
-            // Снятое крестиком обратно не ставим: по тому же баллу оно вернулось бы в тот же слот.
-            ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId) {
-                $q->where('broadcast_id', $broadcastId)
-                    ->where('status', TelegramChatBroadcastItem::STATUS_SKIPPED)
-                    ->where('error_message', TelegramChatBroadcastItem::REMOVED_BY_HAND);
-            })
-            ->whereHas('community', function ($q) use ($chat) {
-                $q->where('city_id', $chat->city_id);
-            })
-            // Жёсткие фильтры (NULL-safe): не распроданное, не скрытый для канала вид.
-            ->where(function ($q) {
-                $q->whereNull('tickets_status')
-                    ->orWhere('tickets_status', '!=', 'sold_out');
-            })
-            ->where(function ($q) {
-                $q->whereNull('content_kind')
-                    ->orWhereNotIn('content_kind', Event::CHANNEL_HIDDEN_KINDS);
-            })
-            // Анти-дубль по группе (Layer 2): не предлагать событие, чья event_group
-            // уже занята в этом канале (другой источник того же события).
-            ->where(function ($q) use ($broadcastId, $usedStatuses) {
-                $q->whereNull('events.event_group_id')
-                    ->orWhereNotExists(function ($sub) use ($broadcastId, $usedStatuses) {
-                        $sub->selectRaw('1')
-                            ->from('telegram.chat_broadcast_items as i')
-                            // через связь: у подборки событий несколько, и по колонке записи
-                            // их группы не считались бы занятыми
-                            ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
-                            ->join('events as e2', 'e2.id', '=', 'l.event_id')
-                            ->where('i.broadcast_id', $broadcastId)
-                            ->whereIn('i.status', $usedStatuses)
-                            ->whereColumn('e2.event_group_id', 'events.event_group_id');
-                    });
-            });
+        $query = $this->channelCandidates($chat, $broadcastId)->upcoming();
 
         if (! empty($excludeEventIds)) {
             $query->whereNotIn('id', array_values(array_unique(array_map('intval', $excludeEventIds))));
@@ -1639,6 +1578,95 @@ class TelegramChatBroadcastService
         }
 
         return $this->scorer->pickBest($pool)?->id;
+    }
+
+    /**
+     * Жёсткие фильтры кандидата в ленту канала, без окна времени: подбор и перевес записи
+     * уборщиком отсеивают по одному правилу. `$exceptItemId` — перевешиваемая запись,
+     * её собственные серия, площадка и минута начала ей не мешают.
+     */
+    public function channelCandidates(TelegramChat $chat, int $broadcastId, ?int $exceptItemId = null): Builder
+    {
+        // Навсегда исключаем только то, что уже прозвучало или стоит в ленте.
+        // (error — НЕ включаем: отправку можно ретраить.)
+        $usedStatuses = [
+            TelegramChatBroadcastItem::STATUS_PENDING,
+            TelegramChatBroadcastItem::STATUS_PLANNED,
+            TelegramChatBroadcastItem::STATUS_POSTED,
+            TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+            TelegramChatBroadcastItem::STATUS_APPROVED,
+            TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+        ];
+
+        // отклонённое — только на REJECTED_COOLDOWN_DAYS, иначе каждый отказ навсегда отъедал бы пул
+        $rejectedSince = Carbon::now()->subDays(self::REJECTED_COOLDOWN_DAYS);
+
+        return Event::query()
+            ->active()
+            ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId, $usedStatuses) {
+                $q->where('broadcast_id', $broadcastId)
+                    ->whereIn('status', $usedStatuses);
+            })
+            ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId, $rejectedSince) {
+                $q->where('broadcast_id', $broadcastId)
+                    // только rejected: skipped значит «снято из ленты» (руками, пересборкой), а не отказ,
+                    // и прятать такое на месяц нельзя
+                    ->where('status', TelegramChatBroadcastItem::STATUS_REJECTED)
+                    // полным именем: в подзапросе ещё таблица связи
+                    ->where('telegram.chat_broadcast_items.updated_at', '>=', $rejectedSince);
+            })
+            // Снятое крестиком обратно не ставим: по тому же баллу оно вернулось бы в тот же слот.
+            ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId) {
+                $q->where('broadcast_id', $broadcastId)
+                    ->where('status', TelegramChatBroadcastItem::STATUS_SKIPPED)
+                    ->where('error_message', TelegramChatBroadcastItem::REMOVED_BY_HAND);
+            })
+            ->whereHas('community', function ($q) use ($chat) {
+                $q->where('city_id', $chat->city_id);
+            })
+            // Жёсткие фильтры (NULL-safe): не распроданное, не скрытый для канала вид.
+            ->where(function ($q) {
+                $q->whereNull('tickets_status')
+                    ->orWhere('tickets_status', '!=', 'sold_out');
+            })
+            ->where(function ($q) {
+                $q->whereNull('content_kind')
+                    ->orWhereNotIn('content_kind', Event::CHANNEL_HIDDEN_KINDS);
+            })
+            // Анти-дубль по группе (Layer 2): не предлагать событие, чья event_group
+            // уже занята в этом канале (другой источник того же события).
+            ->where(function ($q) use ($broadcastId, $usedStatuses, $exceptItemId) {
+                $q->whereNull('events.event_group_id')
+                    ->orWhereNotExists(function ($sub) use ($broadcastId, $usedStatuses, $exceptItemId) {
+                        $sub->selectRaw('1')
+                            ->from('telegram.chat_broadcast_items as i')
+                            // через связь: у подборки событий несколько, и по колонке записи
+                            // их группы не считались бы занятыми
+                            ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
+                            ->join('events as e2', 'e2.id', '=', 'l.event_id')
+                            ->where('i.broadcast_id', $broadcastId)
+                            ->whereIn('i.status', $usedStatuses)
+                            ->when($exceptItemId !== null, fn ($w) => $w->where('i.id', '<>', $exceptItemId))
+                            ->whereColumn('e2.event_group_id', 'events.event_group_id');
+                    });
+            })
+            // Один концерт разные источники заводят в разные серии, и проверка серии выше его не ловит.
+            // Удалённые события тоже в счёт: вышедший пост про слитую карточку держит и её двойника.
+            ->where(function ($q) use ($broadcastId, $usedStatuses, $exceptItemId) {
+                $q->whereNull('events.venue_id')
+                    ->orWhereNull('events.start_time')
+                    ->orWhereNotExists(function ($sub) use ($broadcastId, $usedStatuses, $exceptItemId) {
+                        $sub->selectRaw('1')
+                            ->from('telegram.chat_broadcast_items as i')
+                            ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
+                            ->join('events as e3', 'e3.id', '=', 'l.event_id')
+                            ->where('i.broadcast_id', $broadcastId)
+                            ->whereIn('i.status', $usedStatuses)
+                            ->when($exceptItemId !== null, fn ($w) => $w->where('i.id', '<>', $exceptItemId))
+                            ->whereColumn('e3.venue_id', 'events.venue_id')
+                            ->whereRaw("date_trunc('minute', e3.start_time) = date_trunc('minute', events.start_time)");
+                    });
+            });
     }
 
     /**
