@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Models\Event;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
+use App\Models\Venue;
+use App\Services\Telegram\BroadcastSlotPlanner;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Support\BroadcastSafety;
 use Carbon\Carbon;
@@ -14,42 +17,74 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Заполнить свободные слоты ленты — по расписанию, а не по кнопке.
- *
- * ЗАЧЕМ. Наполнитель ленты (`fillFeedDays`) до сих пор звали ТОЛЬКО две кнопки
- * админки — «Пересобрать неделю» и «Разбавить». В расписании его не было вовсе,
- * а единственный автомат (`broadcast:enqueue-due`) дня записи не назначает и
- * вдобавок выключается собственным капом: он выходит по
- * `открытых событийных >= feed_limit`, а собранная лента этот кап держит всегда.
- * То есть событие, объявленное в среду, в уже собранную неделю попасть НЕ МОГЛО
- * ни при каких условиях — пока человек не нажмёт кнопку.
- *
- * Замер 2026-09-15 по каналу Воронежа: из 154 событий ближайшей недели в ленте
- * 10, ещё 17 сняты анти-дублем, а остальные 127 отбракованы единственной
- * причиной — все слоты заняты.
- *
- * ЧТО ДЕЛАЕТ. Занятый слот не трогает (это правило `fillFeedDays`, и менять его
- * нельзя: лента, которая сама себя переставляет, лишает владельца уверенности,
- * что увиденное утром выйдет вечером). Заполняет только свободные — те, что
- * освободились после отправки, и те, до которых у канала дошёл черёд по
- * настройке `fill_lead_days`.
- *
- * ЗАПРЕТ СТЕНДА — тот же, что в `enqueueDueForAllChannels` (см. BroadcastSafety):
- * на стенде очередь боевого канала не наполняем, иначе она копит посты, которые
- * никогда не уйдут.
+ * Заполнить свободные слоты ленты по расписанию. Занятый слот не трогает: лента, которая
+ * сама себя переставляет, не даёт верить, что увиденное утром выйдет вечером.
+ * Запрет стенда тот же, что у enqueueDueForAllChannels (см. BroadcastSafety).
  */
 class FillFeedCommand extends Command
 {
     protected $signature = 'broadcast:fill-feed
         {--broadcast= : Только один канал, по id}
-        {--dry-run : Показать сводку и ничего не писать}';
+        {--dry-run : Показать выборы и ничего не писать}
+        {--at= : Только с --dry-run: прогон как будто сейчас это время по Москве, например "2026-10-01 19:05"}
+        {--mode= : Только с --dry-run: выбрать как в режиме week или eve, не переключая канал}';
 
     protected $description = 'Заполнить свободные слоты ленты каналов (то же, что кнопка «Пересобрать», но только свободное)';
 
+    /** Как печатать правило выбора; коды — из сводки fillFeedDays. */
+    private const RULES = [
+        'best' => 'лучший балл среди кандидатов',
+        'theme_repeat' => 'лучший балл; тема как у соседнего поста — другой не нашлось',
+        'waiting' => 'ждал свободного дня',
+        'portrait_due' => 'подошёл срок портрета',
+        'composed' => 'собран состав',
+        'text_requested' => 'собран состав, заказан текст',
+        'ready' => 'состав уже готов',
+        'failed' => 'состава не набралось, бронь снята',
+    ];
+
     public function handle(TelegramChatBroadcastService $service): int
     {
-        $now = Carbon::now();
         $dryRun = (bool) $this->option('dry-run');
+        $at = $this->option('at');
+        $mode = $this->option('mode');
+
+        if (($at !== null || $mode !== null) && ! $dryRun) {
+            $this->error('--at и --mode работают только вместе с --dry-run');
+
+            return self::FAILURE;
+        }
+        if ($mode !== null && ! in_array($mode, [TelegramChatBroadcast::PICK_MODE_WEEK, TelegramChatBroadcast::PICK_MODE_EVE], true)) {
+            $this->error('--mode: week или eve');
+
+            return self::FAILURE;
+        }
+
+        $testNowBefore = Carbon::getTestNow();
+        if ($at !== null) {
+            try {
+                $moment = Carbon::parse((string) $at, BroadcastSlotPlanner::TZ);
+            } catch (\Throwable) {
+                $this->error('--at не разобрать, нужно время по Москве вида "2026-10-01 19:05"');
+
+                return self::FAILURE;
+            }
+            // Время прогона и здесь, и в сервисах берётся из now(). В UTC: даты модели без пояса
+            // Carbon читает в поясе подставного «сейчас», и с московским они уехали бы на три часа.
+            Carbon::setTestNow($moment->copy()->utc());
+            $this->line('Как будто сейчас '.$moment->copy()->setTimezone(BroadcastSlotPlanner::TZ)->format('d.m.Y H:i').' по Москве');
+        }
+
+        try {
+            return $this->fill($service, $dryRun, $mode);
+        } finally {
+            Carbon::setTestNow($testNowBefore);
+        }
+    }
+
+    private function fill(TelegramChatBroadcastService $service, bool $dryRun, ?string $mode): int
+    {
+        $now = Carbon::now();
 
         $query = TelegramChatBroadcast::query()->with('chat');
         if ($this->option('broadcast') !== null) {
@@ -72,15 +107,16 @@ class FillFeedCommand extends Command
                 continue;
             }
 
-            // Запрет стенда — про ЗАПИСЬ в очередь, а не про «посмотреть».
-            // Пропуская такой канал и в dry-run, команда отвечала на вопрос
-            // «что будет на проде?» словами «не знаю»: именно боевой канал на
-            // стенде и запрещён. Показываем, но метим.
+            // запрет стенда — про запись в очередь: сухой прогон показывает и запрещённый канал, с пометкой
             $blocked = ! BroadcastSafety::postingAllowed((int) $chat->telegram_chat_id);
             if ($blocked && ! $dryRun) {
                 $summary['not_allowed']++;
 
                 continue;
+            }
+
+            if ($mode !== null) {
+                $broadcast->pick_mode = $mode;
             }
 
             $filled = $dryRun
@@ -89,23 +125,24 @@ class FillFeedCommand extends Command
 
             $capped = (int) ($filled['feed_limit'] ?? 0);
 
-            if (($filled['filled'] ?? 0) > 0 || ($filled['no_candidate'] ?? 0) > 0 || $capped > 0) {
+            if ($dryRun || ($filled['filled'] ?? 0) > 0 || ($filled['no_candidate'] ?? 0) > 0 || $capped > 0) {
                 $this->line(sprintf(
-                    '  канал #%d%s: %s %d, без кандидата %d, дней в горизонте %d%s',
+                    '  канал #%d%s, режим %s: %s %d, без кандидата %d, дней в горизонте %d%s',
                     $broadcast->id,
                     $blocked ? ' (стенду постить в него запрещено)' : '',
+                    $broadcast->pick_mode,
                     $dryRun ? 'заполнил бы' : 'заполнено',
                     (int) ($filled['filled'] ?? 0),
                     (int) ($filled['no_candidate'] ?? 0),
                     (int) ($filled['days'] ?? 0),
-                    // Пустые слоты при полной ленте — не голодание пула, а
-                    // собственный кап канала, и молчать об этом нельзя: иначе
-                    // «заполнено 0» читается как «событий в городе нет».
+                    // без этой оговорки «заполнено 0» читается как «событий в городе нет»
                     $capped > 0
                         ? sprintf(', слотов не тронуто из-за капа ленты %d (feed_limit %d)', $capped, $broadcast->feed_limit)
                         : '',
                 ));
             }
+
+            $this->printPicks($filled['picks'] ?? []);
 
             if (($filled['filled'] ?? 0) > 0) {
                 $summary['channels']++;
@@ -135,18 +172,10 @@ class FillFeedCommand extends Command
     }
 
     /**
-     * Что наполнитель сделал БЫ — тем же кодом, но без записи.
+     * Прогон тем же кодом в транзакции с откатом, а не отдельная сухая ветка в наполнителе:
+     * второй путь быстро разойдётся с первым, и сухой прогон начнёт врать.
      *
-     * Прогон в транзакции с откатом, а не отдельная «сухая» ветка внутри
-     * наполнителя: второй путь расходится с первым в первый же месяц, и тогда
-     * `--dry-run` начинает врать — а зовут его ровно затем, чтобы поверить.
-     * Тот же приём уже держит кнопку «Пересобрать неделю» в админке.
-     *
-     * До этой правки dry-run просто пропускал канал и печатал «filled=0». Я сам
-     * на это купился: посмотрел на ноль и решил, что заполнять нечего, хотя
-     * свободных слотов было одиннадцать.
-     *
-     * @return array{filled: int, days: int, no_candidate: int, feed_limit: int}
+     * @return array{filled: int, days: int, no_candidate: int, feed_limit: int, picks: list<array<string, mixed>>}
      */
     private function wouldFill(
         TelegramChatBroadcastService $service,
@@ -159,6 +188,36 @@ class FillFeedCommand extends Command
             return $service->fillFeedDays($broadcast, $now);
         } finally {
             DB::rollBack();
+        }
+    }
+
+    /** @param  list<array<string, mixed>>  $picks */
+    private function printPicks(array $picks): void
+    {
+        if ($picks === []) {
+            return;
+        }
+
+        $titles = Event::withTrashed()
+            ->whereIn('id', array_filter(array_column($picks, 'event_id')))
+            ->pluck('title', 'id');
+        $venues = Venue::query()
+            ->whereIn('id', array_filter(array_column($picks, 'venue_id')))
+            ->pluck('name', 'id');
+
+        foreach ($picks as $pick) {
+            $what = match ($pick['by']) {
+                'digest' => 'подборка',
+                'portrait' => sprintf('портрет площадки #%d «%s»', $pick['venue_id'], $venues[$pick['venue_id']] ?? '?'),
+                default => sprintf('событие #%d «%s»', $pick['event_id'], $titles[$pick['event_id']] ?? '?'),
+            };
+
+            $this->line(sprintf(
+                '    %s  %s — %s',
+                Carbon::parse($pick['at'])->format('d.m H:i'),
+                $what,
+                self::RULES[$pick['rule']] ?? $pick['rule'],
+            ));
         }
     }
 }
