@@ -229,6 +229,30 @@ class TelegramChatBroadcastItem extends Model
     }
 
     /**
+     * Событие, про которое написана подводка: в посте оно стоит первым, и подводка служит его фразой.
+     * null — подводка про всю подборку, так писались тексты до `intro_event`.
+     */
+    public function digestIntroEvent(): ?int
+    {
+        $id = (int) ($this->digest_meta['intro_event'] ?? 0);
+
+        return $id > 0 ? $id : null;
+    }
+
+    /**
+     * Мета без подводки. Её событие и состав, под который она написана, уходят вместе с ней.
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array<string, mixed>
+     */
+    public static function withoutDigestIntro(array $meta): array
+    {
+        unset($meta['intro'], $meta['intro_event'], $meta['roster']);
+
+        return $meta;
+    }
+
+    /**
      * Строка подборки про событие. Ключ — id события, а не позиция: состав
      * может сдвинуться между заказом текста и отправкой.
      */
@@ -284,6 +308,11 @@ class TelegramChatBroadcastItem extends Model
      */
     public function digestIntroFor(array $eventIds): ?string
     {
+        $lead = $this->digestIntroEvent();
+        if ($lead !== null && ! in_array($lead, array_map('intval', $eventIds), true)) {
+            return null;
+        }
+
         return $this->digestTextCoversRoster($eventIds) ? $this->digestIntro() : null;
     }
 

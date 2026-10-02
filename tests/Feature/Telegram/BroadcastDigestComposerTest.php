@@ -10,6 +10,7 @@ use App\Services\Telegram\BroadcastDigestComposer;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -735,6 +736,7 @@ class BroadcastDigestComposerTest extends TestCase
             $meta['hooks'][(string) $eventId] = 'Строка про событие '.$eventId.'.';
         }
         $meta['roster'] = $draft['event_ids'];
+        $meta['intro_event'] = $draft['event_ids'][1];
         $digest->digest_meta = $meta;
         $digest->save();
 
@@ -755,6 +757,7 @@ class BroadcastDigestComposerTest extends TestCase
 
         $digest->refresh();
         $this->assertNull($digest->digestIntro(), 'подводка про другую тройку снимается');
+        $this->assertNull($digest->digestIntroEvent(), 'вместе с ней снимается и её событие');
 
         $gone = $draft['event_ids'][0];
         $stayed = $draft['event_ids'][1];
@@ -763,6 +766,84 @@ class BroadcastDigestComposerTest extends TestCase
             'строка ушедшего события не остаётся сиротой в мете');
         $this->assertSame('Строка про событие '.$stayed.'.', $digest->digestHook($stayed),
             'строка оставшегося события переживает замену: она привязана к id');
+    }
+
+    /** @return array<string, array{bool, string|null, list<string>, int}> */
+    public static function introLead(): array
+    {
+        return [
+            'главное событие первым и без фразы' => [true, 'second',
+                ['Подводка про второе.', 'second', 'first: Фраза первого.', 'third: Фраза третьего.'], 2],
+            'подводка выключена — её текст фразой события' => [false, 'second',
+                ['first: Фраза первого.', 'second: Подводка про второе.', 'third: Фраза третьего.'], 3],
+            'старая мета без intro_event' => [true, null,
+                ['Подводка про второе.', 'first: Фраза первого.', 'second: Фраза второго.', 'third: Фраза третьего.'], 3],
+            'событие подводки не из состава' => [true, 'spare',
+                ['first: Фраза первого.', 'second: Фраза второго.', 'third: Фраза третьего.'], 3],
+        ];
+    }
+
+    #[DataProvider('introLead')]
+    public function test_intro_speaks_for_its_event(bool $introOn, ?string $lead, array $shape, int $phrases): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $digest = $this->digestItem($broadcast, Carbon::now()->addDay());
+        $draft = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now(), $digest);
+        app(\App\Services\Telegram\TelegramChatBroadcastService::class)->applyDigestDraft($digest, $draft);
+
+        $ids = array_combine(['first', 'second', 'third'], $draft['event_ids']);
+        $ids['spare'] = (int) DB::table('events')->whereNotIn('id', $draft['event_ids'])->value('id');
+
+        $meta = (array) $digest->refresh()->digest_meta;
+        $meta['intro'] = 'Подводка про второе.';
+        if ($lead !== null) {
+            $meta['intro_event'] = $ids[$lead];
+        }
+        // строка есть и у события подводки: так бывает после правки руками
+        $meta['hooks'] = [
+            (string) $ids['first'] => 'Фраза первого.',
+            (string) $ids['second'] => 'Фраза второго.',
+            (string) $ids['third'] => 'Фраза третьего.',
+        ];
+        $meta['roster'] = $draft['event_ids'];
+        $digest->digest_meta = $meta;
+        $digest->save();
+
+        config(['broadcast_digest.intro' => $introOn]);
+        $out = app(BroadcastDigestComposer::class)->recompose($digest, $broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $keys = array_flip($ids);
+        $chunks = array_slice(explode("\n\n", $out['caption']), 1, -1);
+        $seen = [];
+        $bare = [];
+        foreach ($chunks as $chunk) {
+            if (! preg_match('~/events/(\d+)~', $chunk, $m)) {
+                $seen[] = $chunk;
+
+                continue;
+            }
+            $lines = explode("\n", $chunk);
+            $seen[] = $keys[(int) $m[1]].(isset($lines[2]) ? ': '.$lines[2] : '');
+            $bare[] = $lines[0]."\n".$lines[1];
+        }
+        $this->assertSame($shape, $seen);
+
+        $order = array_values(array_filter(array_map(fn ($s) => explode(':', $s)[0], $shape), fn ($k) => isset($ids[$k])));
+        $this->assertSame($order, array_map(fn ($id) => $keys[$id], $out['event_ids']), 'связь идёт в порядке поста');
+
+        $rest = explode("\n\n", $out['caption']);
+        $free = 950 - \App\Support\Telegram\CaptionLength::visible(implode("\n\n", array_merge(
+            [$rest[0]],
+            array_values(array_filter($chunks, fn ($c) => ! preg_match('~/events/\d+~', $c))),
+            $bare,
+            [end($rest)],
+        )));
+        $this->assertSame(intdiv($free, $phrases), $out['hook_budget'], 'место на фразу делится на события с фразой');
     }
 
     /**

@@ -67,6 +67,14 @@ final class BroadcastDigestComposer
     private int $hookBudget = 0;
 
     /**
+     * Состав в порядке последней собранной подписи. Он же пишется в связь «пост → события»,
+     * чтобы обложки и строки в админке шли как в посте.
+     *
+     * @var list<int>
+     */
+    private array $postOrder = [];
+
+    /**
      * Лента нужна ради ОДНОГО числа — того же, что читатель увидит, нажав на
      * подвал. Своё считать нельзя: пул рубрики уже прошёл стоп-лист, жанровые
      * отсечки, вычет показанного и схлопывание повторов, и к числу на странице
@@ -152,13 +160,15 @@ final class BroadcastDigestComposer
             return null;
         }
 
+        $caption = $this->buildCaption($broadcast, $best, $publishAt, $forItem);
+
         return [
             'theme' => $best['theme'],
             'theme_slug' => (string) $best['theme']['slug'],
-            'caption' => $this->buildCaption($broadcast, $best, $publishAt, $forItem),
+            'caption' => $caption,
             // Сколько знаков осталось на фразу — читает парсер, когда её пишет.
             'hook_budget' => $this->hookBudget,
-            'event_ids' => array_map(fn ($e) => (int) $e->id, $best['named']),
+            'event_ids' => $this->postOrder,
             'total' => $best['total'],
             'venues' => $best['venues'],
         ];
@@ -256,12 +266,14 @@ final class BroadcastDigestComposer
             'venues' => max($rows->pluck('venue_id')->filter()->unique()->count(), 1),
         ];
 
+        $caption = $this->buildCaption($broadcast, $picked, $publishAt, $item);
+
         return [
             'theme' => $picked['theme'],
             'theme_slug' => $slug,
-            'caption' => $this->buildCaption($broadcast, $picked, $publishAt, $item),
+            'caption' => $caption,
             'hook_budget' => $this->hookBudget,
-            'event_ids' => array_map(fn ($e) => (int) $e->id, $named),
+            'event_ids' => $this->postOrder,
             'total' => $picked['total'],
             'venues' => $picked['venues'],
         ];
@@ -1085,19 +1097,21 @@ final class BroadcastDigestComposer
                 .' · '.$this->escape($range);
         }
 
-        // Подводка ведущего — про эту неделю и эту тройку. Её место занимала
-        // строка счёта («20 концертов на 10 площадках. Три — в разных местах и
-        // в разные дни»), и та говорила две вещи, которых читатель не просил:
-        // хвасталась охватом и пересказывала внутреннее правило отбора. Счёт
-        // переехал в подвал, где он работает поводом нажать.
-        // ПРОВЕРЕННАЯ подводка, а не любая. Сборка зовётся ДО того, как мету
-        // почистят от текста под прежний состав, — без проверки старая
-        // подводка уходит в подпись, а из меты потом исчезает: в админке
-        // видно одно, в канал уезжает другое.
+        // Подводку берём, только если она написана под этот состав: подпись собирают до того,
+        // как из меты уберут текст под прежний состав (см. `withoutStaleDigestText`).
         $namedIds = array_map(fn ($r) => (int) $r->id, $picked['named']);
-        $lead = config('broadcast_digest.intro', true)
-            ? $item?->digestIntroFor($namedIds)
-            : null;
+        $written = $item?->digestIntroFor($namedIds);
+        $intro = config('broadcast_digest.intro', true) ? $written : null;
+
+        // Подводка — фраза своего события. Показана — событие стоит сразу под ней без строки,
+        // выключена — её текст печатается фразой события на его месте.
+        $leadId = $written !== null ? $item?->digestIntroEvent() : null;
+        $leadOnTop = $intro !== null && $leadId !== null;
+        $named = $picked['named'];
+        if ($leadOnTop) {
+            usort($named, fn ($a, $b) => ((int) $b->id === $leadId) <=> ((int) $a->id === $leadId));
+        }
+        $this->postOrder = array_map(fn ($r) => (int) $r->id, $named);
 
         // Форма даты решается ОДИН РАЗ на весь пост: вперемешку «сб 13:30» и
         // «сб 26 сентября, 18:00» читаются как сбой, а не как решение.
@@ -1114,7 +1128,7 @@ final class BroadcastDigestComposer
 
         $lines = [];
         $rich = [];
-        foreach ($picked['named'] as $row) {
+        foreach ($named as $row) {
             $meta = array_values(array_filter([
                 $this->whenLabel($row, $shortDates, $sessions[(int) $row->id] ?? []),
                 $this->venueLabel($row),
@@ -1129,7 +1143,11 @@ final class BroadcastDigestComposer
                 .$this->link($this->eventUrl((int) $row->id, $item?->id), (string) $row->title).'</b>');
             // Без курсива: пять наклонных строк подряд читаются как сноски.
             $facts = $this->escape(implode(' · ', $meta));
-            $hook = $this->hook($row, $item);
+            $hook = match (true) {
+                (int) $row->id !== $leadId => $this->hook($row, $item),
+                $leadOnTop => '',
+                default => $this->hook($row, $item, $written),
+            };
 
             // Блок заканчивается человеческой фразой, а не ценой. Тот же приём,
             // что промпт канала называет «панч отдельной строкой», но в вёрстке.
@@ -1163,7 +1181,7 @@ final class BroadcastDigestComposer
             )
             : $link;
 
-        $top = array_values(array_filter([$head, $lead !== null ? $this->escape($lead) : null]));
+        $top = array_values(array_filter([$head, $intro !== null ? $this->escape($intro) : null]));
 
         // ИЗЮМ СНИМАЕТСЯ ПО ОДНОЙ СТРОКЕ С КОНЦА, а не весь разом.
         //
@@ -1187,10 +1205,10 @@ final class BroadcastDigestComposer
         // строках фразы начали бы сниматься с конца просто потому, что порог
         // был один на всех.
         $bare = implode("\n\n", array_merge($top, $lines, [$footer]));
-        $named = max(1, count($picked['named']));
+        $phrases = max(1, count($named) - ($leadOnTop ? 1 : 0));
         $this->hookBudget = max(
             self::HOOK_BUDGET_MIN,
-            (int) floor(($soft - \App\Support\Telegram\CaptionLength::visible($bare)) / $named),
+            (int) floor(($soft - \App\Support\Telegram\CaptionLength::visible($bare)) / $phrases),
         );
 
         for ($keep = count($rich); $keep >= 0; $keep--) {
@@ -1214,15 +1232,17 @@ final class BroadcastDigestComposer
      * Четыре источника по старшинству — блок ИЗЮМ в config/broadcast_digest.php.
      * Сами ничего не сочиняем: подборка и так рискует звучать списком из базы,
      * а выдуманная фраза к этому добавит вранья.
+     *
+     * @param  string|null  $written  текст модели вместо строки события из меты
      */
-    private function hook(object $row, ?TelegramChatBroadcastItem $item = null): string
+    private function hook(object $row, ?TelegramChatBroadcastItem $item = null, ?string $written = null): string
     {
         $limit = (int) config('broadcast_digest.named_line_chars', 130);
 
         // 1. Строка модели написана ПОД ЭТУ СТРОКУ — целиком, а не первой
         // фразой из анонса. Резать её по первому предложению нельзя: панч у
         // такой строки обычно во второй половине.
-        $written = $item?->digestHook((int) $row->id);
+        $written ??= $item?->digestHook((int) $row->id);
         if ($written !== null) {
             return $this->typography($this->trimToWord((string) preg_replace('/\s+/u', ' ', $written), (int) round($limit * 1.3)));
         }

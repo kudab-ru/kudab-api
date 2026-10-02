@@ -1339,7 +1339,8 @@ class TelegramChatBroadcastService
      */
     private static function withoutStaleDigestText(array $meta, array $roster): array
     {
-        unset($meta['intro'], $meta['roster'], $meta['text_asked']);
+        $meta = TelegramChatBroadcastItem::withoutDigestIntro($meta);
+        unset($meta['text_asked']);
 
         $keep = array_flip(array_map('strval', $roster));
         $hooks = array_intersect_key((array) ($meta['hooks'] ?? []), $keep);

@@ -1858,7 +1858,7 @@ class AdminBroadcastController extends Controller
         if ($request->has('intro')) {
             $intro = trim((string) ($data['intro'] ?? ''));
             if ($intro === '') {
-                unset($meta['intro'], $meta['roster']);
+                $meta = TelegramChatBroadcastItem::withoutDigestIntro($meta);
             } else {
                 $meta['intro'] = $intro;
                 // Подводка говорит про НАБОР, поэтому помечаем, под какой
@@ -4491,6 +4491,10 @@ class AdminBroadcastController extends Controller
             // Подводка и бюджет фразы: править их можно только увидев.
             'digest_intro' => $i->kind === TelegramChatBroadcastItem::KIND_DIGEST
                 ? (($i->digest_meta ?? [])['intro'] ?? null)
+                : null,
+            // у этого события в составе нет своей фразы: его фраза — подводка
+            'digest_intro_event' => $i->kind === TelegramChatBroadcastItem::KIND_DIGEST
+                ? $i->digestIntroEvent()
                 : null,
             'hook_budget' => $i->kind === TelegramChatBroadcastItem::KIND_DIGEST
                 ? (int) (($i->digest_meta ?? [])['hook_budget'] ?? 0)
