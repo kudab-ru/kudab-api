@@ -787,7 +787,7 @@ final class BroadcastDigestComposer
     }
 
     /**
-     * Событие, от которого канал недавно отказался, рубрика не предлагает.
+     * Событие, от которого канал недавно отказался или которое сняли из ленты руками, рубрика не предлагает.
      *
      * Тот же срок и тот же признак, что у ленты: запись со статусом rejected,
      * тронутая за последние REJECTED_COOLDOWN_DAYS суток. Второго механизма
@@ -812,7 +812,25 @@ final class BroadcastDigestComposer
             ->where('i.updated_at', '>=', $since)
             ->get(['e.id', 'e.event_group_id', 'e.title']);
 
-        if ($cold->isEmpty()) {
+        // снятое руками — те же правила, что в `TelegramChatBroadcastService::channelCandidates`
+        $removedIds = DB::table('telegram.chat_broadcast_item_events as l')
+            ->join('telegram.chat_broadcast_items as i', 'i.id', '=', 'l.item_id')
+            ->where('i.broadcast_id', $broadcast->id)
+            ->where('i.status', TelegramChatBroadcastItem::STATUS_SKIPPED)
+            ->where('i.error_message', TelegramChatBroadcastItem::REMOVED_BY_HAND)
+            ->pluck('l.event_id')->map(fn ($v) => (int) $v)->all();
+        $pausedGroups = DB::table('telegram.chat_broadcast_items as i')
+            ->join('events as e', 'e.id', '=', 'i.event_id')
+            ->where('i.broadcast_id', $broadcast->id)
+            ->whereIn('i.status', [TelegramChatBroadcastItem::STATUS_SKIPPED, TelegramChatBroadcastItem::STATUS_REJECTED])
+            ->whereNotNull('e.event_group_id')
+            ->whereRaw(
+                "(i.pick_meta->>'".TelegramChatBroadcastItem::PICK_REMOVED_AT."')::timestamptz >= ?::timestamptz",
+                [Carbon::now()->subDays(TelegramChatBroadcastService::REMOVED_SERIES_PAUSE_DAYS)->toIso8601String()],
+            )
+            ->pluck('e.event_group_id')->map(fn ($v) => (int) $v)->all();
+
+        if ($cold->isEmpty() && $removedIds === [] && $pausedGroups === []) {
             return $rows;
         }
 
@@ -820,8 +838,8 @@ final class BroadcastDigestComposer
         // ПОСЛЕ этой отсечки: выброшенный спектакль вернулся бы следующей
         // датой того же названия сразу же, и кнопка «больше не предлагать»
         // выглядела бы сломанной.
-        $ids = $cold->pluck('id')->map(fn ($v) => (int) $v)->all();
-        $groups = $cold->pluck('event_group_id')->filter()->map(fn ($v) => (int) $v)->all();
+        $ids = [...$cold->pluck('id')->map(fn ($v) => (int) $v)->all(), ...$removedIds];
+        $groups = [...$cold->pluck('event_group_id')->filter()->map(fn ($v) => (int) $v)->all(), ...$pausedGroups];
         $titles = $cold->pluck('title')->map(fn ($t) => $this->titleKey((string) $t))->filter()->all();
 
         return $rows->reject(function ($r) use ($ids, $groups, $titles) {

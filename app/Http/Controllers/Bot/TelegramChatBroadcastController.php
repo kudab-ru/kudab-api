@@ -615,7 +615,7 @@ class TelegramChatBroadcastController extends Controller
     }
 
     /**
-     * Убрать одно событие из очереди для канала (пометить как skipped).
+     * Убрать одно событие из очереди для канала, как крестиком в админке.
      *
      * POST /api/bot/broadcast/single/queue/skip
      *
@@ -624,7 +624,7 @@ class TelegramChatBroadcastController extends Controller
      *   "telegram_id": 123456789,
      *   "telegram_chat_id": -1001234567890,
      *   "event_id": 174,
-     *   "reason": "cancelled_by_user" // опционально
+     *   "reason": "manual_skip" // бот присылает, api не читает
      * }
      */
     public function skipSingleFromQueue(Request $request): JsonResponse
@@ -639,14 +639,12 @@ class TelegramChatBroadcastController extends Controller
         $telegramId = (int) $validated['telegram_id'];
         $telegramChatId = (int) $validated['telegram_chat_id'];
         $eventId = (int) $validated['event_id'];
-        $reason = $validated['reason'] ?? null;
 
         try {
             $this->broadcastService->skipSingleEventForChat(
                 $telegramId,
                 $telegramChatId,
                 $eventId,
-                $reason,
             );
 
             return response()->json(['ok' => true]);

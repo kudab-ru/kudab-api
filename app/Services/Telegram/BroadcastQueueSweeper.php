@@ -189,7 +189,9 @@ final class BroadcastQueueSweeper
 
     /**
      * День, закрепление и ручной текст остаются. В ручном тексте ссылку на удалённую карточку
-     * меняем на выжившую: удалённую сайт отдаёт как 404. Связь «пост → события» перепишет обсервер.
+     * меняем на выжившую: удалённую сайт отдаёт как 404. Связь «пост → события» перепишет
+     * `TelegramChatBroadcastItemObserver`. Ручной выбор картинок сбрасываем: форма правки принимает
+     * только картинки выжившей карточки.
      */
     private function moveTo(TelegramChatBroadcastItem $item, Event $survivor, string $via, Carbon $now): array
     {
@@ -204,6 +206,11 @@ final class BroadcastQueueSweeper
             // текст из шаблона собран про прежнюю карточку; пустой соберут заново лента в админке и доставка
             $item->caption = null;
             $item->caption_source = null;
+        }
+
+        if (is_array($item->photo_urls)) {
+            $item->photo_urls = null;
+            $item->forgetEdit(TelegramChatBroadcastItem::EDIT_PHOTOS);
         }
 
         $meta = (array) ($item->pick_meta ?? []);

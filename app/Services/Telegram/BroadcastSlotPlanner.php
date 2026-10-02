@@ -16,7 +16,10 @@ class BroadcastSlotPlanner
 {
     public const TZ = 'Europe/Moscow';
 
-    /** В `eve` завтрашние посты выбираются после последнего сегодняшнего, на ближайшем пятиминутном прогоне. */
+    /**
+     * В `eve` завтрашние посты выбираются после последнего сегодняшнего, на ближайшем пятиминутном прогоне.
+     * Админка повторяет его в `eveOpensAt` (broadcast/index.vue) и `evePickTime` (broadcast/settings.vue).
+     */
     public const EVE_DELAY_MINUTES = 5;
 
     /**

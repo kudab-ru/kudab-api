@@ -114,6 +114,37 @@ class BroadcastDigestComposerTest extends TestCase
         $this->assertSame(5, $out['total'], 'занятое событие вычтено и из счётчика');
     }
 
+    public function test_series_removed_from_the_feed_by_hand_is_not_named(): void
+    {
+        $broadcast = $this->makeChannel();
+        $events = [];
+        foreach ([1, 2, 3, 4, 5, 6, 2, 3] as $i => $n) {
+            $events[] = $this->themedEvent("Спектакль {$i}", $n);
+        }
+        $group = (int) DB::table('event_groups')->insertGetId([
+            'community_id' => DB::table('events')->where('id', $events[0])->value('community_id'),
+            'group_key' => 'show-'.$events[0],
+            'title_norm' => 'спектакль',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('events')->whereIn('id', [$events[0], $events[1]])->update(['event_group_id' => $group]);
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $broadcast->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_EVENT;
+        $item->event_id = $events[0];
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->save();
+        $item->removeByHand();
+        $item->save();
+
+        $out = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $this->assertSame(6, $out['total'], 'снятое и другая дата его серии вычтены');
+    }
+
     /**
      * Событие, которое в первой строке описания называет ЧУЖОЙ жанр, в тему не
      * идёт — какой бы тег ему ни поставила разметка.

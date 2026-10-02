@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Telegram;
 
+use App\Contracts\Telegram\BotRoleServiceInterface;
 use App\Models\City;
 use App\Models\Community;
 use App\Models\Event;
@@ -893,6 +894,8 @@ class BroadcastSlotsTest extends TestCase
         $item->is_pinned = true;
         $item->caption = '<a href="https://kudab.ru/events/'.$deleted->id.'?utm_source=tg">Гуф</a>';
         $item->caption_source = TelegramChatBroadcastItem::CAPTION_MANUAL;
+        $item->photo_urls = ['https://example.test/guf.jpg'];
+        $item->markEdited([TelegramChatBroadcastItem::EDIT_PHOTOS, TelegramChatBroadcastItem::EDIT_CAPTION]);
         $item->save();
 
         $deleted->delete();
@@ -918,6 +921,8 @@ class BroadcastSlotsTest extends TestCase
             $this->assertSame($survivor->id, $fresh->event_id);
             $this->assertTrue($fresh->is_pinned);
             $this->assertStringContainsString('/events/'.$survivor->id.'?', (string) $fresh->caption);
+            $this->assertNull($fresh->photo_urls, 'картинки удалённой карточки форма выжившей не примет');
+            $this->assertNotContains(TelegramChatBroadcastItem::EDIT_PHOTOS, (array) $fresh->edited_fields);
         } else {
             $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $fresh->status);
             $this->assertSame($deleted->id, $fresh->event_id, 'запись не перевешена');
@@ -1602,7 +1607,17 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
-    public function test_event_removed_by_hand_is_not_put_back_by_the_filler(): void
+    /** @return array<string, array{string}> */
+    public static function removalPaths(): array
+    {
+        return [
+            'крестик в админке' => ['admin'],
+            '«Убрать из очереди» в боте' => ['bot'],
+        ];
+    }
+
+    #[DataProvider('removalPaths')]
+    public function test_event_removed_by_hand_is_not_put_back_by_the_filler(string $path): void
     {
         Carbon::setTestNow(Carbon::parse('2026-09-15 06:00:00', 'UTC')); // 09:00 МСК
 
@@ -1610,15 +1625,20 @@ class BroadcastSlotsTest extends TestCase
         $user = \App\Models\User::factory()->create();
         $user->assignRole('superadmin');
         \Laravel\Sanctum\Sanctum::actingAs($user);
+        $this->mock(BotRoleServiceInterface::class, fn ($m) => $m->shouldReceive('getRoleByTelegramId')->andReturn('user'));
 
-        [$broadcast] = $this->channelWithEvents(1);
+        [$broadcast, $events] = $this->channelWithEvents(1);
         $broadcast->slots = [10];
         $broadcast->save();
 
         $this->service()->fillFeedDays($broadcast->fresh(), now());
         $item = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->firstOrFail();
 
-        $this->deleteJson("/api/admin/broadcast/items/{$item->id}")->assertOk();
+        if ($path === 'admin') {
+            $this->deleteJson("/api/admin/broadcast/items/{$item->id}")->assertOk();
+        } else {
+            $this->service()->skipSingleEventForChat(9100200, -1009100200, $events[0]->id);
+        }
         $this->service()->fillFeedDays($broadcast->fresh(), now());
 
         $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $item->fresh()->status);
@@ -1800,6 +1820,69 @@ class BroadcastSlotsTest extends TestCase
             ->where('broadcast_id', $broadcast->id)
             ->where('publish_at', $slot)
             ->count());
+
+        Carbon::setTestNow();
+    }
+
+    public function test_failed_send_now_revived_by_the_filler_takes_its_slot_alone(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 06:00:00', 'UTC')); // 09:00 МСК
+
+        [$broadcast, $events] = $this->channelWithEvents(6);
+        $broadcast->settings = array_merge((array) $broadcast->settings, ['slots' => [10], 'horizon_days' => 1, 'feed_limit' => 5]);
+        $broadcast->save();
+
+        $failed = $this->makeItem($broadcast->id, $events[0]->id, TelegramChatBroadcastItem::STATUS_ERROR);
+        $failed->is_off_grid = true;
+        $failed->publish_at = now()->subDay();
+        $failed->planned_at = now()->addDays(5);
+        $failed->save();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $failed->fresh()->status, 'наполнитель взял это событие');
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $open = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('status', TelegramChatBroadcastItem::STATUS_PENDING)
+            ->get();
+        $this->assertSame($open->count(), $open->pluck('publish_at')->unique()->count(), 'в слоте один пост');
+        $this->assertNull($failed->fresh()->planned_at, 'старая придержка не держит пост в новом слоте');
+
+        Carbon::setTestNow();
+    }
+
+    public function test_overdue_post_keeps_what_the_owner_did_while_waiting_for_the_lock(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 09:00:00', 'UTC')); // 12:00 МСК
+
+        [$broadcast, $events] = $this->channelWithEvents(1);
+        $broadcast->settings = array_merge((array) $broadcast->settings, ['slots' => [10, 19], 'min_gap_minutes' => 0]);
+        $broadcast->save();
+
+        $item = $this->makeItem($broadcast->id, $events[0]->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = Carbon::parse('2026-09-15 08:00', 'Europe/Moscow')->utc();
+        $item->save();
+
+        // крестик владельца успевает раньше: доставка ждёт блокировку канала, пока он сохраняется
+        $removed = false;
+        DB::listen(function ($query) use (&$removed, $item) {
+            if ($removed || ! str_contains(strtolower($query->sql), 'for update')) {
+                return;
+            }
+            $removed = true;
+            $fresh = TelegramChatBroadcastItem::query()->findOrFail($item->id);
+            $fresh->removeByHand();
+            $fresh->save();
+        });
+
+        $this->service()->collectDueSingleRuns(now(), 20);
+
+        $fresh = $item->fresh();
+        $this->assertTrue($removed);
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $fresh->status);
+        $this->assertArrayHasKey(TelegramChatBroadcastItem::PICK_REMOVED_AT, (array) $fresh->pick_meta);
+        $this->assertNotNull($fresh->publish_at, 'день снятого поста остаётся');
 
         Carbon::setTestNow();
     }

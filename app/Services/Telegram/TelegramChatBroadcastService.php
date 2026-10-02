@@ -41,7 +41,7 @@ class TelegramChatBroadcastService
     public const REJECTED_COOLDOWN_DAYS = 30;
 
     /** Сколько дней после снятия руками автоподбор не берёт другие даты той же серии; само событие не вернётся никогда. */
-    private const REMOVED_SERIES_PAUSE_DAYS = 18;
+    public const REMOVED_SERIES_PAUSE_DAYS = 18;
 
     /** Окно cross-time анти-дубля: не повторять тот же заголовок в канале N дней. */
     private const CROSS_TIME_WINDOW_DAYS = 14;
@@ -61,7 +61,10 @@ class TelegramChatBroadcastService
      */
     private const SCHEDULE_TZ = 'Europe/Moscow';
 
-    /** Сколько ждать после открытия завтрашних слотов, прежде чем пустой слот считать сбоем: три прогона наполнителя. */
+    /**
+     * Сколько ждать после открытия завтрашних слотов, прежде чем пустой слот считать сбоем: три прогона наполнителя.
+     * Его же ждёт `eveQuietWindow` в ленте админки.
+     */
     private const EVE_EMPTY_GRACE_MINUTES = 15;
 
     /** С этого часа по Москве о пустом завтра пишет бот; плашка в админке видна раньше. */
@@ -446,15 +449,11 @@ class TelegramChatBroadcastService
         ];
     }
 
-    /**
-     * Пометить событие как убранное из очереди (status = skipped)
-     * для заданного Telegram-чата.
-     */
+    /** «Убрать из очереди» в боте снимает пост так же, как крестик в админке. */
     public function skipSingleEventForChat(
         int $telegramId,
         int $telegramChatId,
         int $eventId,
-        ?string $reason = null,
     ): void {
         [$chat] = $this->resolveManagedChat($telegramId, $telegramChatId);
 
@@ -469,10 +468,17 @@ class TelegramChatBroadcastService
             return;
         }
 
-        $this->broadcastItemRepository->markSkipped(
-            $item,
-            $reason ?: 'cancelled_by_user',
-        );
+        DB::transaction(function () use ($broadcast, $item) {
+            TelegramChatBroadcast::lockFeed((int) $broadcast->id);
+            $item->refresh();
+
+            if ($item->posted_at !== null) {
+                return;
+            }
+
+            $item->removeByHand();
+            $item->save();
+        });
     }
 
     /**
@@ -566,7 +572,14 @@ class TelegramChatBroadcastService
                 }
 
                 DB::transaction(function () use ($broadcast, $item, $now) {
+                    [$status, $publishAt] = [$item->status, $item->publish_at];
                     TelegramChatBroadcast::lockFeed((int) $broadcast->id);
+                    $item->refresh();
+
+                    // пока ждали блокировку, владелец мог снять или перенести пост
+                    if ($item->status !== $status || $item->posted_at !== null || ! $item->publish_at?->eq($publishAt)) {
+                        return;
+                    }
 
                     // событие без дня ждёт суточного окна расписания; портрету день назначаем заново,
                     // иначе он уйдёт в это же окно и собьёт свой недельный каденс
@@ -1561,7 +1574,7 @@ class TelegramChatBroadcastService
 
         // Кандидатный пул — ближайшие, кап; качество выбираем скорингом в PHP.
         $candidates = DB::transaction(function () use ($query) {
-            // планировщик сильно переоценивает этот запрос и компилирует его секунды, а выполняется он за доли секунды
+            // Postgres завышает стоимость этого запроса и на секунды включает JIT, а сам запрос идёт доли секунды
             DB::statement('SET LOCAL jit = off');
 
             return $query
@@ -1698,6 +1711,7 @@ class TelegramChatBroadcastService
                     ->where('telegram.chat_broadcast_items.updated_at', '>=', $rejectedSince);
             })
             // Снятое крестиком обратно не ставим: по тому же баллу оно вернулось бы в тот же слот.
+            // Подборка повторяет это и паузу серии: см. `BroadcastDigestComposer::rejectRecentlyRejected`
             ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId) {
                 $q->where('broadcast_id', $broadcastId)
                     ->where('status', TelegramChatBroadcastItem::STATUS_SKIPPED)
@@ -2198,8 +2212,8 @@ class TelegramChatBroadcastService
                     continue;
                 }
 
-                // Кап канала, а не голодание пула (то — no_candidate). В `eve` не действует:
-                // автопостов там не больше чем на сутки, а кап считает и ручные посты на дальние дни.
+                // Предел ленты канала (`feed_limit`), а не нехватка кандидатов (то — `no_candidate`). В `eve` не действует:
+                // автопостов там не больше чем на сутки, а предел считает и ручные посты на дальние дни.
                 if (! $eve && $openEvents >= $broadcast->feed_limit) {
                     if ($summary['feed_limit'] === 0) {
                         Log::info('broadcast.feed.limit_reached', [
@@ -2266,6 +2280,9 @@ class TelegramChatBroadcastService
                 $item->claimed_at = null;
                 $item->claim_token = null;
                 $item->publish_at = $publishAt->copy()->utc();
+                $item->planned_at = null;
+                // строка могла остаться от неудачной отправки «сейчас», а такая слот не занимает
+                $item->is_off_grid = false;
                 // Текст пересобираем: он зависит от дня публикации. Свой не трогаем.
                 if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
                     $item->caption = null;
@@ -2800,7 +2817,7 @@ class TelegramChatBroadcastService
 
     /**
      * Задача «на завтра не выбрано» или null. В `eve` пустой завтрашний слот после EVE_ALARM_HOUR
-     * значит, что наполнитель не отработал. Не чаще раза на дату: поллер тикает каждую минуту.
+     * значит, что наполнитель не отработал. Не чаще раза на дату: бот опрашивает api каждую минуту.
      */
     private function buildTomorrowNoticeTask(
         TelegramChatBroadcast $broadcast,
