@@ -2816,7 +2816,7 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * Задача «на завтра не выбрано» или null. В `eve` пустой завтрашний слот после EVE_ALARM_HOUR
+     * Задача «на завтра не выбрано» или null. В `eve` пустой слот после EVE_ALARM_HOUR
      * значит, что наполнитель не отработал. Не чаще раза на дату: бот опрашивает api каждую минуту.
      */
     private function buildTomorrowNoticeTask(
@@ -2829,7 +2829,7 @@ class TelegramChatBroadcastService
             return null;
         }
 
-        $empty = $this->emptySlotsTomorrow($broadcast, $now);
+        $empty = $this->unpickedEveSlots($broadcast, $now);
         if ($empty === []) {
             return null;
         }
@@ -2857,7 +2857,7 @@ class TelegramChatBroadcastService
             'telegram_chat_id' => (int) $chat->telegram_chat_id,
             'notify_telegram_id' => (int) $ownerTelegramId,
             'text' => sprintf(
-                "⚠️ Канал %s: посты на завтра, %s, не выбраны — пусто в %s\n\n"
+                "⚠️ Канал %s: посты на %s не выбраны — пусто в %s\n\n"
                 .'Их выбирают сразу после последнего поста дня и потом каждые 5 минут. Обычно это значит, '
                 .'что стоит планировщик api или в городе не нашлось подходящих событий — посмотри ленту канала в админке.',
                 $where,
@@ -2868,36 +2868,40 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * Пустые слоты завтрашнего дня в `eve`, когда выбор на завтра уже должен был пройти:
-     * с открытия слотов прошло EVE_EMPTY_GRACE_MINUTES. Админка показывает их плашкой, бот
-     * пишет владельцу (buildTomorrowNoticeTask). В `week` и у выключенного канала — пусто.
+     * Пустые будущие слоты сегодня и завтра в `eve`, чей выбор уже должен был пройти:
+     * с открытия слотов прошло EVE_EMPTY_GRACE_MINUTES. После полуночи вчерашняя тревога
+     * держится, пока не пройдёт сам слот. В `week` и у выключенного канала — пусто.
      *
      * @return list<Carbon> начало слота по Москве
      */
-    public function emptySlotsTomorrow(TelegramChatBroadcast $broadcast, Carbon $now): array
+    public function unpickedEveSlots(TelegramChatBroadcast $broadcast, Carbon $now): array
     {
         if (! $broadcast->picksOnEve() || ! $broadcast->enabled || $broadcast->period === 'off') {
             return [];
         }
 
-        $day = $now->copy()->setTimezone(self::SCHEDULE_TZ)->addDay()->startOfDay();
-        $weekday = $this->periodWeekday($broadcast);
-        if ($weekday !== null && $day->dayOfWeek !== $weekday) {
-            return [];
-        }
-
         $slots = $this->effectiveSlots($broadcast);
-        $opensAt = $this->slotPlanner->opensAt($broadcast, $day->copy()->setTime($slots[0], 0), 0);
-        if ($opensAt === null || $now->lt($opensAt->copy()->addMinutes(self::EVE_EMPTY_GRACE_MINUTES))) {
-            return [];
-        }
-
-        $taken = $this->takenSlots((int) $broadcast->id);
+        $weekday = $this->periodWeekday($broadcast);
+        $today = $now->copy()->setTimezone(self::SCHEDULE_TZ)->startOfDay();
+        $taken = null;
         $empty = [];
-        foreach ($slots as $hour) {
-            $at = $day->copy()->setTime($hour, 0);
-            if (! array_key_exists($this->slotKey($at), $taken)) {
-                $empty[] = $at;
+
+        foreach ([$today, $today->copy()->addDay()] as $day) {
+            if ($weekday !== null && $day->dayOfWeek !== $weekday) {
+                continue;
+            }
+
+            $opensAt = $this->slotPlanner->opensAt($broadcast, $day->copy()->setTime($slots[0], 0), 0);
+            if ($opensAt === null || $now->lt($opensAt->copy()->addMinutes(self::EVE_EMPTY_GRACE_MINUTES))) {
+                continue;
+            }
+
+            $taken ??= $this->takenSlots((int) $broadcast->id);
+            foreach ($slots as $hour) {
+                $at = $day->copy()->setTime($hour, 0);
+                if ($at->gt($now) && ! array_key_exists($this->slotKey($at), $taken)) {
+                    $empty[] = $at;
+                }
             }
         }
 

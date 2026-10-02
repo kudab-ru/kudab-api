@@ -72,7 +72,7 @@ class SweepQueueCommand extends Command
     }
 
     /**
-     * Тот же код в транзакции с откатом: отдельная сухая ветка быстро разошлась бы с настоящей.
+     * Сухой прогон — как у broadcast:fill-feed, см. `FillFeedCommand::wouldFill`.
      *
      * @return array{checked: int, done: list<array<string, mixed>>}
      */

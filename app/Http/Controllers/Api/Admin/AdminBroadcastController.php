@@ -1004,6 +1004,7 @@ class AdminBroadcastController extends Controller
             }
         }
 
+        $displaced = null;
         if ($request->has('publish_at')) {
             $newAt = $this->toUtc($data['publish_at']);
 
@@ -1016,7 +1017,7 @@ class AdminBroadcastController extends Controller
             // поставить два поста на один день или увести анонс за событие —
             // мимо всех защит, которые стоят на соседних путях.
             if ($newAt !== null) {
-                $refusal = DB::transaction(function () use ($item, $newAt, $moved) {
+                $refusal = DB::transaction(function () use ($item, $newAt, $moved, &$displaced) {
                     $itemEvents = $this->itemEvents($item);
                     if (! PostTiming::fitsAll($itemEvents, $newAt)) {
                         return [$this->tooLateMessageForEvents($itemEvents), 422];
@@ -1039,7 +1040,7 @@ class AdminBroadcastController extends Controller
                     }
 
                     if ($occupant) {
-                        $this->displace($occupant, $broadcast);
+                        $displaced = $this->displace($occupant, $broadcast);
                     }
 
                     return null;
@@ -1116,6 +1117,7 @@ class AdminBroadcastController extends Controller
                 Event::query()->with('venue:id,name')->find($item->event_id),
                 $item->venue_id ? \App\Models\Venue::query()->find($item->venue_id, ['id', 'name']) : null,
             ),
+            'meta' => ['displaced' => $displaced],
         ]);
     }
 
@@ -4314,15 +4316,15 @@ class AdminBroadcastController extends Controller
             ];
         }
 
-        $emptyTomorrow = $this->broadcasts->emptySlotsTomorrow($b, Carbon::now());
-        if ($emptyTomorrow !== []) {
+        $unpicked = $this->broadcasts->unpickedEveSlots($b, Carbon::now());
+        if ($unpicked !== []) {
             $out[] = [
                 'level' => 'danger',
                 'text' => sprintf(
-                    'Посты на завтра, %s, не выбраны — пусто в %s. Их выбирают сразу после последнего поста дня '
+                    'Посты на %s не выбраны — пусто в %s. Их выбирают сразу после последнего поста дня '
                     .'и потом каждые 5 минут: скорее всего, стоит планировщик api или в городе нет подходящих событий.',
-                    $emptyTomorrow[0]->format('d.m'),
-                    implode(', ', array_map(fn (Carbon $at) => $at->format('H:i'), $emptyTomorrow)),
+                    $unpicked[0]->format('d.m'),
+                    implode(', ', array_map(fn (Carbon $at) => $at->format('H:i'), $unpicked)),
                 ),
             ];
         }

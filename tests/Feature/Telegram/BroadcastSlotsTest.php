@@ -547,6 +547,35 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
+    /** @return array<string, array{string, list<string>}> */
+    public static function unpickedSlotsAfterMidnight(): array
+    {
+        return [
+            'после полуночи' => ['2026-09-16 00:30', ['2026-09-16 10:00', '2026-09-16 19:00']],
+            'утренний слот прошёл' => ['2026-09-16 12:00', ['2026-09-16 19:00']],
+        ];
+    }
+
+    #[DataProvider('unpickedSlotsAfterMidnight')]
+    public function test_empty_day_stays_flagged_after_midnight(string $now, array $expected): void
+    {
+        Carbon::setTestNow(Carbon::parse($now, 'Europe/Moscow')->utc());
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10, 19],
+            'pick_mode' => TelegramChatBroadcast::PICK_MODE_EVE,
+        ]);
+        $broadcast->save();
+
+        $this->assertSame($expected, array_map(
+            fn (Carbon $at) => $at->format('Y-m-d H:i'),
+            $this->service()->unpickedEveSlots($broadcast->fresh(), now()),
+        ));
+
+        Carbon::setTestNow();
+    }
+
     /** Без настройки оба слота заполняются как раньше — на весь горизонт. */
     public function test_without_the_setting_both_slots_fill_the_horizon(): void
     {
@@ -842,7 +871,6 @@ class BroadcastSlotsTest extends TestCase
             'событие впереди — запись ждёт дальше');
     }
 
-    /** Запись, чей час прошёл, подметальщик не трогает: за неё отвечает доставка. */
     public function test_sweeper_leaves_scheduled_posts_alone(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-09-15 12:00:00', 'UTC'));
@@ -852,6 +880,7 @@ class BroadcastSlotsTest extends TestCase
         $past = $this->eventAt($city->id, 'Начавшийся концерт', Carbon::parse('2026-09-15 11:00', 'UTC'));
 
         $item = $this->makeItem($broadcast->id, $past->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        // час записи уже прошёл — её судьбу решает доставка
         $item->publish_at = Carbon::parse('2026-09-15 07:00', 'UTC');
         $item->save();
 

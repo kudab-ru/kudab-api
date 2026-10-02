@@ -102,7 +102,9 @@ class AdminBroadcastSkippedTest extends TestCase
 
         $this->patchJson("/api/admin/broadcast/items/{$moving->id}", [
             'publish_at' => $day->toIso8601String(),
-        ])->assertOk();
+        ])->assertOk()
+            ->assertJsonPath('meta.displaced.id', $occupant->id)
+            ->assertJsonPath('meta.displaced.removed', false);
 
         // Занявший день уступает место и возвращается в общую очередь — как
         // при постановке. Два поста на одном дне не появляются.
