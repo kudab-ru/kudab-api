@@ -2,8 +2,10 @@
 
 namespace App\Models;
 
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\Cache;
 
 class TelegramChatBroadcast extends Model
 {
@@ -42,6 +44,14 @@ class TelegramChatBroadcast extends Model
     public static function lockFeed(int $broadcastId): void
     {
         static::query()->whereKey($broadcastId)->lockForUpdate()->first();
+    }
+
+    /**
+     * Повторяющуюся запись в лог канала писать не чаще раза в час: наполнитель ходит каждые 5 минут.
+     */
+    public static function firstThisHour(string $what, int $broadcastId, Carbon $now): bool
+    {
+        return Cache::add('broadcast:log:'.$what.':'.$broadcastId.':'.$now->format('Y-m-d-H'), 1, 3600);
     }
 
     /** Больше четырёх постов в день канал-афиша не выдержит по содержанию. */

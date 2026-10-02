@@ -15,6 +15,7 @@ use App\Services\Telegram\TelegramChatBroadcastService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
@@ -1274,9 +1275,12 @@ class BroadcastSlotsTest extends TestCase
         $broadcast->horizon_days = 6;
         $broadcast->feed_limit = 2;
         $broadcast->save();
+        Log::spy();
 
         $summary = $this->service()->fillFeedDays($broadcast->fresh(), now());
+        $this->service()->fillFeedDays($broadcast->fresh(), now()->addMinutes(5));
 
+        Log::shouldHaveReceived('info')->with('broadcast.feed.limit_reached', \Mockery::any())->once();
         $this->assertSame(2, $summary['filled'], 'заполнено ровно до капа');
         $this->assertGreaterThan(0, $summary['feed_limit'], 'остальные слоты не тронуты именно из-за капа');
         $this->assertSame(0, $summary['no_candidate'], 'пул при этом не пуст — событий шесть');

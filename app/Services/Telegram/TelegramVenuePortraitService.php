@@ -125,11 +125,13 @@ class TelegramVenuePortraitService
 
         $venue = $this->pickNextVenueForChat((int) $chat->city_id, (int) $broadcast->id, $now);
         if (! $venue) {
-            Log::info('venue_portrait.enqueue.no_candidate', [
-                'broadcast_id' => $broadcast->id,
-                'city_id' => $chat->city_id,
-                'hint' => 'нет площадки с tg_portrait вне кулдауна/кросс-формата',
-            ]);
+            if (TelegramChatBroadcast::firstThisHour('portrait_no_candidate', (int) $broadcast->id, $now)) {
+                Log::info('venue_portrait.enqueue.no_candidate', [
+                    'broadcast_id' => $broadcast->id,
+                    'city_id' => $chat->city_id,
+                    'hint' => 'нет площадки с tg_portrait вне кулдауна/кросс-формата',
+                ]);
+            }
 
             return 'no_candidate';
         }
@@ -137,10 +139,12 @@ class TelegramVenuePortraitService
         // нет свободного слота — ждём следующего прогона, мимо расписания не ставим
         $publishAt = $this->slotPlanner->nextFreeSlot($broadcast, $now);
         if (! $publishAt) {
-            Log::info('venue_portrait.enqueue.no_free_slot', [
-                'broadcast_id' => $broadcast->id,
-                'venue_id' => $venue->id,
-            ]);
+            if (TelegramChatBroadcast::firstThisHour('portrait_no_free_slot', (int) $broadcast->id, $now)) {
+                Log::info('venue_portrait.enqueue.no_free_slot', [
+                    'broadcast_id' => $broadcast->id,
+                    'venue_id' => $venue->id,
+                ]);
+            }
 
             return 'skipped_no_slot';
         }

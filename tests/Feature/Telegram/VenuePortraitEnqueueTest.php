@@ -15,6 +15,7 @@ use App\Services\Telegram\TelegramVenuePortraitService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -129,7 +130,16 @@ class VenuePortraitEnqueueTest extends TestCase
         Carbon::setTestNow();
     }
 
-    public function test_eve_puts_the_due_portrait_before_the_regular_posts(): void
+    public static function pickModes(): array
+    {
+        return [
+            'накануне' => [TelegramChatBroadcast::PICK_MODE_EVE],
+            'на неделю' => [TelegramChatBroadcast::PICK_MODE_WEEK],
+        ];
+    }
+
+    #[DataProvider('pickModes')]
+    public function test_due_portrait_goes_before_the_regular_posts(string $mode): void
     {
         Carbon::setTestNow(Carbon::parse('2026-09-15 16:05:00', 'UTC')); // 19:05 МСК
 
@@ -144,7 +154,7 @@ class VenuePortraitEnqueueTest extends TestCase
         $broadcast = $this->createBroadcast($chat->id, 'daily_10');
         $broadcast->settings = array_merge($broadcast->settings, [
             'slots' => [10, 19],
-            'pick_mode' => TelegramChatBroadcast::PICK_MODE_EVE,
+            'pick_mode' => $mode,
         ]);
         $broadcast->save();
 
@@ -158,11 +168,11 @@ class VenuePortraitEnqueueTest extends TestCase
             '2026-09-16 10',
             Carbon::parse($portrait->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H'),
         );
-        $this->assertSame(1, TelegramChatBroadcastItem::query()
+        $this->assertTrue(TelegramChatBroadcastItem::query()
             ->where('broadcast_id', $broadcast->id)
             ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
-            ->whereNotNull('publish_at')
-            ->count(), 'второй слот завтра занят обычным постом');
+            ->where('publish_at', Carbon::parse('2026-09-16 16:00:00', 'UTC'))
+            ->exists(), 'второй слот завтра занят обычным постом');
 
         Carbon::setTestNow();
     }

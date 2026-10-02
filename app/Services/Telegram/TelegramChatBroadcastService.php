@@ -2184,9 +2184,10 @@ class TelegramChatBroadcastService
                 $summary['picks'][] = $this->pickRow($publishAt, $fromWaiting, 'waiting', 'waiting');
             }
 
-            // Портрет — после ждущих, но раньше обычных постов: в 19:05 наполнитель занял бы все
-            // слоты завтра раньше часового прогона портретов, и портрет без слота уехал бы на сутки.
-            if ($eve && $this->venuePortraitService->enqueueDuePortrait($broadcast, $now)
+            // Портрет — после ждущих, но раньше обычных постов: иначе освободившийся слот и вечерний
+            // выбор займёт событие раньше часового прогона портретов, и портрет уедет на дни.
+            $freeHere = array_filter($open, fn (Carbon $at) => ! array_key_exists($this->slotKey($at), $taken));
+            if ($freeHere !== [] && $this->venuePortraitService->enqueueDuePortrait($broadcast, $now)
                 === TelegramVenuePortraitService::PORTRAIT_ENQUEUED) {
                 $portrait = TelegramChatBroadcastItem::query()
                     ->where('broadcast_id', $broadcast->id)
@@ -2215,7 +2216,8 @@ class TelegramChatBroadcastService
                 // Предел ленты канала (`feed_limit`), а не нехватка кандидатов (то — `no_candidate`). В `eve` не действует:
                 // автопостов там не больше чем на сутки, а предел считает и ручные посты на дальние дни.
                 if (! $eve && $openEvents >= $broadcast->feed_limit) {
-                    if ($summary['feed_limit'] === 0) {
+                    if ($summary['feed_limit'] === 0
+                        && TelegramChatBroadcast::firstThisHour('feed_limit', (int) $broadcast->id, $now)) {
                         Log::info('broadcast.feed.limit_reached', [
                             'broadcast_id' => $broadcast->id,
                             'open_events' => $openEvents,
