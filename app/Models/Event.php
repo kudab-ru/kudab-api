@@ -13,7 +13,10 @@ class Event extends Model
 {
     use HasFactory, SoftDeletes;
 
-    /** Виды событий, которых нет в телеграм-канале: ни в ленте, ни в подборке. */
+    /**
+     * Виды, которые автоподбор не ставит в телеграм-канал: ни в ленту, ни в подборку.
+     * Руками в подборку можно, см. `BroadcastDigestComposer::candidatesForItem`.
+     */
     public const CHANNEL_HIDDEN_KINDS = ['official', 'religious', 'civic'];
 
     /**
