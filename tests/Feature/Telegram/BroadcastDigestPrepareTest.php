@@ -242,7 +242,7 @@ class BroadcastDigestPrepareTest extends TestCase
         $this->assertNotSame($twinId, (int) $rows[0]['id'], 'спорный лежит ниже бесспорных');
     }
 
-    public function test_hidden_kind_is_offered_by_hand_but_not_by_the_automat(): void
+    public function test_hidden_from_channel_is_offered_by_hand_but_not_by_the_automat(): void
     {
         $this->actingAsSuperadmin();
 
@@ -250,21 +250,20 @@ class BroadcastDigestPrepareTest extends TestCase
         foreach (range(1, 6) as $n) {
             $this->themedEvent("Спектакль {$n}", $n);
         }
-        // Описание длиннее всех: будь вид открыт, автомат назвал бы её первой.
-        $fairId = $this->themedEvent('Уездная ярмарка', 7);
-        DB::table('events')->where('id', $fairId)->update(['content_kind' => 'civic']);
+        // Описание длиннее всех: не будь правила, автомат назвал бы его первым.
+        $holidayId = $this->themedEvent('Праздничный спектакль ко Дню народного единства', 7);
 
         $item = $this->digestItem($broadcast, Carbon::now()->addHours(12));
         $this->artisan('broadcast:prepare-digests')->assertSuccessful();
 
-        $this->assertNotContains($fairId, $this->rosterOf($item), 'автомат скрытый вид не называет');
+        $this->assertNotContains($holidayId, $this->rosterOf($item), 'автомат скрытое не называет');
 
         $rows = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
             ->assertOk()->json('data.candidates');
 
-        $fair = collect($rows)->firstWhere('id', $fairId);
-        $this->assertNotNull($fair, 'а в ручном выборе он есть');
-        $this->assertTrue($fair['clash'], 'и лежит ниже бесспорных');
+        $holiday = collect($rows)->firstWhere('id', $holidayId);
+        $this->assertNotNull($holiday, 'а в ручном выборе оно есть');
+        $this->assertTrue($holiday['clash'], 'и лежит ниже бесспорных');
     }
 
     public function test_hidden_twin_does_not_push_the_open_event_out_of_the_list(): void
@@ -274,7 +273,7 @@ class BroadcastDigestPrepareTest extends TestCase
         // Одно событие двумя строками: ранняя скрытого вида, поздняя открытого.
         $hiddenId = $this->themedEvent('Двойник', 1);
         $openId = $this->themedEvent('Двойник', 2);
-        DB::table('events')->where('id', $hiddenId)->update(['content_kind' => 'civic']);
+        DB::table('events')->where('id', $hiddenId)->update(['content_kind' => 'official']);
 
         $ids = array_column($this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
             ->assertOk()->json('data.candidates'), 'id');
