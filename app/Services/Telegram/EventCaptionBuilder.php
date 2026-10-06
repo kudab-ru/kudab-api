@@ -25,6 +25,9 @@ final class EventCaptionBuilder
         7 => 'июл', 8 => 'авг', 9 => 'сен', 10 => 'окт', 11 => 'ноя', 12 => 'дек',
     ];
 
+    /** Первый кусок адреса — не имя места: индекс, населённый пункт, регион, улица. */
+    private const NOT_PLACE = '/\d|^(г|с|п|пгт|д|х|рп|ст|город|село|пос[её]лок|деревня|хутор|ул|улица|пр-кт|пр-т|просп\p{L}*|пер|переулок|пл|площадь|б-р|бульвар|наб|набережная|ш|шоссе|проезд|мкр)(?!\p{L})|обл|област|край|респ|округ|район|р-н/iu';
+
     /** Статусы цены, которые бот считает известными; всё прочее — unknown. */
     private const PRICE_STATUSES = ['unknown', 'free', 'paid', 'range', 'donation', 'external', 'tbd'];
 
@@ -483,6 +486,16 @@ final class EventCaptionBuilder
         $name = $this->firstNonEmpty($raw, ['venue_name', 'place', 'venue', 'location_name']);
         if ($name !== '') {
             return $name;
+        }
+
+        // без площадки парсер ставит имя места первым: «Атмосферный бар Понеслось, г Воронеж, …»;
+        // normalizeAddress его срезает, поэтому смотрим сырой адрес
+        // запятая внутри скобок имя не рвёт: «сквер ДК Карла Маркса (Никитинская, 1), ул. …»
+        preg_match('/^(?:[^,(«"]+|\([^)]*\)?|«[^»]*»?|"[^"]*"?)*/u', (string) ($raw['address'] ?? ''), $m);
+        $first = trim($m[0] ?? '');
+        $bare = trim((string) preg_replace('/\([^)]*\)/u', '', $first));
+        if ($bare !== '' && mb_strtolower($bare) !== mb_strtolower(trim($city)) && preg_match(self::NOT_PLACE, $bare) !== 1) {
+            return $first;
         }
 
         if ($address === '') {
