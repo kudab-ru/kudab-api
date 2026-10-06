@@ -358,16 +358,6 @@ class EventCaptionTest extends TestCase
         $this->assertStringContainsString('tickets.example', $caption);
     }
 
-    public function test_concession_price_is_printed_instead_of_unknown(): void
-    {
-        $event = $this->makeEvent(priceStatus: 'unknown', priceText: 'Бесплатно для участников СВО и их семей');
-
-        $this->assertStringContainsString(
-            '💸 Бесплатно для участников СВО и их семей',
-            $this->builder()->build($event, 'basic', $this->asOf()),
-        );
-    }
-
     public function test_series_follows_the_nearest_session(): void
     {
         // дни серии api отсчитывает от часов базы, замороженное время теста их не сдвигает

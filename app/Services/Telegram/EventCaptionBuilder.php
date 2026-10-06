@@ -28,9 +28,6 @@ final class EventCaptionBuilder
     /** Статусы цены, которые бот считает известными; всё прочее — unknown. */
     private const PRICE_STATUSES = ['unknown', 'free', 'paid', 'range', 'donation', 'external', 'tbd'];
 
-    /** Так парсер пишет цену, когда бесплатно только льготникам (ConcessionPrice в kudab-parser). */
-    private const CONCESSION_PREFIX = 'Бесплатно для ';
-
     public function __construct(
         private readonly TelegramMessageTemplateService $templates,
         private readonly EventRepository $events,
@@ -361,9 +358,7 @@ final class EventCaptionBuilder
             'donation' => 'Донат / свободный взнос',
             'paid', 'range' => $this->paidLabel($min, $max, $sym),
             'external' => $this->externalLabel($priceUrl, $canonicalUrl, $priceText),
-            default => str_starts_with($priceText, self::CONCESSION_PREFIX)
-                ? htmlspecialchars($priceText, ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8')
-                : 'Уточняется',
+            default => 'Уточняется',
         };
 
         // Обратная совместимость: если структурного статуса нет вовсе, берём
