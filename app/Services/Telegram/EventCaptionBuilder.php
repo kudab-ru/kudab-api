@@ -300,6 +300,7 @@ final class EventCaptionBuilder
                 'days_count' => $probe->getAttribute('group_days_count'),
                 'last_day' => $probe->getAttribute('group_last_day'),
                 'series_kind' => $probe->getAttribute('group_series')['kind'] ?? null,
+                'until' => $probe->getAttribute('group_series')['until'] ?? null,
             ], $asOf ?? $now, $now);
         } catch (\Throwable $e) {
             // без серии пост всё равно выходит, с одним сеансом

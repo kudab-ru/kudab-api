@@ -28,6 +28,12 @@ final class SeriesNote
         $today = $asOf->setTimezone(self::TZ)->toDateString();
         $serverToday = $now->setTimezone(self::TZ)->toDateString();
 
+        // выставка идёт до декабря, а сеансы выложены на месяц: известные дни соврали бы о конце
+        $until = substr((string) ($group['until'] ?? ''), 0, 10);
+        if ($until !== '' && $until >= $today && $until > substr((string) ($group['last_day'] ?? ''), 0, 10)) {
+            return 'идёт до '.self::human($until);
+        }
+
         $days = [];
         $passedBeforePost = 0;
         foreach ($group['dates'] ?? [] as $d) {
