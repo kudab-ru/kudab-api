@@ -2643,6 +2643,8 @@ class EventRepository
                         'stable_time' => $this->stableTimeMsk($meta['stable_time'] ?? null),
                         'dow' => isset($meta['dow']) ? (int) $meta['dow'] : null,
                         'last' => $meta['last'] ?? null,
+                        // конец показов со страницы Я.Афиши, когда сеансы выложены не до конца (см. GroupSeriesInference в парсере)
+                        'until' => $meta['until'] ?? null,
                         // МСК с offset — как stable_time выше и как даты серии:
                         // поле пока не читается фронтом, но отдавать его в UTC
                         // значит готовить то же «врёт на три часа» следующему,
