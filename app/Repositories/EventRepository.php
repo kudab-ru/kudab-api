@@ -27,6 +27,8 @@ class EventRepository
      */
     public const PAST_LOOKBACK_DAYS = 7;
 
+    private const DETAIL_SERIES_DAYS = 62;
+
     /**
      * Предикат «событие уже прошло» — тот самый, по которому /past-events решает,
      * что показать в блоке «Здесь уже проходило». Public, потому что потребитель
@@ -1387,7 +1389,7 @@ class EventRepository
         $event = $q->firstOrFail();
 
         $this->hydrateImages(new EloquentCollection([$event]));
-        $this->hydrateGroupDates(new EloquentCollection([$event]), 62);
+        $this->hydrateGroupDates(new EloquentCollection([$event]), self::DETAIL_SERIES_DAYS);
         $this->hydrateSiblings(new EloquentCollection([$event]));
 
         $event->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
@@ -2359,6 +2361,12 @@ class EventRepository
         }
 
         return new EloquentCollection($result);
+    }
+
+    /** Даты серии, как их видит страница события, — для строки времени в посте канала. */
+    public function hydrateSeriesDates(Event $event): void
+    {
+        $this->hydrateGroupDates(new EloquentCollection([$event]), self::DETAIL_SERIES_DAYS);
     }
 
     /**

@@ -3,7 +3,9 @@
 namespace App\Services\Telegram;
 
 use App\Models\Event;
+use App\Repositories\EventRepository;
 use App\Support\Telegram\CaptionTemplate;
+use App\Support\Telegram\SeriesNote;
 use App\Support\Telegram\VenueName;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Log;
@@ -26,8 +28,12 @@ final class EventCaptionBuilder
     /** Статусы цены, которые бот считает известными; всё прочее — unknown. */
     private const PRICE_STATUSES = ['unknown', 'free', 'paid', 'range', 'donation', 'external', 'tbd'];
 
+    /** Так парсер пишет цену, когда бесплатно только льготникам (ConcessionPrice в kudab-parser). */
+    private const CONCESSION_PREFIX = 'Бесплатно для ';
+
     public function __construct(
         private readonly TelegramMessageTemplateService $templates,
+        private readonly EventRepository $events,
     ) {}
 
     /**
@@ -173,7 +179,7 @@ final class EventCaptionBuilder
             'address' => $locSafe,
             'place' => $locSafe,
             'location' => $locSafe,
-            'start_time' => $this->startHuman($raw, $asOf),
+            'start_time' => $this->withSeries($this->startHuman($raw, $asOf), $raw, $asOf),
             'kind_emoji' => self::kindEmoji($raw),
             'price_label' => $this->priceLabel($raw, $canonicalUrl),
             'price_url' => trim((string) ($raw['price_url'] ?? '')),
@@ -270,6 +276,44 @@ final class EventCaptionBuilder
         return $hasTime ? "{$date} {$time}" : $date;
     }
 
+    /**
+     * «сегодня, 11:00 · 9 дней до 15 октября, всего 23 сеанса»: ближайший сеанс и вся серия, как в билете на сайте.
+     *
+     * @param  array<string, mixed>  $raw
+     */
+    private function withSeries(string $when, array $raw, ?CarbonImmutable $asOf): string
+    {
+        $groupId = (int) ($raw['event_group_id'] ?? 0);
+        if ($when === '' || $groupId <= 0) {
+            return $when;
+        }
+
+        try {
+            // отдельный экземпляр: поля group_* на событии вызывающего не нужны и могут уйти в save()
+            $probe = (new Event)->forceFill(['event_group_id' => $groupId]);
+            $this->events->hydrateSeriesDates($probe);
+
+            $now = CarbonImmutable::now(self::TZ);
+            $note = SeriesNote::of([
+                'dates' => $probe->getAttribute('group_dates') ?? [],
+                'count' => $probe->getAttribute('group_count'),
+                'days_count' => $probe->getAttribute('group_days_count'),
+                'last_day' => $probe->getAttribute('group_last_day'),
+                'series_kind' => $probe->getAttribute('group_series')['kind'] ?? null,
+            ], $asOf ?? $now, $now);
+        } catch (\Throwable $e) {
+            // без серии пост всё равно выходит, с одним сеансом
+            Log::warning('caption.series_unavailable', [
+                'event_group_id' => $groupId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return $when;
+        }
+
+        return $note === null ? $when : "{$when} · {$note}";
+    }
+
     private function parseMsk(string $s): ?CarbonImmutable
     {
         $s = trim($s);
@@ -317,7 +361,9 @@ final class EventCaptionBuilder
             'donation' => 'Донат / свободный взнос',
             'paid', 'range' => $this->paidLabel($min, $max, $sym),
             'external' => $this->externalLabel($priceUrl, $canonicalUrl, $priceText),
-            default => 'Уточняется',
+            default => str_starts_with($priceText, self::CONCESSION_PREFIX)
+                ? htmlspecialchars($priceText, ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8')
+                : 'Уточняется',
         };
 
         // Обратная совместимость: если структурного статуса нет вовсе, берём

@@ -358,6 +358,43 @@ class EventCaptionTest extends TestCase
         $this->assertStringContainsString('tickets.example', $caption);
     }
 
+    public function test_concession_price_is_printed_instead_of_unknown(): void
+    {
+        $event = $this->makeEvent(priceStatus: 'unknown', priceText: 'Бесплатно для участников СВО и их семей');
+
+        $this->assertStringContainsString(
+            '💸 Бесплатно для участников СВО и их семей',
+            $this->builder()->build($event, 'basic', $this->asOf()),
+        );
+    }
+
+    public function test_series_follows_the_nearest_session(): void
+    {
+        // дни серии api отсчитывает от часов базы, замороженное время теста их не сдвигает
+        Carbon::setTestNow();
+        $sessions = [$this->makeEvent(), $this->makeEvent(), $this->makeEvent()];
+        $groupId = DB::table('event_groups')->insertGetId([
+            'community_id' => $sessions[0]->community_id,
+            'city_id' => $sessions[0]->city_id,
+            'group_key' => 'series-'.uniqid(),
+            'title_norm' => 'концерт лики эпохи',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        foreach ($sessions as $i => $session) {
+            $at = CarbonImmutable::now('Europe/Moscow')->startOfDay()->addDays($i + 1)->setTime(19, 0);
+            DB::table('events')->where('id', $session->id)->update([
+                'event_group_id' => $groupId,
+                'start_time' => $at->utc(),
+                'start_date' => $at->toDateString(),
+            ]);
+        }
+
+        $caption = $this->builder()->build($sessions[0]->fresh(), 'basic', CarbonImmutable::now('Europe/Moscow'));
+
+        $this->assertStringContainsString('🗓️ завтра, 19:00 · 3 дня подряд, до ', $caption);
+    }
+
     private function makeEvent(
         ?string $venueName = null,
         string $address = 'г Воронеж, ул Мира, д 1',
