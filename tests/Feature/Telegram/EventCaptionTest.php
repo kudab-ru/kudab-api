@@ -11,6 +11,7 @@ use Carbon\CarbonImmutable;
 use Database\Seeders\TelegramMessageTemplatesSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -99,6 +100,22 @@ class EventCaptionTest extends TestCase
             '📍 Воронеж, ул Мира, д 1',
             $this->builder()->build($event, 'basic', $this->asOf()),
         );
+    }
+
+    #[DataProvider('placeFirst')]
+    public function test_without_venue_the_place_named_in_the_address_is_shown(string $address, string $line): void
+    {
+        $event = $this->makeEvent(venueName: null, address: $address);
+
+        $this->assertStringContainsString($line, $this->builder()->build($event, 'basic', $this->asOf()));
+    }
+
+    public static function placeFirst(): array
+    {
+        return [
+            'имя, сохранённое парсером' => ['Атмосферный бар Понеслось, г Воронеж, ул Пушкинская, д 5', '📍 Воронеж, Атмосферный бар Понеслось'],
+            'запятая в скобках' => ['сквер ДК Карла Маркса (Никитинская, 1), ул. Никитинская', '📍 Воронеж, сквер ДК Карла Маркса (Никитинская, 1)'],
+        ];
     }
 
     /**
