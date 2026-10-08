@@ -993,6 +993,44 @@ class WebEventsTest extends TestCase
             ->assertJsonPath('data.same_day.1.title', 'Утренний спектакль');
     }
 
+    public function test_next_skips_the_event_itself_written_by_another_source(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 3, 22, 9, 0, 0, 'Europe/Moscow'));
+
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $jazz = $this->createInterest('Джаз', 'jazz');
+        $hall = $this->createVenue($msk->id, 'Филармония', 'phil');
+        $at = Carbon::create(2026, 3, 23, 18, 0, 0, 'Europe/Moscow')->utc();
+
+        $base = $this->createEvent($msk->id, $community->id, 'Танцы с оркестром', $at, $hall->id);
+        $this->tagEventLeafOnly($base->id, $jazz->id);
+        $copy = $this->createEvent($msk->id, $community->id, 'Концерт «Танцы с Большим джазовым оркестром»', $at->copy(), $hall->id);
+        $this->tagEventLeafOnly($copy->id, $jazz->id);
+
+        $data = $this->getJson("/api/web/events/{$base->id}/next")->assertOk()->json('data');
+
+        $this->assertSame([], array_merge($data['same_day'], $data['companions'], $data['similar']));
+    }
+
+    public function test_next_same_day_prefers_events_near_the_hour(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 3, 22, 9, 0, 0, 'Europe/Moscow'));
+
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $club = $this->createVenue($msk->id, 'Клуб', 'club');
+
+        $base = $this->createEvent($msk->id, $community->id, 'Стендап', Carbon::create(2026, 3, 23, 20, 0, 0, 'Europe/Moscow')->utc(), $club->id);
+        $this->createEvent($msk->id, $community->id, 'Утренняя выставка', Carbon::create(2026, 3, 23, 10, 0, 0, 'Europe/Moscow')->utc());
+        $this->createEvent($msk->id, $community->id, 'Вечернее шоу', Carbon::create(2026, 3, 23, 19, 0, 0, 'Europe/Moscow')->utc());
+
+        $this->getJson("/api/web/events/{$base->id}/next")
+            ->assertOk()
+            ->assertJsonPath('data.same_day.0.title', 'Вечернее шоу')
+            ->assertJsonPath('data.same_day.1.title', 'Утренняя выставка');
+    }
+
     public function test_next_same_day_card_shows_its_own_day_not_the_series(): void
     {
         Carbon::setTestNow(Carbon::create(2026, 3, 22, 9, 0, 0, 'Europe/Moscow'));
