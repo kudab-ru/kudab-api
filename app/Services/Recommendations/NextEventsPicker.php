@@ -89,7 +89,9 @@ final class NextEventsPicker
         usort($byScore, fn (array $a, array $b) => [$b['score'], $a['start'] ?? PHP_INT_MAX, $a['id']]
             <=> [$a['score'], $b['start'] ?? PHP_INT_MAX, $b['id']]);
 
-        $taken = [];
+        // Само событие, записанное другим источником (то же название или та же площадка и
+        // минута), тоже не советуем.
+        $taken = array_fill_keys($base['keys'], true);
 
         $sameDay = $hasDay
             ? $this->take(array_filter($byScore, fn (array $e) => $e['day'] === $refDay), $taken, self::PER_VENUE, self::PER_TOPIC_SAME_DAY)
@@ -142,13 +144,24 @@ final class NextEventsPicker
         return ! $familyBase || $e['age'] < self::FAMILY_AGE_LIMIT;
     }
 
+    /**
+     * Жанры события внутри темы. Жанр в признаках записан как «тема/жанр».
+     *
+     * @return list<string>
+     */
+    private function genresOf(array $e, string $topic): array
+    {
+        return array_values(array_filter($e['genres'], fn (string $g) => str_starts_with($g, $topic.'/')));
+    }
+
     private function forKids(array $e): bool
     {
         return in_array('kids', $e['topics'], true) || in_array($e['audience'], ['kids', 'family'], true);
     }
 
     /**
-     * Больше всего весят общие темы и жанр, затем близость дня к событию.
+     * Больше всего весят общие темы и жанр, затем близость дня к событию, а в
+     * тот же день — близость часа: вечернему событию вечернее.
      *
      * @return array{score: float, reason: ?string, shares: bool}
      */
@@ -160,13 +173,28 @@ final class NextEventsPicker
         $bothKids = $this->forKids($base) && $this->forKids($e);
         $bothFree = $base['free'] && $e['free'];
 
-        $score = ($union > 0 ? 2.0 * count($shared) / $union : 0.0)
+        // Общая тема с разными жанрами внутри неё («наука» и «мастер-класс» в образовании) — сходство слабое.
+        $clashes = 0;
+        foreach ($shared as $t) {
+            $mine = $this->genresOf($base, $t);
+            $theirs = $this->genresOf($e, $t);
+            if ($mine !== [] && $theirs !== [] && array_intersect($mine, $theirs) === []) {
+                $clashes++;
+            }
+        }
+
+        $sameDayHours = $e['day'] === $refDay && $base['minute'] !== null && $e['minute'] !== null
+            ? 0.6 / (1.0 + abs($base['minute'] - $e['minute']) / 120.0)
+            : 0.0;
+
+        $score = ($union > 0 ? 2.0 * (count($shared) - 0.5 * $clashes) / $union : 0.0)
             + ($genres !== [] ? 1.0 : 0.0)
             + ($bothKids ? 1.0 : 0.0)
             + ($bothFree ? 0.3 : 0.0)
             + ($e['photo'] ? 0.3 : 0.0)
             - ($e['gray'] ? 0.3 : 0.0)
-            + ($e['day'] !== null ? 1.0 / (1.0 + abs($this->daysBetween($refDay, $e['day'])) / 3.0) : 0.0);
+            + ($e['day'] !== null ? 1.0 / (1.0 + abs($this->daysBetween($refDay, $e['day'])) / 3.0) : 0.0)
+            + $sameDayHours;
 
         return [
             'score' => $score,
@@ -183,8 +211,9 @@ final class NextEventsPicker
                 : 'тоже для детей';
         }
         foreach ($sharedGenres as $g) {
-            if (isset(self::GENRE_WORDS[$g])) {
-                return 'тоже '.self::GENRE_WORDS[$g];
+            $slug = str_contains($g, '/') ? substr($g, strpos($g, '/') + 1) : $g;
+            if (isset(self::GENRE_WORDS[$slug])) {
+                return 'тоже '.self::GENRE_WORDS[$slug];
             }
         }
         foreach ($sharedTopics as $t) {

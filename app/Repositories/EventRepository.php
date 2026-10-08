@@ -2051,15 +2051,18 @@ class EventRepository
             if ($parent === null) {
                 $topics[] = (string) $i->slug;
             } else {
-                $genres[] = (string) $i->slug;
+                $genres[] = $parent.'/'.$i->slug;
                 $topics[] = $parent;
             }
         }
 
         $start = $e->start_time;
-        $day = $start !== null
-            ? $start->copy()->setTimezone('Europe/Moscow')->toDateString()
+        $msk = $start?->copy()->setTimezone('Europe/Moscow');
+        $day = $msk !== null
+            ? $msk->toDateString()
             : ($e->start_date ? substr((string) $e->start_date, 0, 10) : null);
+        // У события «весь день» время в базе полночь, сравнивать его по часу нельзя.
+        $timed = $msk !== null && ($e->time_precision ?? 'datetime') !== 'date';
 
         $series = $e->getAttribute('__series_key');
         $title = $this->railTitleKey((string) ($e->title ?? ''));
@@ -2068,6 +2071,7 @@ class EventRepository
             'id' => (int) $e->id,
             'day' => $day,
             'start' => $start?->getTimestamp(),
+            'minute' => $timed ? $msk->hour * 60 + $msk->minute : null,
             'topics' => array_values(array_unique($topics)),
             'genres' => array_values(array_unique($genres)),
             'audience' => $e->audience !== null ? (string) $e->audience : null,
@@ -2077,10 +2081,12 @@ class EventRepository
             'free' => $e->price_status === 'free' || ((int) ($e->price_min ?? -1) === 0 && $e->price_max === null),
             'photo' => (int) ($e->getAttribute('__img_rank') ?? 1) === 0,
             'gray' => (int) ($e->getAttribute('__gray_rank') ?? 0) === 1,
+            // Та же площадка и та же минута — одно событие из двух источников.
             'keys' => array_values(array_filter([
                 'i:'.$e->id,
                 $series !== null ? 's:'.(int) $series : null,
                 $title !== '' ? 't:'.$title : null,
+                $timed && $e->venue_id !== null ? 'v:'.$e->venue_id.'|'.$start->getTimestamp() : null,
                 ...$postKeys,
             ])),
         ];
