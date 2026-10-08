@@ -842,6 +842,157 @@ class WebEventsTest extends TestCase
             ->assertJsonPath('data.2.title', 'Через 4 дня');
     }
 
+    /* ===================== next (блоки «что дальше») ===================== */
+
+    public function test_next_keeps_teen_and_adult_shows_away_from_kids_event(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 3, 22, 12, 0, 0, 'Europe/Moscow'));
+
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $theatre = $this->createInterest('Театр', 'theatre');
+        $kids = $this->createInterest('Детям', 'kids');
+        $hall = $this->createVenue($msk->id, 'Саквояж', 'sakvoyazh');
+
+        $base = $this->createEvent($msk->id, $community->id, 'Книжная девочка', Carbon::create(2026, 3, 23, 15, 0, 0, 'Europe/Moscow')->utc(), $hall->id);
+        $this->tagEventLeafOnly($base->id, $theatre->id);
+        $this->tagEventLeafOnly($base->id, $kids->id);
+
+        $tale = $this->createEvent($msk->id, $community->id, 'Сказка', Carbon::create(2026, 3, 25, 12, 0, 0, 'Europe/Moscow')->utc());
+        $this->tagEventLeafOnly($tale->id, $theatre->id);
+        $this->tagEventLeafOnly($tale->id, $kids->id);
+        $this->setTaxonomy($tale->id, 'kids', 'culture');
+
+        foreach (['Жена Хармса' => 18, 'Как дети' => 12] as $title => $age) {
+            $e = $this->createEvent($msk->id, $community->id, $title, Carbon::create(2026, 3, 24, 19, 0, 0, 'Europe/Moscow')->utc());
+            $this->tagEventLeafOnly($e->id, $theatre->id);
+            DB::table('events')->where('id', $e->id)->update(['age_restriction' => $age]);
+        }
+        $adults = $this->createEvent($msk->id, $community->id, 'Кафка', Carbon::create(2026, 3, 24, 20, 0, 0, 'Europe/Moscow')->utc());
+        $this->tagEventLeafOnly($adults->id, $theatre->id);
+        $this->setTaxonomy($adults->id, 'adults', 'culture');
+
+        $similar = collect($this->getJson("/api/web/events/{$base->id}/next")->assertOk()->json('data.similar'));
+
+        $this->assertSame(['Сказка'], $similar->pluck('title')->all());
+        $this->assertSame('тоже для детей', $similar->first()['reason']);
+    }
+
+    public function test_next_venue_block_shows_kids_shows_only_next_to_kids_event(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $venue = $this->createVenue($msk->id, 'Саквояж', 'sakvoyazh');
+
+        $base = $this->createEvent($msk->id, $community->id, 'Книжная девочка', now()->addDay(), $venue->id);
+        $this->setTaxonomy($base->id, 'kids', 'culture');
+        $buratino = $this->createEvent($msk->id, $community->id, 'Буратино', now()->addDays(2), $venue->id);
+        $this->setTaxonomy($buratino->id, 'kids', 'culture');
+        $adult = $this->createEvent($msk->id, $community->id, 'Вечер романса', now()->addDays(3), $venue->id);
+
+        $this->getJson("/api/web/events/{$base->id}/next")
+            ->assertOk()
+            ->assertJsonPath('data.companions.0.title', 'Буратино')
+            ->assertJsonPath('meta.companions.scope', 'venue');
+
+        $this->getJson("/api/web/events/{$adult->id}/next")
+            ->assertOk()
+            ->assertJsonCount(0, 'data.companions');
+    }
+
+    public function test_next_counts_genre_as_its_topic(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $theatre = $this->createInterest('Театр', 'theatre');
+        $opera = $this->createInterest('Опера и балет', 'opera-ballet', $theatre->id);
+        $hall = $this->createVenue($msk->id, 'Оперный', 'opera');
+
+        $base = $this->createEvent($msk->id, $community->id, 'Трубадур', now()->addDay(), $hall->id);
+        $this->tagEventLeafOnly($base->id, $opera->id);
+        $play = $this->createEvent($msk->id, $community->id, 'Ревизор', now()->addDays(2));
+        $this->tagEventLeafOnly($play->id, $theatre->id);
+
+        $this->getJson("/api/web/events/{$base->id}/next")
+            ->assertOk()
+            ->assertJsonPath('data.similar.0.title', 'Ревизор')
+            ->assertJsonPath('data.similar.0.reason', 'тоже театр');
+    }
+
+    public function test_next_similar_stays_near_the_event_day(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 3, 22, 12, 0, 0, 'Europe/Moscow'));
+
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $music = $this->createInterest('Музыка', 'music');
+        $hall = $this->createVenue($msk->id, 'Филармония', 'phil');
+
+        $base = $this->createEvent($msk->id, $community->id, 'База', Carbon::create(2026, 3, 23, 19, 0, 0, 'Europe/Moscow')->utc(), $hall->id);
+        $this->tagEventLeafOnly($base->id, $music->id);
+        $dates = [
+            'Вчера' => Carbon::create(2026, 3, 21, 19, 0, 0, 'Europe/Moscow')->utc(),
+            'Через два дня' => Carbon::create(2026, 3, 25, 19, 0, 0, 'Europe/Moscow')->utc(),
+            'Через три недели' => Carbon::create(2026, 4, 13, 19, 0, 0, 'Europe/Moscow')->utc(),
+        ];
+        foreach ($dates as $title => $start) {
+            $e = $this->createEvent($msk->id, $community->id, $title, $start);
+            $this->tagEventLeafOnly($e->id, $music->id);
+        }
+
+        $similar = $this->getJson("/api/web/events/{$base->id}/next")->assertOk()->json('data.similar');
+
+        $this->assertSame(['Через два дня'], array_column($similar, 'title'));
+    }
+
+    public function test_next_shows_one_card_per_thing_across_blocks(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 3, 22, 9, 0, 0, 'Europe/Moscow'));
+
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $games = $this->createInterest('Квизы и игры', 'quiz-games');
+        $quest = $this->createVenue($msk->id, 'Квест-комнаты', 'quest');
+        $bar = $this->createVenue($msk->id, 'Бар', 'bar');
+
+        $base = $this->createEvent($msk->id, $community->id, 'Квиз', Carbon::create(2026, 3, 22, 19, 0, 0, 'Europe/Moscow')->utc(), $bar->id);
+        $this->tagEventLeafOnly($base->id, $games->id);
+        foreach ([[22, 12], [22, 14], [22, 16], [23, 12]] as [$day, $hour]) {
+            $e = $this->createEvent($msk->id, $community->id, 'Убежище 216', Carbon::create(2026, 3, $day, $hour, 0, 0, 'Europe/Moscow')->utc(), $quest->id);
+            $this->tagEventLeafOnly($e->id, $games->id);
+        }
+
+        $data = $this->getJson("/api/web/events/{$base->id}/next")->assertOk()->json('data');
+        $titles = array_column(array_merge($data['same_day'], $data['companions'], $data['similar']), 'title');
+
+        $this->assertSame(['Убежище 216'], $titles);
+    }
+
+    public function test_next_same_day_puts_similar_events_first(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 3, 22, 9, 0, 0, 'Europe/Moscow'));
+
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $music = $this->createInterest('Музыка', 'music');
+        $theatre = $this->createInterest('Театр', 'theatre');
+        $garden = $this->createVenue($msk->id, 'Сад', 'garden');
+
+        $base = $this->createEvent($msk->id, $community->id, 'Джаз в саду', Carbon::create(2026, 3, 22, 19, 0, 0, 'Europe/Moscow')->utc(), $garden->id);
+        $this->tagEventLeafOnly($base->id, $music->id);
+        $play = $this->createEvent($msk->id, $community->id, 'Утренний спектакль', Carbon::create(2026, 3, 22, 12, 0, 0, 'Europe/Moscow')->utc());
+        $this->tagEventLeafOnly($play->id, $theatre->id);
+        $concert = $this->createEvent($msk->id, $community->id, 'Поздний концерт', Carbon::create(2026, 3, 22, 21, 0, 0, 'Europe/Moscow')->utc());
+        $this->tagEventLeafOnly($concert->id, $music->id);
+
+        $this->getJson("/api/web/events/{$base->id}/next")
+            ->assertOk()
+            ->assertJsonPath('meta.day', '2026-03-22')
+            ->assertJsonPath('data.same_day.0.title', 'Поздний концерт')
+            ->assertJsonPath('data.same_day.0.reason', 'тоже музыка')
+            ->assertJsonPath('data.same_day.1.title', 'Утренний спектакль');
+    }
+
     /* ===================== helpers ===================== */
 
     private function createInterest(string $name, string $slug, ?int $parentId = null): Interest

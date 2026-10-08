@@ -4,14 +4,48 @@ namespace App\Services;
 
 use App\Models\Event;
 use App\Repositories\EventRepository;
+use App\Services\Recommendations\NextEventsPicker;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 
 class EventService
 {
     public function __construct(
-        private readonly EventRepository $repo
+        private readonly EventRepository $repo,
+        private readonly NextEventsPicker $picker,
     ) {}
+
+    /**
+     * Блоки «что дальше» на странице события. Пустые блоки — штатно.
+     *
+     * @return array{day: ?string, same_day: EloquentCollection, companions: EloquentCollection, similar: EloquentCollection, companions_meta: ?array<string, mixed>}
+     */
+    public function nextWeb(int $id): array
+    {
+        $pool = $this->repo->nextPool($id);
+        $picked = $pool['base'] === null
+            ? ['day' => null, 'same_day' => [], 'companions' => [], 'similar' => []]
+            : $this->picker->pick($pool['base'], $pool['items'], $pool['today'], $pool['scope']);
+
+        $sections = [];
+        $all = new EloquentCollection;
+        foreach (['same_day', 'companions', 'similar'] as $name) {
+            $list = new EloquentCollection;
+            foreach ($picked[$name] as $p) {
+                $e = $pool['events'][$p['id']];
+                $e->setAttribute('rec_reason', $p['reason']);
+                $list->push($e);
+                $all->push($e);
+            }
+            $sections[$name] = $list;
+        }
+        $this->repo->hydrateRail($all);
+
+        return $sections + [
+            'day' => $picked['day'],
+            'companions_meta' => $pool['companions_meta'],
+        ];
+    }
 
     public function list(array $filters, int $perPage = 20): LengthAwarePaginator
     {

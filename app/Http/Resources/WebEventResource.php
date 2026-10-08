@@ -128,6 +128,12 @@ class WebEventResource extends JsonResource
             $out['siblings'] = $siblings;
         }
 
+        // Есть только у карточек блоков «что дальше», см. NextEventsPicker.
+        $reason = $this->getAttribute('rec_reason');
+        if (is_string($reason) && $reason !== '') {
+            $out['reason'] = $reason;
+        }
+
         return $out;
     }
 

@@ -167,14 +167,18 @@ class Event extends Model
                 ->orWhereNotIn('events.audience', ['kids', 'family']);
         });
 
-        $q->where(function ($w) {
+        return $q->webFeedContentKind();
+    }
+
+    /** Вид события, который годится для сайта. Блоки «что дальше» берут только это правило. */
+    public function scopeWebFeedContentKind($q)
+    {
+        return $q->where(function ($w) {
             $w->whereNull('events.content_kind')
                 ->orWhereIn('events.content_kind', [
                     'entertainment', 'culture', 'education', 'sport', 'civic',
                 ]);
         });
-
-        return $q;
     }
 
     /**

@@ -4,7 +4,9 @@ namespace App\Repositories;
 
 use App\Models\Community;
 use App\Models\Event;
+use App\Models\Interest;
 use App\Models\Venue;
+use App\Services\Recommendations\NextEventsPicker;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
@@ -1788,14 +1790,9 @@ class EventRepository
             return $empty;
         }
 
-        if ($base->venue_id !== null) {
-            $scope = 'venue';
-        } elseif ($base->community_id !== null && ! $this->communityIsAggregator((int) $base->community_id)) {
-            // fallback на организатора ТОЛЬКО для реальных пабликов; у агрегатора
-            // (Я.Афиша/Qtickets) «ещё у организатора» = случайная лента фида — шум
-            $scope = 'community';
-        } else {
-            return $empty; // ни площадки, ни реального организатора — соседей нет
+        $scope = $this->companionsScope($base);
+        if ($scope === null) {
+            return $empty;
         }
 
         $q = $this->webVisibleBaseQuery()
@@ -1833,11 +1830,38 @@ class EventRepository
             $this->hydrateSiblings($items);
         }
 
+        return ['items' => $items] + $this->companionsMeta($base, $scope);
+    }
+
+    /**
+     * Соседи события ищутся на его площадке, а без площадки — у организатора.
+     * У агрегатора (Я.Афиша, Qtickets) «ещё у организатора» — случайный набор,
+     * поэтому для него соседей нет.
+     *
+     * @return 'venue'|'community'|null
+     */
+    private function companionsScope(Event $base): ?string
+    {
+        if ($base->venue_id !== null) {
+            return 'venue';
+        }
+        if ($base->community_id !== null && ! $this->communityIsAggregator((int) $base->community_id)) {
+            return 'community';
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  'venue'|'community'  $scope
+     * @return array{scope: 'venue'|'community', label: string, venue: ?array{id:int,slug:string,name:string,kind:?string}, community_name: ?string}
+     */
+    private function companionsMeta(Event $base, string $scope): array
+    {
         if ($scope === 'venue') {
             $venue = Venue::query()->select('id', 'slug', 'name', 'kind')->find((int) $base->venue_id);
 
             return [
-                'items' => $items,
                 'scope' => 'venue',
                 'label' => 'Ещё на этой площадке',
                 'venue' => $venue ? [
@@ -1853,12 +1877,222 @@ class EventRepository
         $communityName = Community::query()->whereKey((int) $base->community_id)->value('name');
 
         return [
-            'items' => $items,
             'scope' => 'community',
             'label' => 'Ещё у организатора',
             'venue' => null,
             'community_name' => is_string($communityName) && $communityName !== '' ? $communityName : null,
         ];
+    }
+
+    /**
+     * Событие и кандидаты для блоков «что дальше» в виде признаков для
+     * `NextEventsPicker`: предстоящие события города в окне вокруг дня события
+     * и ближайшие на той же площадке или у того же организатора.
+     *
+     * @return array{base: ?array<string, mixed>, items: list<array<string, mixed>>, events: array<int, Event>, today: string, scope: ?string, companions_meta: ?array<string, mixed>}
+     */
+    public function nextPool(int $eventId): array
+    {
+        $today = now('Europe/Moscow')->toDateString();
+        $out = ['base' => null, 'items' => [], 'events' => [], 'today' => $today, 'scope' => null, 'companions_meta' => null];
+
+        $base = Event::query()
+            ->whereNull('deleted_at')
+            ->with('interests:id,slug,parent_id')
+            ->find($eventId);
+
+        if ($base === null) {
+            return $out;
+        }
+
+        $parents = $this->interestParents();
+        $baseFeatures = $this->nextFeatures($base, $parents, []);
+        $refDay = $baseFeatures['day'] !== null && $baseFeatures['day'] >= $today ? $baseFeatures['day'] : $today;
+        $from = max($today, CarbonImmutable::parse($refDay)->subDays(NextEventsPicker::DAYS_BEFORE)->toDateString());
+        $to = CarbonImmutable::parse($refDay)->addDays(NextEventsPicker::DAYS_AFTER)->toDateString();
+
+        $allowKids = NextEventsPicker::allowsKids($baseFeatures['audience'], $baseFeatures['topics']);
+        $exclude = $this->railSelfExcludeIds($eventId, $base->event_group_id);
+
+        $window = $this->nextCandidatesQuery((int) $base->city_id, $exclude, $allowKids);
+        $fromTs = CarbonImmutable::parse($from, 'Europe/Moscow')->format('Y-m-d H:i:sP');
+        $toTs = CarbonImmutable::parse($to, 'Europe/Moscow')->addDay()->format('Y-m-d H:i:sP');
+        $window->where(function ($w) use ($fromTs, $toTs, $from, $to) {
+            $w->where(function ($x) use ($fromTs, $toTs) {
+                $x->where('events.start_time', '>=', $fromTs)->where('events.start_time', '<', $toTs);
+            })->orWhere(function ($x) use ($from, $to) {
+                $x->whereNull('events.start_time')->whereBetween('events.start_date', [$from, $to]);
+            });
+        });
+        $events = $window->get()->all();
+
+        $scope = $this->companionsScope($base);
+        if ($scope !== null) {
+            [$column, $value] = $scope === 'venue'
+                ? ['events.venue_id', (int) $base->venue_id]
+                : ['events.community_id', (int) $base->community_id];
+
+            $near = $this->nextCandidatesQuery((int) $base->city_id, $exclude, $allowKids)
+                ->where($column, $value)
+                ->orderByRaw('events.start_date asc nulls last')
+                ->orderByRaw('events.start_time asc nulls last')
+                ->limit(NextEventsPicker::LIMIT * 5)
+                ->get();
+            array_push($events, ...$near->all());
+        }
+
+        $byId = [];
+        foreach ($events as $e) {
+            $byId[(int) $e->id] = $e;
+        }
+
+        $postKeys = [];
+        if ($byId !== []) {
+            $rows = DB::table('event_sources')
+                ->whereIn('event_id', array_keys($byId))
+                ->whereNotNull('source')
+                ->whereNotNull('post_external_id')
+                ->get(['event_id', 'source', 'post_external_id']);
+            foreach ($rows as $r) {
+                $postKeys[(int) $r->event_id][] = 'p:'.$r->source.'|'.$r->post_external_id;
+            }
+        }
+
+        $items = [];
+        foreach ($byId as $id => $e) {
+            $items[] = $this->nextFeatures($e, $parents, $postKeys[$id] ?? []);
+        }
+
+        return [
+            'base' => $baseFeatures,
+            'items' => $items,
+            'events' => $byId,
+            'today' => $today,
+            'scope' => $scope,
+            'companions_meta' => $scope !== null ? $this->companionsMeta($base, $scope) : null,
+        ];
+    }
+
+    /** Дописывает карточкам блоков картинки, даты серии и соседей по анонсу. */
+    public function hydrateRail(EloquentCollection $events): void
+    {
+        if ($events->isEmpty()) {
+            return;
+        }
+
+        $this->hydrateImages($events);
+        $events->each(function ($e) {
+            $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__series_key']);
+        });
+        $this->hydrateGroupDates($events);
+        $this->hydrateSiblings($events);
+    }
+
+    /**
+     * Видимые на сайте предстоящие события города. Семейное здесь не скрыто, а
+     * что показать из остального, решает `NextEventsPicker`.
+     *
+     * @param  list<int>  $excludeIds
+     */
+    private function nextCandidatesQuery(int $cityId, array $excludeIds, bool $allowKids): Builder
+    {
+        [$pastSql, $pastBindings] = self::pastExpression();
+
+        $q = Event::query()
+            ->select('events.*', 'ct.slug as city_slug')
+            ->selectRaw('COALESCE(eg.federation_id, eg.id) as __series_key')
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->leftJoin('event_groups as eg', function ($j) {
+                $j->on('eg.id', '=', 'events.event_group_id')->whereNull('eg.deleted_at');
+            })
+            ->where('ct.status', 'active')
+            ->where('events.status', 'active')
+            ->whereNull('events.deleted_at')
+            ->where('events.city_id', $cityId)
+            ->whereNotIn('events.id', $excludeIds)
+            ->whereRaw("NOT {$pastSql}", $pastBindings)
+            ->webFeedContentKind()
+            ->with(['interests:id,slug,parent_id', 'venue:id,slug,name,kind']);
+
+        // Квестов в детском сотни сеансов: незачем тянуть их туда, где их всё равно отсеют.
+        if (! $allowKids) {
+            $q->where(function ($w) {
+                $w->whereNull('events.audience')->orWhere('events.audience', '<>', 'kids');
+            });
+        }
+
+        $this->addPastFlags($q);
+        $this->addGrayRank($q);
+        $this->addImgRank($q);
+        $this->excludeBlacklistedSources($q);
+
+        return $q;
+    }
+
+    /**
+     * Жанр считается и своей темой: «Трубадур» с одним тегом «опера и балет»
+     * похож на спектакль с тегом «театр».
+     *
+     * @param  array<int, ?string>  $parents  номер интереса → слаг его темы, null у самой темы
+     * @param  list<string>  $postKeys
+     * @return array<string, mixed>
+     */
+    private function nextFeatures(Event $e, array $parents, array $postKeys): array
+    {
+        $topics = [];
+        $genres = [];
+        foreach ($e->interests as $i) {
+            $parent = $parents[(int) $i->id] ?? null;
+            if ($parent === null) {
+                $topics[] = (string) $i->slug;
+            } else {
+                $genres[] = (string) $i->slug;
+                $topics[] = $parent;
+            }
+        }
+
+        $start = $e->start_time;
+        $day = $start !== null
+            ? $start->copy()->setTimezone('Europe/Moscow')->toDateString()
+            : ($e->start_date ? substr((string) $e->start_date, 0, 10) : null);
+
+        $series = $e->getAttribute('__series_key');
+        $title = $this->railTitleKey((string) ($e->title ?? ''));
+
+        return [
+            'id' => (int) $e->id,
+            'day' => $day,
+            'start' => $start?->getTimestamp(),
+            'topics' => array_values(array_unique($topics)),
+            'genres' => array_values(array_unique($genres)),
+            'audience' => $e->audience !== null ? (string) $e->audience : null,
+            'age' => $e->age_restriction !== null ? (int) $e->age_restriction : null,
+            'venue' => $e->venue_id !== null ? (int) $e->venue_id : null,
+            'community' => $e->community_id !== null ? (int) $e->community_id : null,
+            'free' => $e->price_status === 'free' || ((int) ($e->price_min ?? -1) === 0 && $e->price_max === null),
+            'photo' => (int) ($e->getAttribute('__img_rank') ?? 1) === 0,
+            'gray' => (int) ($e->getAttribute('__gray_rank') ?? 0) === 1,
+            'keys' => array_values(array_filter([
+                'i:'.$e->id,
+                $series !== null ? 's:'.(int) $series : null,
+                $title !== '' ? 't:'.$title : null,
+                ...$postKeys,
+            ])),
+        ];
+    }
+
+    /** @return array<int, ?string> */
+    private function interestParents(): array
+    {
+        $rows = Interest::query()->get(['id', 'slug', 'parent_id']);
+        $slugById = $rows->pluck('slug', 'id')->all();
+
+        $out = [];
+        foreach ($rows as $r) {
+            $out[(int) $r->id] = $r->parent_id !== null ? ($slugById[(int) $r->parent_id] ?? null) : null;
+        }
+
+        return $out;
     }
 
     /**

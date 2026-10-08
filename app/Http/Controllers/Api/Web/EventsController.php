@@ -498,6 +498,29 @@ class EventsController extends Controller
     }
 
     /**
+     * GET /api/web/events/{id}/next
+     * Блоки «что дальше» для страницы события: в этот день, на той же площадке и
+     * похожее. Одно событие попадает только в один блок; у карточки бывает
+     * `reason` — короткая причина, почему она здесь.
+     */
+    public function next(int $id): JsonResponse
+    {
+        $res = $this->service->nextWeb($id);
+
+        return response()->json([
+            'data' => [
+                'same_day' => WebEventResource::collection($res['same_day']),
+                'companions' => WebEventResource::collection($res['companions']),
+                'similar' => WebEventResource::collection($res['similar']),
+            ],
+            'meta' => [
+                'day' => $res['day'],
+                'companions' => $res['companions_meta'],
+            ],
+        ]);
+    }
+
+    /**
      * Флаги схлопывания для рейлов (/related, /companions) — те же имена и та же
      * семантика, что у index: grouped = по серии дат, grouped_by_post = по анонсу.
      *
