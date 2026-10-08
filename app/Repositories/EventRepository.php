@@ -1973,8 +1973,11 @@ class EventRepository
         ];
     }
 
-    /** Дописывает карточкам блоков картинки, даты серии и соседей по анонсу. */
-    public function hydrateRail(EloquentCollection $events): void
+    /**
+     * Дописывает карточкам блоков картинки, соседей по анонсу и даты серии.
+     * Без дат серии карточка показывает свой день, а не ближайший день серии.
+     */
+    public function hydrateRail(EloquentCollection $events, bool $withSeriesDates = true): void
     {
         if ($events->isEmpty()) {
             return;
@@ -1984,7 +1987,9 @@ class EventRepository
         $events->each(function ($e) {
             $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__series_key']);
         });
-        $this->hydrateGroupDates($events);
+        if ($withSeriesDates) {
+            $this->hydrateGroupDates($events);
+        }
         $this->hydrateSiblings($events);
     }
 

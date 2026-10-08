@@ -28,18 +28,18 @@ class EventService
             : $this->picker->pick($pool['base'], $pool['items'], $pool['today'], $pool['scope']);
 
         $sections = [];
-        $all = new EloquentCollection;
         foreach (['same_day', 'companions', 'similar'] as $name) {
             $list = new EloquentCollection;
             foreach ($picked[$name] as $p) {
                 $e = $pool['events'][$p['id']];
                 $e->setAttribute('rec_reason', $p['reason']);
                 $list->push($e);
-                $all->push($e);
             }
             $sections[$name] = $list;
         }
-        $this->repo->hydrateRail($all);
+        // В «В этот день» карточка должна показывать этот день, а не ближайший день своей серии.
+        $this->repo->hydrateRail($sections['same_day'], false);
+        $this->repo->hydrateRail($sections['companions']->concat($sections['similar']));
 
         return $sections + [
             'day' => $picked['day'],

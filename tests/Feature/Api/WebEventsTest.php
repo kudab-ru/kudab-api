@@ -993,6 +993,40 @@ class WebEventsTest extends TestCase
             ->assertJsonPath('data.same_day.1.title', 'Утренний спектакль');
     }
 
+    public function test_next_same_day_card_shows_its_own_day_not_the_series(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 3, 22, 9, 0, 0, 'Europe/Moscow'));
+
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $games = $this->createInterest('Квизы и игры', 'quiz-games');
+        $bar = $this->createVenue($msk->id, 'Бар', 'bar');
+
+        $base = $this->createEvent($msk->id, $community->id, 'Квиз', Carbon::create(2026, 3, 23, 19, 0, 0, 'Europe/Moscow')->utc(), $bar->id);
+        $this->tagEventLeafOnly($base->id, $games->id);
+
+        $groupId = DB::table('event_groups')->insertGetId([
+            'community_id' => $community->id,
+            'city_id' => $msk->id,
+            'group_key' => 'eg:test:igroteka',
+            'title_norm' => 'игротека',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        foreach ([22, 23] as $day) {
+            $e = $this->createEvent($msk->id, $community->id, 'Игротека', Carbon::create(2026, 3, $day, 19, 0, 0, 'Europe/Moscow')->utc());
+            $this->tagEventLeafOnly($e->id, $games->id);
+            DB::table('events')->where('id', $e->id)->update(['event_group_id' => $groupId]);
+        }
+
+        $this->getJson("/api/web/events/{$base->id}/next")
+            ->assertOk()
+            ->assertJsonPath('data.same_day.0.title', 'Игротека')
+            ->assertJsonPath('data.same_day.0.start_date', '2026-03-23')
+            ->assertJsonPath('data.same_day.0.group', null)
+            ->assertJsonCount(0, 'data.similar');
+    }
+
     /* ===================== helpers ===================== */
 
     private function createInterest(string $name, string $slug, ?int $parentId = null): Interest
