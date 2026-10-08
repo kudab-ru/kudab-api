@@ -127,6 +127,35 @@ class WebEventsTest extends TestCase
         ]);
     }
 
+    /** @return array<string, array{?string, bool}> */
+    public static function originalPosts(): array
+    {
+        return [
+            'страница сайта' => ['{"mode": "llm_text"}', false],
+            'пост ВК' => [null, true],
+        ];
+    }
+
+    /** @dataProvider originalPosts */
+    public function test_event_page_shows_original_text_only_for_a_real_post(?string $meta, bool $shown): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Театр');
+        $postId = (int) DB::table('context_posts')->insertGetId([
+            'external_id' => 'afisha', 'source' => 'site', 'community_id' => $community->id,
+            'status' => 'parsed', 'text' => 'Вся афиша театра на месяц', 'structured_meta' => $meta,
+            'author_id' => $community->id, 'author_type' => 'community', 'published_at' => now(),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $event = $this->createEvent($vrn->id, $community->id, 'Спектакль', now()->addDay());
+        $event->original_post_id = $postId;
+        $event->save();
+
+        $text = $this->getJson("/api/web/events/{$event->id}")->assertOk()->json('data.original_text');
+
+        $this->assertSame($shown ? 'Вся афиша театра на месяц' : null, $text);
+    }
+
     public function test_web_events_can_be_filtered_by_venue_id(): void
     {
         $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);

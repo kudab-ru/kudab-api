@@ -1378,7 +1378,7 @@ class EventRepository
                 'interests:id,slug,name',
                 'venue:id,slug,name,kind',
                 'eventSources:id,event_id,source,post_external_id,external_url,published_at,images,generated_link,social_link_id',
-                'originalPost:id,text',
+                'originalPost:id,text,structured_meta',
             ]);
 
         $this->addPastFlags($q);
