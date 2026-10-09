@@ -10,6 +10,7 @@ use App\Models\Venue;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class WebEventsTest extends TestCase
@@ -481,6 +482,49 @@ class WebEventsTest extends TestCase
             ->assertOk()
             ->assertJsonPath('meta.total', 3)
             ->assertJsonCount(3, 'data');
+    }
+
+    /** @return array<string, array{?string, ?int, list<string>, string, bool}> */
+    public static function kidsCases(): array
+    {
+        return [
+            'детское, которое лента прячет' => ['kids', null, [], 'Буратино', true],
+            'семейное' => ['family', 12, [], 'Снежная королева', true],
+            'тема «детям»' => [null, null, ['kids'], 'Мастер-класс для школьников', true],
+            'сказка в названии' => [null, null, [], 'Сказки у Лукоморья', true],
+            'спектакль 6+' => [null, 6, ['theatre'], 'Маленький принц', true],
+            'концерт 6+' => [null, 6, ['music'], 'Сольный концерт', false],
+            'детское 16+' => ['kids', 16, [], 'Тени Готэма', false],
+            'взрослым' => ['adults', null, ['kids'], 'Девичник', false],
+            'обычный спектакль' => ['general', null, ['theatre'], 'Господа Головлёвы', false],
+        ];
+    }
+
+    #[DataProvider('kidsCases')]
+    public function test_kids_filter_picks_what_suits_children(?string $audience, ?int $age, array $topics, string $title, bool $shown): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $event = $this->createEvent($vrn->id, $this->createCommunity($vrn->id, 'Организатор')->id, $title, now()->addDay());
+        DB::table('events')->where('id', $event->id)->update(['audience' => $audience, 'age_restriction' => $age]);
+        foreach ($topics as $slug) {
+            $this->tagEventLeafOnly($event->id, $this->createInterest($slug, $slug)->id);
+        }
+
+        $this->getJson('/api/web/events?city=voronezh&kids=1')->assertOk()->assertJsonPath('meta.total', $shown ? 1 : 0);
+    }
+
+    public function test_random_with_kids_picks_only_from_kids_events(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Организатор');
+        $show = $this->createEvent($vrn->id, $community->id, 'Буратино', now()->addDay());
+        $this->setTaxonomy($show->id, 'kids', 'culture');
+        $this->createEvent($vrn->id, $community->id, 'Рок-концерт', now()->addDay());
+
+        $this->getJson('/api/web/events/random?city=voronezh&kids=1')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonPath('data.title', 'Буратино');
     }
 
     /* ===================== related (Interests Этап 3) ===================== */

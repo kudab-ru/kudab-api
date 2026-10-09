@@ -182,6 +182,33 @@ class Event extends Model
     }
 
     /**
+     * «С детьми»: аудитория «детям» или «семье», тема «детям», детское слово в названии или
+     * возраст 0+ и 6+, если это не обычный концерт (у них 6+ стоит просто по закону).
+     * 16+ и «взрослым» не попадают никогда.
+     */
+    public function scopeWebKids($q)
+    {
+        $topic = fn (array $slugs) => function ($w) use ($slugs) {
+            $w->whereIn('interests.slug', $slugs)
+                ->orWhereIn('interests.parent_id', Interest::query()->select('id')->whereIn('slug', $slugs));
+        };
+
+        return $q
+            ->where(fn ($w) => $w->whereNull('events.age_restriction')->orWhere('events.age_restriction', '<', 16))
+            ->where(fn ($w) => $w->whereNull('events.audience')->orWhere('events.audience', '<>', 'adults'))
+            ->where(function ($w) use ($topic) {
+                $w->whereIn('events.audience', ['kids', 'family'])
+                    ->orWhereHas('interests', $topic(['kids']))
+                    ->orWhereRaw('public.ru_normalize(events.title) ~ ?', ['сказк|семейн|детск|для детей|мульт|малыш|ледов'])
+                    ->orWhere(fn ($x) => $x
+                        ->where('events.age_restriction', '<=', 6)
+                        ->where(fn ($c) => $c
+                            ->whereDoesntHave('interests', $topic(['music']))
+                            ->orWhereHas('interests', $topic(['theatre', 'circus-show', 'kids']))));
+            });
+    }
+
+    /**
      * «Видимое в вебе» событие — тот же статус-скоуп, что паблик-выдача
      * /api/web/events (EventRepository::paginateUpcomingWeb): не удалено +
      * город active + не blacklisted + дефолтная таксономия ленты.

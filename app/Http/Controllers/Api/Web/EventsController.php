@@ -100,15 +100,6 @@ class EventsController extends Controller
 
         unset($v['when']);
 
-        $kids = !empty($v['kids']);
-        unset($v['kids']);
-        if ($kids) {
-            $qVal = trim((string) ($v['q'] ?? ''));
-            if ($qVal === '') {
-                $v['q'] = 'дет';
-            }
-        }
-
         if (array_key_exists('q', $v)) {
             $v['q'] = trim((string)$v['q']);
         }
@@ -217,14 +208,6 @@ class EventsController extends Controller
         }
         unset($v['when']);
 
-        $kids = !empty($v['kids']);
-        unset($v['kids']);
-        if ($kids) {
-            $qVal = trim((string) ($v['q'] ?? ''));
-            if ($qVal === '') {
-                $v['q'] = 'дет';
-            }
-        }
         if (array_key_exists('q', $v)) {
             $v['q'] = trim((string) $v['q']);
         }
@@ -407,15 +390,6 @@ class EventsController extends Controller
             }
         }
         unset($v['when']);
-
-        $kids = !empty($v['kids']);
-        unset($v['kids']);
-        if ($kids) {
-            $qVal = trim((string) ($v['q'] ?? ''));
-            if ($qVal === '') {
-                $v['q'] = 'дет';
-            }
-        }
 
         if (array_key_exists('q', $v)) {
             $v['q'] = trim((string) $v['q']);

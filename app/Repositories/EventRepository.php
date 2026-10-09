@@ -702,6 +702,10 @@ class EventRepository
             }
         }
 
+        if (! empty($filters['kids'])) {
+            $q->webKids();
+        }
+
         if (! empty($filters['free'])) {
             $q->where(function ($w) {
                 $w->where('events.price_status', 'free')
@@ -1273,6 +1277,10 @@ class EventRepository
             } else {
                 $q->whereRaw('1 = 0');
             }
+        }
+
+        if (! empty($filters['kids'])) {
+            $q->webKids();
         }
 
         if (! empty($filters['free'])) {
@@ -2598,6 +2606,13 @@ class EventRepository
             && filter_var($filters['include_all'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) === true;
 
         if ($includeAll) {
+            return;
+        }
+
+        // Выбравший «С детьми» ищет как раз то, что лента по умолчанию прячет.
+        if (! empty($filters['kids'])) {
+            $q->webFeedContentKind();
+
             return;
         }
 
