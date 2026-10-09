@@ -54,12 +54,15 @@ class TelegramChatBroadcast extends Model
         return Cache::add('broadcast:log:'.$what.':'.$broadcastId.':'.$now->format('Y-m-d-H'), 1, 3600);
     }
 
-    /** Больше четырёх постов в день канал-афиша не выдержит по содержанию. */
-    public const MAX_SLOTS = 4;
+    /** Часов в сетке вместе со слотами «по возможности». */
+    public const MAX_SLOTS = 6;
+
+    /** Порог по умолчанию для слотов «по возможности»: в тихие будни слот пустует, в выходные заполняется. */
+    public const OPTIONAL_MIN_EVENTS = 20;
 
     /**
      * Сколько событийных записей держать в ленте канала одновременно;
-     * портреты и подборки не в счёт.
+     * портреты и подборки не в счёт. Слоты «по возможности» предел не держит.
      */
     public function getFeedLimitAttribute(): int
     {
@@ -67,7 +70,7 @@ class TelegramChatBroadcast extends Model
         $raw = $settings['feed_limit'] ?? null;
 
         if (! is_numeric($raw)) {
-            return max(1, min(31, $this->horizon_days * max(1, count($this->slots))));
+            return max(1, min(31, $this->horizon_days * max(1, count($this->requiredSlotHours()))));
         }
 
         return max(1, min(31, (int) $raw));
@@ -129,6 +132,70 @@ class TelegramChatBroadcast extends Model
         sort($clean);
 
         $settings['slots'] = array_slice($clean, 0, self::MAX_SLOTS);
+        $this->settings = $settings;
+    }
+
+    /**
+     * Часы сетки, которые заполняются только в насыщенный день (порог — optional_min_events).
+     * Час, убранный из сетки, отсюда пропадает сам.
+     *
+     * @return list<int>
+     */
+    public function getOptionalSlotsAttribute(): array
+    {
+        $raw = ($this->settings ?? [])['optional_slots'] ?? null;
+        if (! is_array($raw)) {
+            return [];
+        }
+
+        $hours = array_map('intval', array_filter($raw, 'is_numeric'));
+
+        return array_values(array_intersect($this->slots, $hours));
+    }
+
+    /** @param  array<int|string>  $hours */
+    public function setOptionalSlotsAttribute(array $hours): void
+    {
+        $settings = $this->settings ?? [];
+
+        $clean = array_values(array_unique(array_map('intval', array_filter($hours, 'is_numeric'))));
+        sort($clean);
+
+        if ($clean === []) {
+            unset($settings['optional_slots']);
+        } else {
+            $settings['optional_slots'] = $clean;
+        }
+
+        $this->settings = $settings;
+    }
+
+    /**
+     * Часы, которые заполняются каждый день. Пусто, если сетки нет: тогда час берётся из period.
+     *
+     * @return list<int>
+     */
+    public function requiredSlotHours(): array
+    {
+        return array_values(array_diff($this->slots, $this->optional_slots));
+    }
+
+    /** Сколько событий на этот и следующий день нужно, чтобы слот «по возможности» заполнился. */
+    public function getOptionalMinEventsAttribute(): int
+    {
+        $raw = ($this->settings ?? [])['optional_min_events'] ?? null;
+
+        if (! is_numeric($raw)) {
+            return self::OPTIONAL_MIN_EVENTS;
+        }
+
+        return max(1, min(500, (int) $raw));
+    }
+
+    public function setOptionalMinEventsAttribute(int $count): void
+    {
+        $settings = $this->settings ?? [];
+        $settings['optional_min_events'] = max(1, min(500, $count));
         $this->settings = $settings;
     }
 

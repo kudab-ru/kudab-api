@@ -124,13 +124,14 @@ class FillFeedCommand extends Command
 
             if ($dryRun || ($filled['filled'] ?? 0) > 0 || ($filled['no_candidate'] ?? 0) > 0 || $capped > 0) {
                 $this->line(sprintf(
-                    '  канал #%d%s, режим %s: %s %d, без кандидата %d, дней в горизонте %d%s',
+                    '  канал #%d%s, режим %s: %s %d, без кандидата %d, «по возможности» пусто %d, дней в горизонте %d%s',
                     $broadcast->id,
                     $blocked ? ' (стенду постить в него запрещено)' : '',
                     $broadcast->pick_mode,
                     $dryRun ? 'заполнил бы' : 'заполнено',
                     (int) ($filled['filled'] ?? 0),
                     (int) ($filled['no_candidate'] ?? 0),
+                    (int) ($filled['optional_quiet'] ?? 0),
                     (int) ($filled['days'] ?? 0),
                     // без этой оговорки «заполнено 0» читается как «событий в городе нет»
                     $capped > 0
@@ -172,7 +173,7 @@ class FillFeedCommand extends Command
      * Прогон тем же кодом в транзакции с откатом, а не отдельная сухая ветка в наполнителе:
      * второй путь быстро разойдётся с первым, и сухой прогон начнёт врать.
      *
-     * @return array{filled: int, days: int, no_candidate: int, feed_limit: int, picks: list<array<string, mixed>>}
+     * @return array{filled: int, days: int, no_candidate: int, feed_limit: int, optional_quiet: int, picks: list<array<string, mixed>>}
      */
     private function wouldFill(
         TelegramChatBroadcastService $service,

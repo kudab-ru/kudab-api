@@ -22,6 +22,9 @@ class BroadcastSlotPlanner
      */
     public const EVE_DELAY_MINUTES = 5;
 
+    /** Слот «по возможности» в последний час не решаем: анонсу нужно время, а человеку — увидеть пост заранее. */
+    public const OPTIONAL_CUTOFF_MINUTES = 60;
+
     /**
      * Часы публикации канала по возрастанию. Без slots — один час из period.
      *
@@ -41,6 +44,22 @@ class BroadcastSlotPlanner
         return [10];
     }
 
+    /**
+     * Часы, которые заполняются каждый день; остальные — «по возможности».
+     *
+     * @return list<int>
+     */
+    public function requiredSlots(TelegramChatBroadcast $broadcast): array
+    {
+        return array_values(array_diff($this->slots($broadcast), $broadcast->optional_slots));
+    }
+
+    /** Слот «по возможности»: заполняется только в насыщенный день, см. TelegramChatBroadcastService::optionalSupply. */
+    public function isOptional(TelegramChatBroadcast $broadcast, CarbonInterface $at): bool
+    {
+        return in_array((int) $at->copy()->setTimezone(self::TZ)->hour, $broadcast->optional_slots, true);
+    }
+
     /** Ключ слота: день и час по Москве. */
     public function key(CarbonInterface|Carbon|string $at): string
     {
@@ -48,26 +67,70 @@ class BroadcastSlotPlanner
     }
 
     /**
-     * С какого момента слот открыт автоподбору; null — открыт, как только попал в горизонт.
-     * В `eve` — накануне, через EVE_DELAY_MINUTES после последнего слота дня по Москве,
-     * fill_lead_days там не действует. В `week` поздние слоты дня ждут fill_lead_days:
-     * половина афиши объявляется поздно, а первый слот дня собирается на весь горизонт.
+     * С какого момента слот открыт автоподбору; null — как только попал в горизонт. В `eve` и у слота
+     * «по возможности» — накануне, через EVE_DELAY_MINUTES после последнего слота дня по Москве. В `week`
+     * поздние обязательные слоты ждут fill_lead_days: половина афиши объявляется поздно.
      */
-    public function opensAt(TelegramChatBroadcast $broadcast, Carbon $slotAt, int $slotIndex): ?Carbon
+    public function opensAt(TelegramChatBroadcast $broadcast, Carbon $slotAt): ?Carbon
     {
-        if ($broadcast->picksOnEve()) {
-            $slots = $this->slots($broadcast);
-
+        if ($broadcast->picksOnEve() || $this->isOptional($broadcast, $slotAt)) {
             return $slotAt->copy()->setTimezone(self::TZ)->subDay()
-                ->setTime(max($slots), self::EVE_DELAY_MINUTES, 0);
+                ->setTime(max($this->slots($broadcast)), self::EVE_DELAY_MINUTES, 0);
         }
 
         $lead = $broadcast->fill_lead_days;
-        if ($slotIndex === 0 || $lead === null) {
+        $hour = (int) $slotAt->copy()->setTimezone(self::TZ)->hour;
+        if ($lead === null || $hour === ($this->requiredSlots($broadcast)[0] ?? null)) {
             return null;
         }
 
         return $slotAt->copy()->subDays($lead);
+    }
+
+    /**
+     * Слоты подборок, под которые бронь ещё не встала: обычный пост туда не ставим, иначе бронь
+     * уедет на неделю (см. BroadcastDigestBooking::slotAt). Снятая подборка свой слот отпускает.
+     *
+     * @return array<string, true> ключи key()
+     */
+    public function digestHeld(TelegramChatBroadcast $broadcast, Carbon $from, int $days): array
+    {
+        $slots = $broadcast->digest_slots;
+        if ($slots === []) {
+            return [];
+        }
+
+        $start = $from->copy()->setTimezone(self::TZ)->startOfDay();
+        $held = [];
+        // с завтрашнего дня: на сегодня бронь уже не встанет, она ищет день начиная с завтра
+        for ($i = 1; $i < $days; $i++) {
+            $day = $start->copy()->addDays($i);
+            foreach ($slots as $slot) {
+                if ($day->isoWeekday() === $slot['weekday']) {
+                    $held[$this->key($day->copy()->setTime($slot['hour'], 0))] = true;
+                }
+            }
+        }
+
+        if ($held === []) {
+            return [];
+        }
+
+        $released = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->whereIn('status', [
+                TelegramChatBroadcastItem::STATUS_SKIPPED,
+                TelegramChatBroadcastItem::STATUS_REJECTED,
+            ])
+            ->where('publish_at', '>=', $start->copy()->utc())
+            ->pluck('publish_at');
+
+        foreach ($released as $at) {
+            unset($held[$this->key($at)]);
+        }
+
+        return $held;
     }
 
     /**
@@ -80,7 +143,8 @@ class BroadcastSlotPlanner
     }
 
     /**
-     * Ближайший свободный слот, null — всё занято.
+     * Ближайший свободный обязательный слот, null — всё занято. Слоты «по возможности» и
+     * слоты подборок отсюда не отдаём: первые решает насыщенность дня, вторые держит бронь.
      *
      * @param  bool  $respectLead  держать закрытыми слоты, которые автоподбору ещё рано занимать
      *                             (см. opensAt); false передают пути, где пост ставит человек
@@ -105,12 +169,14 @@ class BroadcastSlotPlanner
             ->all();
 
         $days = $respectLead ? $this->autoPickDays($broadcast) : $broadcast->horizon_days;
+        $held = $this->digestHeld($broadcast, $now, $days);
 
         for ($i = 0; $i < $days; $i++) {
             $day = $now->copy()->setTimezone(self::TZ)->addDays($i)->startOfDay();
 
-            foreach ($this->openSlots($broadcast, $day, $now, $respectLead) as $at) {
-                if (! in_array($this->key($at), $taken, true)) {
+            foreach ($this->openSlots($broadcast, $day, $now, $respectLead, withOptional: false) as $at) {
+                $key = $this->key($at);
+                if (! in_array($key, $taken, true) && ! isset($held[$key])) {
                     return $at;
                 }
             }
@@ -143,18 +209,32 @@ class BroadcastSlotPlanner
      * @param  bool  $respectLead  false — все будущие слоты дня: пост ставит человек
      * @return list<Carbon>
      */
-    public function openSlots(TelegramChatBroadcast $broadcast, Carbon $day, Carbon $now, bool $respectLead = true): array
-    {
+    public function openSlots(
+        TelegramChatBroadcast $broadcast,
+        Carbon $day,
+        Carbon $now,
+        bool $respectLead = true,
+        bool $withOptional = true,
+    ): array {
         $open = [];
-        foreach ($this->slots($broadcast) as $slotIndex => $hour) {
+        foreach ($this->slots($broadcast) as $hour) {
             $at = $day->copy()->setTimezone(self::TZ)->setTime($hour, 0, 0);
             // прошедший слот не заполняем: пост встал бы просроченным и тут же потерял бы день
             if ($at->lt($now)) {
                 continue;
             }
-            $opensAt = $respectLead ? $this->opensAt($broadcast, $at, $slotIndex) : null;
-            if ($opensAt !== null && $now->lt($opensAt)) {
+            $optional = $this->isOptional($broadcast, $at);
+            if ($optional && ! $withOptional) {
                 continue;
+            }
+            if ($respectLead) {
+                $opensAt = $this->opensAt($broadcast, $at);
+                if ($opensAt !== null && $now->lt($opensAt)) {
+                    continue;
+                }
+                if ($optional && $now->gte($at->copy()->subMinutes(self::OPTIONAL_CUTOFF_MINUTES))) {
+                    continue;
+                }
             }
             $open[] = $at;
         }

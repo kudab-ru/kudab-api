@@ -192,7 +192,7 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
-    /** Окно простоя делится на число слотов: два поста в день — окно вдвое короче. */
+    /** Окно простоя делится на число обязательных слотов: два поста в день — окно вдвое короче. */
     public function test_idle_window_is_divided_by_slots(): void
     {
         [$broadcast] = $this->channelWithEvents(1);
@@ -203,6 +203,12 @@ class BroadcastSlotsTest extends TestCase
         $broadcast->save();
 
         $this->assertSame(12, $this->service()->periodWindowHours($broadcast->fresh()));
+
+        $broadcast->slots = [10, 16, 19];
+        $broadcast->optional_slots = [16];
+        $broadcast->save();
+
+        $this->assertSame(12, $this->service()->periodWindowHours($broadcast->fresh()), 'тихий день без слота 16:00 — не простой');
     }
 
     private function countFromVenue(int $broadcastId, int $venueId): int
@@ -511,23 +517,25 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
-    /** @return array<string, array{list<int>, int}> */
+    /** @return array<string, array{list<int>, list<int>, int}> */
     public static function tomorrowAtNight(): array
     {
         return [
-            'завтра пусто' => [[], 1],
-            'завтра заполнено' => [[10, 15, 19], 0],
+            'завтра пусто' => [[], [], 1],
+            'завтра заполнено' => [[10, 15, 19], [], 0],
+            'пуст только слот «по возможности»' => [[10, 19], [15], 0],
         ];
     }
 
     #[DataProvider('tomorrowAtNight')]
-    public function test_owner_hears_once_that_tomorrow_was_not_picked(array $filledHours, int $notices): void
+    public function test_owner_hears_once_that_tomorrow_was_not_picked(array $filledHours, array $optional, int $notices): void
     {
         Carbon::setTestNow(Carbon::parse('2026-09-15 21:10', 'Europe/Moscow')->utc());
 
         [$broadcast, $events] = $this->channelWithEvents(3);
         $broadcast->settings = array_merge((array) $broadcast->settings, [
             'slots' => [10, 15, 19],
+            'optional_slots' => $optional,
             'pick_mode' => TelegramChatBroadcast::PICK_MODE_EVE,
         ]);
         $broadcast->save();
@@ -2003,5 +2011,192 @@ class BroadcastSlotsTest extends TestCase
         );
 
         Carbon::setTestNow();
+    }
+
+    /** @return array<string, array{list<string>, list<int>}> */
+    public static function optionalSlotDays(): array
+    {
+        return [
+            'насыщенный день' => [['2026-10-07 19:00', '2026-10-07 19:30', '2026-10-07 23:30'], [10, 16]],
+            'тихий день' => [['2026-10-07 19:00', '2026-10-07 19:30'], [10]],
+            'ночь после окна не в счёт' => [['2026-10-07 19:00', '2026-10-07 19:30', '2026-10-08 01:00'], [10]],
+        ];
+    }
+
+    #[DataProvider('optionalSlotDays')]
+    public function test_optional_slot_fills_only_on_a_rich_day(array $starts, array $tuesdayHours): void
+    {
+        // понедельник после вечернего выбора: слот «по возможности» на вторник уже решается
+        Carbon::setTestNow(Carbon::parse('2026-10-05 21:10', 'Europe/Moscow')->utc());
+
+        $broadcast = $this->optionalChannel(minEvents: 3);
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+
+        // его возьмёт обязательный слот 10:00; в окно слота 16:00 (со вторника 22:00 до конца среды) он не входит
+        $this->eventAt($city->id, 'Утренний', Carbon::parse('2026-10-06 18:00', 'Europe/Moscow')->utc(), rich: true);
+        foreach ($starts as $i => $start) {
+            $this->eventAt($city->id, 'Вечер '.$i, Carbon::parse($start, 'Europe/Moscow')->utc(), rich: true);
+        }
+
+        $this->service()->fillFeedDays($broadcast, now());
+
+        $this->assertSame(['2026-10-06' => $tuesdayHours], $this->hoursByDay($broadcast->id));
+
+        Carbon::setTestNow();
+    }
+
+    public function test_optional_slot_stays_empty_rather_than_repeat_the_neighbour(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-05 21:10', 'Europe/Moscow')->utc());
+
+        $broadcast = $this->optionalChannel(minEvents: 2);
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $music = $this->interest('music-optional');
+
+        $morning = $this->eventAt($city->id, 'Утренний концерт', Carbon::parse('2026-10-06 18:00', 'Europe/Moscow')->utc(), rich: true);
+        $this->tag($morning->id, $music);
+        foreach (['Концерт А', 'Концерт Б'] as $i => $title) {
+            $start = Carbon::parse('2026-10-07 19:00', 'Europe/Moscow')->addMinutes($i)->utc();
+            $this->tag($this->eventAt($city->id, $title, $start, rich: true)->id, $music);
+        }
+
+        $this->service()->fillFeedDays($broadcast, now());
+
+        $this->assertSame(['2026-10-06' => [10]], $this->hoursByDay($broadcast->id));
+
+        Carbon::setTestNow();
+    }
+
+    public function test_portrait_takes_only_required_slots(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-05 21:10', 'Europe/Moscow')->utc());
+
+        $broadcast = $this->optionalChannel(minEvents: 1, horizonDays: 3);
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $event = $this->eventAt($city->id, 'Стоит во вторник', Carbon::parse('2026-10-08 19:00', 'Europe/Moscow')->utc());
+
+        $tuesday = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $tuesday->publish_at = Carbon::parse('2026-10-06 10:00', 'Europe/Moscow')->utc();
+        $tuesday->save();
+
+        $slot = app(\App\Services\Telegram\BroadcastSlotPlanner::class)->nextFreeSlot($broadcast, now());
+
+        $this->assertSame('2026-10-07 10:00', $slot?->format('Y-m-d H:i'), 'вторник 16:00 свободен, но это слот «по возможности»');
+
+        Carbon::setTestNow();
+    }
+
+    /** @return array<string, array{bool, string|null, bool}> */
+    public static function weekendDigests(): array
+    {
+        return [
+            'бронь «На выходных»' => [true, 'na-vyhodnyh', false],
+            'брони ещё нет, «На выходных» в расписании' => [false, 'na-vyhodnyh', false],
+            'подборка без рубрики' => [true, null, true],
+        ];
+    }
+
+    #[DataProvider('weekendDigests')]
+    public function test_weekend_events_wait_for_the_weekend_digest(bool $booked, ?string $theme, bool $saturdayPicked): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-05 06:00', 'Europe/Moscow')->utc()); // понедельник
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10],
+            'horizon_days' => 2,
+            'digest_slots' => $booked ? [] : [['weekday' => 5, 'hour' => 13, 'theme' => $theme]],
+        ]);
+        $broadcast->save();
+
+        if ($booked) {
+            $digest = new TelegramChatBroadcastItem;
+            $digest->broadcast_id = $broadcast->id;
+            $digest->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+            $digest->status = TelegramChatBroadcastItem::STATUS_PENDING;
+            $digest->publish_at = Carbon::parse('2026-10-09 13:00', 'Europe/Moscow')->utc();
+            $digest->digest_meta = $theme === null ? null : ['theme_wanted' => $theme];
+            $digest->save();
+        }
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        // полная карточка в субботу по баллу выше голой в среду: без брони суббота ушла бы первой.
+        // Полпервого ночи: суббота по Москве, но ещё пятница по UTC
+        $saturday = $this->eventAt($city->id, 'Субботний концерт', Carbon::parse('2026-10-10 00:30', 'Europe/Moscow')->utc(), rich: true);
+        $this->eventAt($city->id, 'Лекция в среду', Carbon::parse('2026-10-07 19:00', 'Europe/Moscow')->utc());
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame($saturdayPicked, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('event_id', $saturday->id)
+            ->exists());
+
+        Carbon::setTestNow();
+    }
+
+    /** @return array<string, array{bool, list<int>}> */
+    public static function digestSlotStates(): array
+    {
+        return [
+            'бронь ещё не встала' => [false, [10]],
+            'подборку сняли' => [true, [10, 13]],
+        ];
+    }
+
+    #[DataProvider('digestSlotStates')]
+    public function test_digest_slot_is_kept_until_the_digest_is_removed(bool $removed, array $tuesdayHours): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-05 06:00', 'Europe/Moscow')->utc()); // понедельник
+
+        [$broadcast] = $this->channelWithEvents(6);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10, 13],
+            'horizon_days' => 2,
+            'digest_slots' => [['weekday' => 2, 'hour' => 13, 'theme' => null]],
+        ]);
+        $broadcast->save();
+
+        if ($removed) {
+            $digest = new TelegramChatBroadcastItem;
+            $digest->broadcast_id = $broadcast->id;
+            $digest->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+            $digest->publish_at = Carbon::parse('2026-10-06 13:00', 'Europe/Moscow')->utc();
+            $digest->removeByHand();
+            $digest->save();
+        }
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $tuesday = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
+            ->whereNotNull('publish_at')
+            ->pluck('publish_at')
+            ->map(fn ($at) => Carbon::parse($at)->setTimezone('Europe/Moscow'))
+            ->filter(fn (Carbon $at) => $at->toDateString() === '2026-10-06')
+            ->map(fn (Carbon $at) => $at->hour)
+            ->sort()
+            ->values()
+            ->all();
+
+        $this->assertSame($tuesdayHours, $tuesday);
+
+        Carbon::setTestNow();
+    }
+
+    /** Канал со слотами 10:00 и «по возможности» 16:00. */
+    private function optionalChannel(int $minEvents, int $horizonDays = 2): TelegramChatBroadcast
+    {
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, [
+            'slots' => [10, 16],
+            'optional_slots' => [16],
+            'optional_min_events' => $minEvents,
+            'horizon_days' => $horizonDays,
+        ]);
+        $broadcast->save();
+
+        return $broadcast->fresh();
     }
 }

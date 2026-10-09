@@ -22,6 +22,9 @@ final class PickReason
 
     public const BY_DIGEST = 'digest';
 
+    /** Правило автовыбора в слот «по возможности»; число событий дня — в `pick_meta.supply`. */
+    public const RULE_OPTIONAL = 'optional';
+
     /** Мягкие слои подбора, ключи `pick_meta.dropped`: слой, без которого кандидата не нашлось. */
     public const LAYER_THEME = 'theme';
 
@@ -92,6 +95,13 @@ final class PickReason
     /** @param  array<string, mixed>  $meta */
     private static function auto(array $meta): string
     {
+        if (($meta['rule'] ?? null) === self::RULE_OPTIONAL) {
+            $supply = (int) ($meta['supply'] ?? 0);
+
+            return 'Слот «по возможности»: на этот и следующий день '.$supply.' '
+                .self::plural($supply, 'событие', 'события', 'событий').'. '.self::card($meta, comparative: true);
+        }
+
         $dropped = self::dropped($meta);
         if ($dropped !== []) {
             return self::upperFirst(implode('; ', array_map(
@@ -186,14 +196,19 @@ final class PickReason
 
     private static function days(int $n): string
     {
+        return self::plural($n, 'день', 'дня', 'дней');
+    }
+
+    private static function plural(int $n, string $one, string $few, string $many): string
+    {
         $mod100 = $n % 100;
         $mod10 = $n % 10;
 
         return match (true) {
-            $mod100 >= 11 && $mod100 <= 14 => 'дней',
-            $mod10 === 1 => 'день',
-            $mod10 >= 2 && $mod10 <= 4 => 'дня',
-            default => 'дней',
+            $mod100 >= 11 && $mod100 <= 14 => $many,
+            $mod10 === 1 => $one,
+            $mod10 >= 2 && $mod10 <= 4 => $few,
+            default => $many,
         };
     }
 

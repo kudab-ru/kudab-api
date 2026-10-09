@@ -80,6 +80,12 @@ class AdminBroadcastController extends Controller
      */
     private const REJECTED_COOLDOWN_DAYS = TelegramChatBroadcastService::REJECTED_COOLDOWN_DAYS;
 
+    /** День недели по ISO для текста отказа: «Подборка в пятницу…». */
+    private const WEEKDAY_IN = [
+        1 => 'в понедельник', 2 => 'во вторник', 3 => 'в среду', 4 => 'в четверг',
+        5 => 'в пятницу', 6 => 'в субботу', 7 => 'в воскресенье',
+    ];
+
     public function __construct(
         private readonly TelegramChatBroadcastService $broadcasts,
         private readonly EventCaptionBuilder $captions,
@@ -305,6 +311,7 @@ class AdminBroadcastController extends Controller
         return response()->json([
             'data' => [
                 'channel' => $this->channelPayload($broadcast),
+                'optional' => $this->optionalSlotStates($broadcast, $items),
                 'items' => $items->map(function (TelegramChatBroadcastItem $i) use ($events, $venues, $repeats) {
                     $event = $events->get($i->event_id);
                     $group = $event?->event_group_id;
@@ -318,6 +325,51 @@ class AdminBroadcastController extends Controller
                 })->values(),
             ],
         ]);
+    }
+
+    /**
+     * Пустые слоты «по возможности» сегодня и завтра: сколько событий набирается и сколько нужно.
+     * Дальше завтра такой слот ещё не решается, считать для него нечего.
+     *
+     * @param  \Illuminate\Support\Collection<int, TelegramChatBroadcastItem>  $items
+     * @return list<array{at: string, events: int, needed: int, closes_at: string}>
+     */
+    private function optionalSlotStates(TelegramChatBroadcast $broadcast, \Illuminate\Support\Collection $items): array
+    {
+        $chat = $broadcast->chat;
+        if ($broadcast->optional_slots === [] || ! $chat?->city_id) {
+            return [];
+        }
+
+        $planner = app(\App\Services\Telegram\BroadcastSlotPlanner::class);
+        $taken = $items
+            ->filter(fn (TelegramChatBroadcastItem $i) => $i->publish_at !== null && ! $i->is_off_grid
+                && in_array($i->status, $this->openStatuses(), true))
+            ->map(fn (TelegramChatBroadcastItem $i) => $planner->key($i->publish_at))
+            ->flip();
+
+        $now = Carbon::now();
+        $today = $now->copy()->setTimezone('Europe/Moscow')->startOfDay();
+        $out = [];
+        foreach ([$today, $today->copy()->addDay()] as $day) {
+            foreach ($broadcast->optional_slots as $hour) {
+                $at = $day->copy()->setTime($hour, 0);
+                if ($at->lte($now) || $taken->has($planner->key($at))) {
+                    continue;
+                }
+
+                $out[] = [
+                    'at' => $at->toIso8601String(),
+                    'events' => $this->broadcasts->optionalSupply($chat, $broadcast, $at),
+                    'needed' => $broadcast->optional_min_events,
+                    'closes_at' => $at->copy()
+                        ->subMinutes(\App\Services\Telegram\BroadcastSlotPlanner::OPTIONAL_CUTOFF_MINUTES)
+                        ->toIso8601String(),
+                ];
+            }
+        }
+
+        return $out;
     }
 
     /**
@@ -3713,6 +3765,9 @@ class AdminBroadcastController extends Controller
             'city_id' => ['sometimes', 'nullable', 'integer'],
             'slots' => ['sometimes', 'array', 'max:'.TelegramChatBroadcast::MAX_SLOTS],
             'slots.*' => ['integer', 'between:0,23'],
+            'optional_slots' => ['sometimes', 'array', 'max:'.TelegramChatBroadcast::MAX_SLOTS],
+            'optional_slots.*' => ['integer', 'between:0,23'],
+            'optional_min_events' => ['sometimes', 'integer', 'min:1', 'max:500'],
             'horizon_days' => ['sometimes', 'integer', 'min:1', 'max:31'],
             // null — «заполнять вместе с первым слотом», то есть как было до
             // появления ручки.
@@ -3731,6 +3786,8 @@ class AdminBroadcastController extends Controller
         ]);
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
+        // до правок: у старой настройки час подборки следует за сеткой
+        $digestWas = $broadcast->digest_slots;
 
         // Включение канала без владельца — самый тихий из отказов: поллер
         // пропустит канал, ЛС-сигнал писать некому, в ленте посты будут
@@ -3779,6 +3836,12 @@ class AdminBroadcastController extends Controller
         if ($request->has('slots')) {
             $broadcast->slots = $data['slots'];
         }
+        if ($request->has('optional_slots')) {
+            $broadcast->optional_slots = $data['optional_slots'];
+        }
+        if ($request->has('optional_min_events')) {
+            $broadcast->optional_min_events = (int) $data['optional_min_events'];
+        }
         if ($request->has('fill_lead_days')) {
             $broadcast->fill_lead_days = $data['fill_lead_days'] === null
                 ? null
@@ -3804,7 +3867,6 @@ class AdminBroadcastController extends Controller
         if ($broadcast->picksOnEve()) {
             $broadcast->text_lead_minutes = 24 * 60;
         }
-        $digestWas = $broadcast->digest_weekday;
         if ($request->has('digest_slots')) {
             $broadcast->digest_slots = (array) $data['digest_slots'];
         }
@@ -3815,6 +3877,21 @@ class AdminBroadcastController extends Controller
         }
         if ($request->has('min_gap_minutes')) {
             $broadcast->min_gap_minutes = (int) $data['min_gap_minutes'];
+        }
+
+        // Подборка встаёт в слот дня вместо обычного поста, лишним постом сверху она не выходит
+        $grid = app(\App\Services\Telegram\BroadcastSlotPlanner::class)->slots($broadcast);
+        foreach ($request->hasAny(['slots', 'digest_slots']) ? $broadcast->digest_slots : [] as $slot) {
+            if (! in_array($slot['hour'], $grid, true)) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => sprintf(
+                        'Подборка %s в %02d:00 не попадает в часы публикации канала. Подборка встаёт в один из слотов дня — выберите час из сетки.',
+                        self::WEEKDAY_IN[$slot['weekday']],
+                        $slot['hour'],
+                    ),
+                ], 422);
+            }
         }
 
         // Город пишем ЧЕРЕЗ сервис: city_id вне $fillable у модели чата, и
@@ -3845,37 +3922,56 @@ class AdminBroadcastController extends Controller
         // видит её — первое, что он подумает, это что настройка не сохранилась.
         // Выключение симметрично убирает неотправленную бронь: оставить её
         // значило бы выпустить рубрику, от которой только что отказались.
-        if ($digestWas !== $broadcast->digest_weekday) {
-            $this->syncDigestBooking($broadcast, $digestWas);
+        if ($digestWas !== $broadcast->digest_slots) {
+            $this->syncDigestBooking($broadcast);
         }
 
         return response()->json(['data' => $this->channelPayload($broadcast->fresh('chat'))]);
     }
 
     /**
-     * Привести бронь подборки в соответствие с настройкой канала.
+     * Привести брони подборок в соответствие с расписанием канала.
      *
-     * День сменили — старую бронь снимаем и ставим новую: двигать её на месте
-     * нельзя, у нового дня может быть занят слот, и тогда бронь уедет на
-     * неделю вперёд — это решает сам сервис брони.
+     * Бронь, чьих дня и часа в расписании больше нет, снимаем, недостающие ставит сервис брони: двигать
+     * на месте нельзя, новый слот может быть занят, и тогда бронь уедет на неделю — это решает он.
      */
-    private function syncDigestBooking(TelegramChatBroadcast $broadcast, ?int $was): void
+    private function syncDigestBooking(TelegramChatBroadcast $broadcast): void
     {
-        if ($was !== null) {
-            TelegramChatBroadcastItem::query()
-                ->where('broadcast_id', $broadcast->id)
-                ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
-                ->whereNull('posted_at')
-                ->whereIn('status', $this->openStatuses())
-                ->update([
-                    'status' => TelegramChatBroadcastItem::STATUS_SKIPPED,
-                    'error_message' => 'подборка: настройку рубрики изменили',
-                    'publish_at' => null,
-                    'updated_at' => now(),
-                ]);
+        $slots = $broadcast->digest_slots;
+
+        $open = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->where('is_off_grid', false)
+            ->whereNull('posted_at')
+            ->whereIn('status', $this->openStatuses())
+            ->get();
+
+        foreach ($open as $item) {
+            $at = $item->publish_at ? Carbon::parse($item->publish_at)->setTimezone('Europe/Moscow') : null;
+            $slot = $at === null ? null : collect($slots)->first(
+                fn (array $s) => $s['weekday'] === $at->isoWeekday() && $s['hour'] === $at->hour,
+            );
+
+            if ($slot === null) {
+                $item->status = TelegramChatBroadcastItem::STATUS_SKIPPED;
+                $item->error_message = 'подборка: настройку рубрики изменили';
+                $item->publish_at = null;
+                $item->save();
+
+                continue;
+            }
+
+            // рубрику слота сменили, а состав ещё не собран: соберётся уже под новую
+            $meta = (array) ($item->digest_meta ?? []);
+            if ($item->digestTheme() === null && ($meta['theme_wanted'] ?? null) !== $slot['theme']) {
+                $meta['theme_wanted'] = $slot['theme'];
+                $item->digest_meta = array_filter($meta, fn ($v) => $v !== null);
+                $item->save();
+            }
         }
 
-        if ($broadcast->digest_weekday !== null) {
+        if ($slots !== []) {
             $this->digestBooking->bookDue(Carbon::now());
         }
     }
@@ -4139,6 +4235,8 @@ class AdminBroadcastController extends Controller
             // Часы публикации внутри дня по Москве. Пустой список — один пост
             // в день, час берётся из расписания.
             'slots' => $b->slots,
+            'optional_slots' => $b->optional_slots,
+            'optional_min_events' => $b->optional_min_events,
             'horizon_days' => $b->horizon_days,
             'fill_lead_days' => $b->fill_lead_days,
             'pick_mode' => $b->pick_mode,

@@ -30,7 +30,8 @@ class TelegramChatBroadcastService
      */
     private const SCORING_CANDIDATE_LIMIT = 400;
 
-    private const CANDIDATE_HORIZON_DAYS = 14;
+    /** На сколько дней вперёд от своего слота пост может звать; по нему же BroadcastWeekendHold считает, какие выходные держать. */
+    public const CANDIDATE_HORIZON_DAYS = 14;
 
     private const MIN_LEAD_HOURS = PostTiming::MIN_LEAD_HOURS;
 
@@ -88,6 +89,7 @@ class TelegramChatBroadcastService
         private readonly \App\Repositories\EventRepository $eventRepository,
         private readonly BroadcastSlotPlanner $slotPlanner,
         private readonly BroadcastDigestComposer $digestComposer,
+        private readonly BroadcastWeekendHold $weekendHold,
     ) {}
 
     /**
@@ -1539,6 +1541,7 @@ class TelegramChatBroadcastService
      *
      * @param  int[]  $excludeEventIds
      * @param  int|null  $replacedItemId  заменяемый пост: его заголовок и площадка не мешают, серия и двойники заняты
+     * @param  bool  $optional  слот «по возможности»: только начало в optionalWindow и без нарушенных слоёв
      * @return list<array{event: Event, score: array<string, int>, dropped: list<string>}>
      */
     private function rankCandidatesForChat(
@@ -1550,6 +1553,7 @@ class TelegramChatBroadcastService
         ?int $avoidInterestId = null,
         ?int $replacedItemId = null,
         int $limit = 4,
+        bool $optional = false,
     ): array {
         $query = $this->channelCandidates($chat, $broadcastId);
 
@@ -1557,17 +1561,23 @@ class TelegramChatBroadcastService
             $query->whereNotIn('id', array_values(array_unique(array_map('intval', $excludeEventIds))));
         }
 
-        // горизонт от дня слота: от «сейчас» окно у дальних слотов схлопывается
-        $query->where(
-            'start_time',
-            '<=',
-            ($notBefore ?? Carbon::now())->copy()->addDays(self::CANDIDATE_HORIZON_DAYS),
-        );
+        if ($optional && $notBefore !== null) {
+            [$from, $until] = $this->optionalWindow($notBefore);
+            $query->whereBetween('start_time', [$from, $until]);
+        } else {
+            // горизонт от дня слота: от «сейчас» окно у дальних слотов схлопывается
+            $query->where(
+                'start_time',
+                '<=',
+                ($notBefore ?? Carbon::now())->copy()->addDays(self::CANDIDATE_HORIZON_DAYS),
+            );
+        }
 
         // нижняя граница от момента публикации, а не от «сейчас»: к дню поста событие может пройти.
         // upcoming() тут не нужен — он отрезал бы идущие выставки. Срок проката — закрытие, см. PostTiming
         if ($notBefore !== null) {
             PostTiming::applyFits($query, $notBefore, self::MIN_LEAD_HOURS, strictRuns: true);
+            $this->weekendHold->applyTo($query, $broadcastId, $notBefore);
         } else {
             $query->upcoming();
         }
@@ -1627,6 +1637,10 @@ class TelegramChatBroadcastService
         $at = $notBefore ?? Carbon::now();
         $ranked = [];
         foreach ($tiers as $tier => $events) {
+            // обязательному слоту повтор лучше дыры, слоту «по возможности» — наоборот
+            if ($optional && $tier !== '') {
+                continue;
+            }
             foreach ($this->scorer->rank($events, $at) as $e) {
                 $ranked[] = [
                     'event' => $e,
@@ -1841,11 +1855,11 @@ class TelegramChatBroadcastService
         return [$ids, $chains];
     }
 
-    /** Сколько раз одна площадка может попасть в неделю ленты: один пост на каждые семь. */
+    /** Сколько раз одна площадка может попасть в неделю ленты: один пост на каждые семь обязательных. */
     public function venueRepeatCap(TelegramChatBroadcast $broadcast): int
     {
         $postsPerWeek = min($broadcast->horizon_days, 7)
-            * max(1, count($this->effectiveSlots($broadcast)));
+            * max(1, count($this->slotPlanner->requiredSlots($broadcast)));
 
         return max(1, intdiv($postsPerWeek, 7));
     }
@@ -2065,7 +2079,7 @@ class TelegramChatBroadcastService
      * можно занимать, решает BroadcastSlotPlanner::opensAt. publish_at ставим сразу:
      * от него текст считает «сегодня» и «завтра».
      *
-     * @return array{filled: int, days: int, no_candidate: int, feed_limit: int, picks: list<array<string, mixed>>}
+     * @return array{filled: int, days: int, no_candidate: int, feed_limit: int, optional_quiet: int, picks: list<array<string, mixed>>}
      */
     public function fillFeedDays(TelegramChatBroadcast $broadcast, Carbon $now): array
     {
@@ -2076,11 +2090,11 @@ class TelegramChatBroadcastService
         });
     }
 
-    /** @return array{filled: int, days: int, no_candidate: int, feed_limit: int, picks: list<array<string, mixed>>} */
+    /** @return array{filled: int, days: int, no_candidate: int, feed_limit: int, optional_quiet: int, picks: list<array<string, mixed>>} */
     private function fillLockedFeed(TelegramChatBroadcast $broadcast, Carbon $now): array
     {
         $chat = $broadcast->chat;
-        $summary = ['filled' => 0, 'days' => 0, 'no_candidate' => 0, 'feed_limit' => 0, 'picks' => []];
+        $summary = ['filled' => 0, 'days' => 0, 'no_candidate' => 0, 'feed_limit' => 0, 'optional_quiet' => 0, 'picks' => []];
 
         if (! $chat instanceof TelegramChat || ! $chat->city_id) {
             return $summary;
@@ -2091,7 +2105,9 @@ class TelegramChatBroadcastService
 
         $eve = $broadcast->picksOnEve();
         $weekday = $this->periodWeekday($broadcast);
-        $taken = $this->takenSlots($broadcast->id);
+        $days = $this->slotPlanner->autoPickDays($broadcast);
+        $taken = $this->takenSlots($broadcast->id)
+            + array_fill_keys(array_keys($this->slotPlanner->digestHeld($broadcast, $now, $days)), null);
 
         // тема поста перед горизонтом: первый слот недели тоже чей-то сосед
         $prevTheme = $this->pastPostTheme($broadcast->id, $now);
@@ -2125,7 +2141,6 @@ class TelegramChatBroadcastService
         );
 
         $exclude = [];
-        $days = $this->slotPlanner->autoPickDays($broadcast);
         for ($i = 0; $i < $days; $i++) {
             $day = $now->copy()->setTimezone(self::SCHEDULE_TZ)->addDays($i)->startOfDay();
 
@@ -2141,7 +2156,8 @@ class TelegramChatBroadcastService
 
             foreach ($open as $publishAt) {
                 $slotKey = $this->slotKey($publishAt);
-                if (array_key_exists($slotKey, $taken)) {
+                // слот «по возможности» ждущим не отдаём: его решает насыщенность дня
+                if (array_key_exists($slotKey, $taken) || $this->slotPlanner->isOptional($broadcast, $publishAt)) {
                     continue;
                 }
 
@@ -2186,7 +2202,8 @@ class TelegramChatBroadcastService
 
             // Портрет — после ждущих, но раньше обычных постов: иначе освободившийся слот и вечерний
             // выбор займёт событие раньше часового прогона портретов, и портрет уедет на дни.
-            $freeHere = array_filter($open, fn (Carbon $at) => ! array_key_exists($this->slotKey($at), $taken));
+            $freeHere = array_filter($open, fn (Carbon $at) => ! array_key_exists($this->slotKey($at), $taken)
+                && ! $this->slotPlanner->isOptional($broadcast, $at));
             if ($freeHere !== [] && $this->venuePortraitService->enqueueDuePortrait($broadcast, $now)
                 === TelegramVenuePortraitService::PORTRAIT_ENQUEUED) {
                 $portrait = TelegramChatBroadcastItem::query()
@@ -2210,6 +2227,9 @@ class TelegramChatBroadcastService
                     // Сосед следующего слота — тот, кто стоит здесь.
                     $prevTheme = $this->primaryInterestId($taken[$slotKey]);
 
+                    continue;
+                }
+                if ($this->slotPlanner->isOptional($broadcast, $publishAt)) {
                     continue;
                 }
 
@@ -2261,44 +2281,56 @@ class TelegramChatBroadcastService
                 $exclude[] = $eventId;
                 $prevTheme = $this->primaryInterestId($eventId);
 
-                // enqueue() вернёт существующую запись со старым статусом (UNIQUE на broadcast_id + event_id),
-                // ниже её оживляем, иначе пост осядет невидимым
-                $item = $this->broadcastItemRepository->enqueue($broadcast->id, $eventId, null);
+                $item = $this->placeAutoPick($broadcast, $eventId, $publishAt, $meta);
+                if ($item === null) {
+                    continue;
+                }
+                // считаем в памяти: за прогон открытые событийные записи растут только в placeAutoPick
+                $openEvents++;
+                $summary['filled']++;
+                $summary['picks'][] = $this->pickRow($publishAt, $item, 'auto', $meta['rule']);
+            }
 
-                // вышедшую не оживляем: выдача боту posted_at не проверяет, и пост ушёл бы второй раз
-                if ($item->posted_at !== null) {
-                    Log::warning('broadcast.feed.skip_already_posted', [
-                        'broadcast_id' => $broadcast->id,
-                        'item_id' => $item->id,
-                        'event_id' => $eventId,
-                        'posted_at' => $item->posted_at->toIso8601String(),
-                    ]);
+            // Слоты «по возможности» — после обязательных, только в насыщенный день и мимо предела ленты:
+            // решаются они накануне, а предел держит выбор на недели вперёд.
+            foreach ($open as $publishAt) {
+                if (! $this->slotPlanner->isOptional($broadcast, $publishAt)
+                    || array_key_exists($this->slotKey($publishAt), $taken)) {
+                    continue;
+                }
+
+                $supply = $this->optionalSupply($chat, $broadcast, $publishAt);
+                $best = $supply < $broadcast->optional_min_events ? null : ($this->rankCandidatesForChat(
+                    $chat,
+                    $broadcast->id,
+                    $exclude,
+                    $publishAt->copy()->utc(),
+                    $this->venueRepeatCap($broadcast),
+                    $this->neighborTheme((int) $broadcast->id, $publishAt, $now, null),
+                    limit: 1,
+                    optional: true,
+                )[0] ?? null);
+
+                if ($best === null) {
+                    $summary['optional_quiet']++;
 
                     continue;
                 }
 
-                $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
-                $item->error_message = null;
-                $item->claimed_at = null;
-                $item->claim_token = null;
-                $item->publish_at = $publishAt->copy()->utc();
-                $item->planned_at = null;
-                // строка могла остаться от неудачной отправки «сейчас», а такая слот не занимает
-                $item->is_off_grid = false;
-                // Текст пересобираем: он зависит от дня публикации. Свой не трогаем.
-                if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
-                    $item->caption = null;
-                    $item->caption_source = null;
-                }
-                // целиком, а не слиянием: у оживлённой строки осталась бы причина прошлого выбора
-                $item->pick_meta = $meta;
-                $item->save();
+                $eventId = (int) $best['event']->id;
+                $meta = array_merge($this->autoPickMeta($best, $publishAt), [
+                    'rule' => PickReason::RULE_OPTIONAL,
+                    'supply' => $supply,
+                ]);
+                $exclude[] = $eventId;
 
-                $this->ensureEventCaption($item, $broadcast);
-                // считаем в памяти: за прогон открытые событийные записи растут только здесь
+                $item = $this->placeAutoPick($broadcast, $eventId, $publishAt, $meta);
+                if ($item === null) {
+                    continue;
+                }
                 $openEvents++;
                 $summary['filled']++;
-                $summary['picks'][] = $this->pickRow($publishAt, $item, 'auto', $meta['rule']);
+                $summary['picks'][] = $this->pickRow($publishAt, $item, 'auto', PickReason::RULE_OPTIONAL);
             }
 
             if ($eve) {
@@ -2307,6 +2339,92 @@ class TelegramChatBroadcastService
         }
 
         return $summary;
+    }
+
+    /**
+     * Поставить выбор автоподбора в слот: оживить строку события, назначить день, собрать текст.
+     * null — событие уже выходило в канал.
+     *
+     * @param  array<string, mixed>  $meta
+     */
+    private function placeAutoPick(
+        TelegramChatBroadcast $broadcast,
+        int $eventId,
+        Carbon $publishAt,
+        array $meta,
+    ): ?TelegramChatBroadcastItem {
+        // enqueue() вернёт существующую запись со старым статусом (UNIQUE на broadcast_id + event_id),
+        // ниже её оживляем, иначе пост осядет невидимым
+        $item = $this->broadcastItemRepository->enqueue($broadcast->id, $eventId, null);
+
+        // вышедшую не оживляем: выдача боту posted_at не проверяет, и пост ушёл бы второй раз
+        if ($item->posted_at !== null) {
+            Log::warning('broadcast.feed.skip_already_posted', [
+                'broadcast_id' => $broadcast->id,
+                'item_id' => $item->id,
+                'event_id' => $eventId,
+                'posted_at' => $item->posted_at->toIso8601String(),
+            ]);
+
+            return null;
+        }
+
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->error_message = null;
+        $item->claimed_at = null;
+        $item->claim_token = null;
+        $item->publish_at = $publishAt->copy()->utc();
+        $item->planned_at = null;
+        // строка могла остаться от неудачной отправки «сейчас», а такая слот не занимает
+        $item->is_off_grid = false;
+        // Текст пересобираем: он зависит от дня публикации. Свой не трогаем.
+        if ($item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            $item->caption = null;
+            $item->caption_source = null;
+        }
+        // целиком, а не слиянием: у оживлённой строки осталась бы причина прошлого выбора
+        $item->pick_meta = $meta;
+        $item->save();
+
+        $this->ensureEventCaption($item, $broadcast);
+
+        return $item;
+    }
+
+    /**
+     * Окно слота «по возможности»: начало после запаса до события и не позже конца следующего
+     * дня по Москве. По нему считается насыщенность дня и из него же берётся пост.
+     *
+     * @return array{0: Carbon, 1: Carbon} в UTC: границы идут в запрос, см. BroadcastWeekendHold::applyTo
+     */
+    private function optionalWindow(Carbon $slotAt): array
+    {
+        return [
+            $slotAt->copy()->addHours(self::MIN_LEAD_HOURS)->utc(),
+            $slotAt->copy()->setTimezone(self::SCHEDULE_TZ)->addDay()->endOfDay()->utc(),
+        ];
+    }
+
+    /**
+     * Насыщенность дня для слота «по возможности»: сколько разных событий пула канала начинается
+     * в optionalWindow. Слот заполняется, когда их не меньше optional_min_events.
+     */
+    public function optionalSupply(TelegramChat $chat, TelegramChatBroadcast $broadcast, Carbon $slotAt): int
+    {
+        [$from, $until] = $this->optionalWindow($slotAt);
+
+        $query = $this->channelCandidates($chat, (int) $broadcast->id)
+            ->whereBetween('start_time', [$from, $until]);
+        $this->weekendHold->applyTo($query, (int) $broadcast->id, $slotAt);
+
+        return (int) DB::transaction(function () use ($query) {
+            // тот же запрос, что у подбора, и тот же JIT, см. rankCandidatesForChat
+            DB::statement('SET LOCAL jit = off');
+
+            return $query->toBase()
+                ->selectRaw('count(distinct coalesce(events.event_group_id, -events.id)) as c')
+                ->value('c');
+        });
     }
 
     /**
@@ -2593,8 +2711,9 @@ class TelegramChatBroadcastService
     {
         $period = trim((string) $broadcast->period);
 
-        // слоты делят окно: при двух постах в день нормальное молчание вдвое короче
-        $slots = max(1, count($this->effectiveSlots($broadcast)));
+        // слоты делят окно: при двух постах в день нормальное молчание вдвое короче.
+        // Слоты «по возможности» не в счёт: в тихий день они пустуют, и это не простой
+        $slots = max(1, count($this->slotPlanner->requiredSlots($broadcast)));
 
         if (str_starts_with($period, 'daily_')) {
             return max(1, intdiv(24, $slots));
@@ -2870,7 +2989,7 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * Пустые будущие слоты сегодня и завтра в `eve`, чей выбор уже должен был пройти:
+     * Пустые обязательные слоты сегодня и завтра в `eve`, чей выбор уже должен был пройти:
      * с открытия слотов прошло EVE_EMPTY_GRACE_MINUTES. После полуночи вчерашняя тревога
      * держится, пока не пройдёт сам слот. В `week` и у выключенного канала — пусто.
      *
@@ -2882,7 +3001,10 @@ class TelegramChatBroadcastService
             return [];
         }
 
-        $slots = $this->effectiveSlots($broadcast);
+        $slots = $this->slotPlanner->requiredSlots($broadcast);
+        if ($slots === []) {
+            return [];
+        }
         $weekday = $this->periodWeekday($broadcast);
         $today = $now->copy()->setTimezone(self::SCHEDULE_TZ)->startOfDay();
         $taken = null;
@@ -2893,7 +3015,7 @@ class TelegramChatBroadcastService
                 continue;
             }
 
-            $opensAt = $this->slotPlanner->opensAt($broadcast, $day->copy()->setTime($slots[0], 0), 0);
+            $opensAt = $this->slotPlanner->opensAt($broadcast, $day->copy()->setTime($slots[0], 0));
             if ($opensAt === null || $now->lt($opensAt->copy()->addMinutes(self::EVE_EMPTY_GRACE_MINUTES))) {
                 continue;
             }
@@ -2951,16 +3073,6 @@ class TelegramChatBroadcastService
         $allowedAt = $this->lastPostedAt($broadcastId)?->addMinutes($gap);
 
         return $allowedAt && $allowedAt->gt($now) ? $allowedAt : null;
-    }
-
-    /**
-     * Часы публикации канала по Москве, по возрастанию; см. BroadcastSlotPlanner::slots.
-     *
-     * @return list<int>
-     */
-    public function effectiveSlots(TelegramChatBroadcast $broadcast): array
-    {
-        return $this->slotPlanner->slots($broadcast);
     }
 
     /** Когда канал постил в последний раз — любым видом записи. */

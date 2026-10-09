@@ -153,6 +153,37 @@ class BroadcastDigestBookingTest extends TestCase
         Carbon::setTestNow();
     }
 
+    public function test_changing_the_digest_hour_moves_the_booking(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-05 12:00', 'Europe/Moscow')); // понедельник
+
+        \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
+        $user = \App\Models\User::factory()->create();
+        $user->assignRole('superadmin');
+        \Laravel\Sanctum\Sanctum::actingAs($user);
+
+        $broadcast = $this->makeChannel();
+
+        $this->patchJson("/api/admin/broadcast/channels/{$broadcast->id}", [
+            'slots' => [10, 13, 19],
+            'digest_slots' => [['weekday' => 5, 'hour' => 19, 'theme' => null]],
+        ])->assertOk();
+        $this->patchJson("/api/admin/broadcast/channels/{$broadcast->id}", [
+            'digest_slots' => [['weekday' => 5, 'hour' => 13, 'theme' => 'na-vyhodnyh']],
+        ])->assertOk();
+
+        $open = TelegramChatBroadcastItem::query()
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->whereIn('status', [TelegramChatBroadcastItem::STATUS_PENDING, TelegramChatBroadcastItem::STATUS_PLANNED])
+            ->get();
+
+        $this->assertCount(1, $open, 'в пятницу одна подборка, а не две');
+        $this->assertSame('13:00', Carbon::parse($open[0]->publish_at)->setTimezone('Europe/Moscow')->format('H:i'));
+        $this->assertSame('na-vyhodnyh', $open[0]->digest_meta['theme_wanted'] ?? null);
+
+        Carbon::setTestNow();
+    }
+
     /**
      * Воскресенье — такой же день недели, как остальные шесть.
      *

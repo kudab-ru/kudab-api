@@ -64,8 +64,38 @@ class AdminBroadcastSlotsTest extends TestCase
         $broadcast = $this->makeChannel();
 
         $this->patchJson("/api/admin/broadcast/channels/{$broadcast->id}", [
-            'slots' => [8, 11, 14, 17, 20],
+            'slots' => [8, 10, 12, 14, 16, 18, 20],
         ])->assertStatus(422);
+    }
+
+    public function test_cap_counts_only_required_slots(): void
+    {
+        $broadcast = $this->makeChannel();
+
+        $res = $this->patchJson("/api/admin/broadcast/channels/{$broadcast->id}", [
+            'slots' => [10, 13, 16, 19, 21],
+            'optional_slots' => [21, 16, 7],
+            'horizon_days' => 7,
+        ]);
+
+        $res->assertOk();
+        $this->assertSame([16, 21], $res->json('data.optional_slots'), 'час вне сетки отброшен');
+        $this->assertSame(21, $res->json('data.feed_limit'), 'семь дней по три обязательных');
+    }
+
+    public function test_digest_hour_outside_the_grid_is_refused(): void
+    {
+        $broadcast = $this->makeChannel();
+
+        $this->patchJson("/api/admin/broadcast/channels/{$broadcast->id}", [
+            'slots' => [10, 13, 19],
+            'digest_slots' => [['weekday' => 5, 'hour' => 14, 'theme' => null]],
+        ])->assertStatus(422);
+
+        $this->patchJson("/api/admin/broadcast/channels/{$broadcast->id}", [
+            'slots' => [10, 13, 19],
+            'digest_slots' => [['weekday' => 5, 'hour' => 13, 'theme' => null]],
+        ])->assertOk();
     }
 
     public function test_hour_out_of_range_is_refused(): void
