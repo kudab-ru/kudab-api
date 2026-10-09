@@ -53,7 +53,7 @@ class EventsController extends Controller
             // После миграции фронта закрытым PR убрать legacy int-ветку.
             'interests.*'  => ['required', $this->interestItemRule()],
 
-            // Выбор колеса «Чего хочется?»: не отсекает, а ставит подходящее первым (см. paginateUpcomingWeb)
+            // выбор колеса «Чего хочется?», см. paginateUpcomingWeb
             'prefer'       => ['sometimes','array'],
             'prefer.*'     => ['required','string','max:64','regex:/^[a-z0-9-]+$/'],
 
