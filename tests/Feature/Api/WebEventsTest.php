@@ -267,6 +267,24 @@ class WebEventsTest extends TestCase
             ->assertJsonPath('meta.total', 2);
     }
 
+    public function test_prefer_puts_chosen_topics_first_and_keeps_the_rest(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Организатор');
+        $music = $this->createInterest('Музыка', 'music');
+        $this->createEvent($vrn->id, $community->id, 'Спектакль', now()->addDay());
+        $concert = $this->createEvent($vrn->id, $community->id, 'Концерт', now()->addDays(3));
+        $this->createEvent($vrn->id, $community->id, 'Лекция', now()->addDays(2));
+        $this->tagEventLeafOnly($concert->id, $music->id);
+
+        $this->getJson('/api/web/events?city=voronezh&grouped=1&grouped_by_post=1&prefer[]=music')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 3)
+            ->assertJsonPath('meta.preferred_total', 1)
+            ->assertJsonPath('data.*.title', ['Концерт', 'Спектакль', 'Лекция'])
+            ->assertJsonPath('data.*.preferred', [true, false, false]);
+    }
+
     public function test_event_payload_contains_interests_array(): void
     {
         $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);

@@ -562,6 +562,21 @@ class EventRepository
         $this->addImgRank($q);
         $this->addRegionRank($q); // __region_rank: далёкие (область) вниз ленты
 
+        // Выбор колеса «Чего хочется?» ничего не отсекает: подходящее идёт первым внутри будущего,
+        // за ним всё остальное. Поэтому __prefer_rank стоит сразу за __past_rank во всех порядках ниже.
+        $preferIds = $this->expandInterestSlugsToIds((array) ($filters['prefer'] ?? []));
+        if ($preferIds) {
+            $this->addPreferRank($q, $preferIds);
+        }
+        $pastFirst = function ($q) use ($preferIds) {
+            $q->orderBy('__past_rank', 'asc');
+            if ($preferIds) {
+                $q->orderBy('__prefer_rank', 'asc');
+            }
+
+            return $q;
+        };
+
         $this->excludeBlacklistedSources($q);
         $this->applyMainFeedTaxonomyFilter($q, $filters);
 
@@ -571,7 +586,7 @@ class EventRepository
             // через $collapseGroups (axis A) — представитель остаётся канонический,
             // а ORDER BY __top_score ранжирует уже представителей групп.
             $this->addTopScore($q);
-            $q->orderBy('__past_rank', 'asc')
+            $pastFirst($q)
                 ->orderBy('__region_rank', 'asc') // область (далёкие) вниз
                 ->orderByRaw('__top_score desc')
                 ->orderByRaw('events.start_date asc nulls last')
@@ -579,7 +594,7 @@ class EventRepository
                 ->orderBy('events.id', 'asc');
         } else {
             // По умолчанию — хронология: past -> область -> image -> gray -> дата
-            $q->orderBy('__past_rank', 'asc')
+            $pastFirst($q)
                 ->orderBy('__region_rank', 'asc') // область (далёкие) вниз
                 ->orderBy('__img_rank', 'asc')
                 ->orderBy('__gray_rank', 'asc')
@@ -748,8 +763,7 @@ class EventRepository
         }
 
         if ($unknownLast) {
-            $q->reorder()
-                ->orderBy('__past_rank', 'asc');
+            $pastFirst($q->reorder());
 
             if ($hasDistinct) {
                 $q->orderBy('__unknown_last', 'asc');
@@ -797,8 +811,7 @@ class EventRepository
         // блок (явные sort=start_at/price_min/…) НЕ должен его перетирать через
         // reorder() — иначе ранжирование схлопывается в хронологию (past→img→gray→id).
         if ($sort && $sort !== 'top') {
-            $q->reorder()
-                ->orderBy('__past_rank', 'asc');
+            $pastFirst($q->reorder());
 
             if ($unknownLast) {
                 if ($hasDistinct) {
@@ -849,8 +862,7 @@ class EventRepository
             $q->selectRaw("$isLikeExpr as __like_rank", [$like, $like]);
             $q->selectRaw("$scoreExpr as __score", [$token, $token]);
 
-            $q->reorder()
-                ->orderBy('__past_rank', 'asc');
+            $pastFirst($q->reorder());
 
             if ($unknownLast) {
                 if ($hasDistinct) {
@@ -1082,6 +1094,7 @@ class EventRepository
                 '__score',
                 '__top_score',
                 '__unknown_last',
+                '__prefer_rank',
             ]);
         });
 
@@ -1116,7 +1129,17 @@ class EventRepository
 
         $page = $paginator->setCollection($events);
 
-        return ['page' => $page, 'totalEvents' => $totalEvents];
+        // счёт тем же снимком, что total_events, иначе «сначала M из N» не сойдутся
+        $preferredTotal = null;
+        if ($preferIds && $eligibleEventIds !== null) {
+            $preferredTotal = $eligibleEventIds === [] ? 0 : DB::table('event_interest')
+                ->whereIn('event_id', $eligibleEventIds)
+                ->whereIn('interest_id', $preferIds)
+                ->distinct()
+                ->count('event_id');
+        }
+
+        return ['page' => $page, 'totalEvents' => $totalEvents, 'preferredTotal' => $preferredTotal];
     }
 
     /**
@@ -2403,6 +2426,16 @@ class EventRepository
     private function addImgRank($q): void
     {
         $q->selectRaw('CASE WHEN '.$this->hasPhotoSql().' THEN 0 ELSE 1 END as __img_rank');
+    }
+
+    /** __prefer_rank: 0 — у события есть тема из выбора колеса, 1 — нет. */
+    private function addPreferRank($q, array $interestIds): void
+    {
+        $in = implode(',', array_map('intval', $interestIds));
+        $q->selectRaw(
+            'CASE WHEN EXISTS (SELECT 1 FROM event_interest ei '
+            ."WHERE ei.event_id = events.id AND ei.interest_id IN ($in)) THEN 0 ELSE 1 END as __prefer_rank"
+        );
     }
 
     /**

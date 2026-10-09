@@ -53,6 +53,10 @@ class EventsController extends Controller
             // После миграции фронта закрытым PR убрать legacy int-ветку.
             'interests.*'  => ['required', $this->interestItemRule()],
 
+            // Выбор колеса «Чего хочется?»: не отсекает, а ставит подходящее первым (см. paginateUpcomingWeb)
+            'prefer'       => ['sometimes','array'],
+            'prefer.*'     => ['required','string','max:64','regex:/^[a-z0-9-]+$/'],
+
             'priced'       => ['sometimes','boolean'],
             'price_min'    => ['sometimes','integer','min:0'],
             'price_max'    => ['sometimes','integer','min:0'],
@@ -149,6 +153,10 @@ class EventsController extends Controller
         // meta.total — для hasMore-логики (число rep-карточек).
         if ($totalEvents !== null) {
             $meta['total_events'] = $totalEvents;
+        }
+        // сколько из total_events подходит под выбор колеса
+        if (($result['preferredTotal'] ?? null) !== null) {
+            $meta['preferred_total'] = $result['preferredTotal'];
         }
 
         return response()->json([

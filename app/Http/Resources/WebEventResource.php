@@ -128,6 +128,12 @@ class WebEventResource extends JsonResource
             $out['siblings'] = $siblings;
         }
 
+        // только когда в ленту пришёл выбор колеса (prefer): фронт ставит границу там, где true сменился на false
+        $preferRank = $this->getAttribute('__prefer_rank');
+        if ($preferRank !== null) {
+            $out['preferred'] = (int) $preferRank === 0;
+        }
+
         // Есть только у карточек блоков «что дальше», см. NextEventsPicker.
         $reason = $this->getAttribute('rec_reason');
         if (is_string($reason) && $reason !== '') {
