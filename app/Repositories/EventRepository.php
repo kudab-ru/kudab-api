@@ -7,6 +7,7 @@ use App\Models\Event;
 use App\Models\Interest;
 use App\Models\Venue;
 use App\Services\Recommendations\NextEventsPicker;
+use App\Support\SearchMatch;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
@@ -16,22 +17,6 @@ use Illuminate\Support\Facades\DB;
 
 class EventRepository
 {
-    // У слов короче пяти букв похожими выходят чужие слова: «квиз» и «квинтет» дают 0.6.
-    private const FUZZY_MIN_LEN = 5;
-
-    // Другая форма слова: «выставка» и «выставке» дают 0.78, а слова, у которых
-    // совпадает только начало («концерт» и «конца»), — 0.5.
-    private const FUZZY_FORM_THRESHOLD = 0.6;
-
-    // Опечатку ловит сравнение слов целиком: «консерт» и «концерт» дают 0.45, «мафия» и «магия» — 0.33.
-    private const FUZZY_TYPO_THRESHOLD = 0.45;
-
-    // Одно и то же люди называют по-разному. Если слово запроса начинается с основы
-    // из группы, поиск ищет и остальные основы этой группы.
-    private const SEARCH_SYNONYMS = [
-        ['настолк', 'настольн', 'игротек'],
-    ];
-
     private const PAST_GRACE_HOURS = 1;
 
     /**
@@ -88,10 +73,6 @@ class EventRepository
      * не трогая city_id/фильтры. 30 км: пригороды (Рамонь/Н.Усмань) остаются, райцентры — вниз.
      */
     private const REGION_FAR_METERS = 30000;
-
-    private ?bool $hasTrgm = null;
-
-    private ?bool $hasWordSim = null;
 
     public function listWebIdsForSitemap(int $afterId = 0, int $limit = 5000, string $mode = 'upcoming'): array
     {
@@ -2379,135 +2360,55 @@ class EventRepository
         $q->selectRaw("$sql as __top_score");
     }
 
-    private function normalizeQ(?string $q): ?string
-    {
-        $q = trim((string) $q);
-        if ($q === '') {
-            return null;
-        }
-
-        $q = mb_strtolower($q);
-        $q = str_replace('ё', 'е', $q);
-        $q = str_replace('-', ' ', $q);
-        $q = preg_replace('~[^\p{L}\p{N}\s]+~u', ' ', $q);
-        $q = preg_replace('~\s+~u', ' ', $q);
-        $q = trim($q);
-
-        return $q !== '' ? $q : null;
-    }
-
-    private function pickFuzzyToken(string $qNorm): string
-    {
-        $parts = preg_split('~\s+~u', $qNorm, -1, PREG_SPLIT_NO_EMPTY);
-        if (! $parts) {
-            return $qNorm;
-        }
-
-        $token = '';
-        foreach ($parts as $p) {
-            if (mb_strlen($p) > mb_strlen($token)) {
-                $token = $p;
-            }
-        }
-
-        return $token !== '' ? $token : $qNorm;
-    }
-
     /**
      * Отбирает события по строке поиска и возвращает выражение «насколько подходит»: 0 — слово в названии,
-     * 1 — похожее слово в названии, 2 — слово или похожее в имени организатора, 3 — только в описании события.
+     * 1 — похожее слово в названии, 2 — слово или похожее в имени организатора или площадки, 3 — только в описании.
      *
      * @return array{0: string, 1: array<int, mixed>}|null [sql, параметры]; null — запроса нет
      */
     private function applyTextSearch($q, ?string $query): ?array
     {
-        $qNorm = $this->normalizeQ($query);
-        if ($qNorm === null) {
+        $match = SearchMatch::from($query);
+        if ($match === null) {
             return null;
         }
 
-        $q->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id');
+        $q->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id')
+            ->leftJoin('venues as vn', fn ($j) => $j->on('vn.id', '=', 'events.venue_id')->whereNull('vn.deleted_at'));
 
-        $likes = $this->searchLikes($qNorm);
-        $anyLike = fn (string $col) => '('.implode(' OR ', array_fill(0, count($likes), "$col LIKE ?")).')';
-        $token = $this->pickFuzzyToken($qNorm);
-        $fuzzyOn = mb_strlen($token) >= self::FUZZY_MIN_LEN && $this->trgmEnabled() && $this->wordSimEnabled();
+        [$inTitle, $titleArgs] = $match->like('public.ru_normalize(events.title)');
+        [$inOrg, $orgArgs] = $match->like('public.ru_normalize(cm.name)');
+        [$inVenue, $venueArgs] = $match->like('public.ru_normalize(vn.name)');
+        [$inText, $textArgs] = $match->like('public.ru_normalize(events.description)');
+        $titleSimilar = $match->similar('public.ru_normalize(events.title)');
+        $orgSimilar = $match->similar('public.ru_normalize(cm.name)');
+        $venueSimilar = $match->similar('public.ru_normalize(vn.name)');
 
-        $title = 'public.ru_normalize(events.title)';
-        $org = 'public.ru_normalize(cm.name)';
-        $inTitle = $anyLike($title);
-        $inOrg = $anyLike($org);
-        $titleSimilar = "(word_similarity(?, $title) >= ? OR strict_word_similarity(?, $title) >= ?)";
-        $orgSimilar = "(word_similarity(?, $org) >= ? OR strict_word_similarity(?, $org) >= ?)";
-        $sim = [$token, self::FUZZY_FORM_THRESHOLD, $token, self::FUZZY_TYPO_THRESHOLD];
-
-        $q->where(function ($w) use ($inTitle, $inOrg, $anyLike, $titleSimilar, $orgSimilar, $likes, $sim, $fuzzyOn) {
-            $w->whereRaw($inTitle, $likes)
-                ->orWhereRaw($inOrg, $likes)
-                ->orWhereRaw($anyLike('public.ru_normalize(events.description)'), $likes);
-            if ($fuzzyOn) {
-                $w->orWhereRaw($titleSimilar, $sim)->orWhereRaw($orgSimilar, $sim);
+        $q->where(function ($w) use ($inTitle, $titleArgs, $inOrg, $orgArgs, $inVenue, $venueArgs, $inText, $textArgs, $titleSimilar, $orgSimilar, $venueSimilar) {
+            $w->whereRaw($inTitle, $titleArgs)
+                ->orWhereRaw($inOrg, $orgArgs)
+                ->orWhereRaw($inVenue, $venueArgs)
+                ->orWhereRaw($inText, $textArgs);
+            foreach ([$titleSimilar, $orgSimilar, $venueSimilar] as $similar) {
+                if ($similar !== null) {
+                    $w->orWhereRaw(...$similar);
+                }
             }
         });
 
-        if (! $fuzzyOn) {
-            return ["CASE WHEN $inTitle THEN 0 WHEN $inOrg THEN 2 ELSE 3 END", [...$likes, ...$likes]];
+        // Площадка весит как организатор: «Попкорн Драма» находит и спектакли, которые продаёт агрегатор.
+        $place = "$inOrg OR $inVenue";
+        $placeArgs = [...$orgArgs, ...$venueArgs];
+        if ($orgSimilar !== null && $venueSimilar !== null) {
+            $place .= " OR {$orgSimilar[0]} OR {$venueSimilar[0]}";
+            $placeArgs = [...$placeArgs, ...$orgSimilar[1], ...$venueSimilar[1]];
         }
+        $similarTitle = $titleSimilar !== null ? "WHEN {$titleSimilar[0]} THEN 1 " : '';
 
         return [
-            "CASE WHEN $inTitle THEN 0 WHEN $titleSimilar THEN 1 WHEN $inOrg OR $orgSimilar THEN 2 ELSE 3 END",
-            [...$likes, ...$sim, ...$likes, ...$sim],
+            "CASE WHEN $inTitle THEN 0 {$similarTitle}WHEN $place THEN 2 ELSE 3 END",
+            [...$titleArgs, ...($titleSimilar[1] ?? []), ...$placeArgs],
         ];
-    }
-
-    /** Шаблоны LIKE для запроса вместе с синонимами, см. SEARCH_SYNONYMS. */
-    private function searchLikes(string $qNorm): array
-    {
-        $likes = ['%'.$qNorm.'%'];
-        foreach (self::SEARCH_SYNONYMS as $group) {
-            foreach ($group as $stem) {
-                if (preg_match('~(?:^|\s)'.preg_quote($stem, '~').'~u', $qNorm)) {
-                    foreach ($group as $synonym) {
-                        $likes[] = '%'.$synonym.'%';
-                    }
-                    break;
-                }
-            }
-        }
-
-        return array_values(array_unique($likes));
-    }
-
-    private function trgmEnabled(): bool
-    {
-        if ($this->hasTrgm !== null) {
-            return $this->hasTrgm;
-        }
-
-        try {
-            DB::selectOne("select similarity('a','a') as s");
-            $this->hasTrgm = true;
-        } catch (\Throwable $e) {
-            $this->hasTrgm = false;
-        }
-
-        return $this->hasTrgm;
-    }
-
-    private function wordSimEnabled(): bool
-    {
-        if ($this->hasWordSim !== null) {
-            return $this->hasWordSim;
-        }
-
-        try {
-            DB::selectOne("select strict_word_similarity('a','a') as s");
-            $this->hasWordSim = true;
-        } catch (\Throwable $e) {
-            $this->hasWordSim = false;
-        }
-
-        return $this->hasWordSim;
     }
 
     private function excludeBlacklistedSources($q): void
@@ -2538,7 +2439,7 @@ class EventRepository
 
         // Выбравший «С детьми» ищет то, что лента по умолчанию прячет. Поиск словом тоже: пометку
         // «семейное» носят и взрослые события, и по «Щелкунчику» иначе не находится ничего.
-        if (! empty($filters['kids']) || $this->normalizeQ($filters['q'] ?? null) !== null) {
+        if (! empty($filters['kids']) || SearchMatch::from($filters['q'] ?? null) !== null) {
             $q->webFeedContentKind();
 
             return;

@@ -220,6 +220,18 @@ class WebEventsTest extends TestCase
             ->assertJsonPath('data.0.title', 'Игротека');
     }
 
+    public function test_search_finds_events_at_the_venue_by_its_name(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $venue = $this->createVenue($vrn->id, 'Попкорн Драма', 'popkorn-drama');
+        $this->createEvent($vrn->id, $this->createCommunity($vrn->id, 'Qtickets')->id, 'Фиаско', now()->addDay(), $venue->id);
+
+        $this->getJson('/api/web/events?city=voronezh&q='.urlencode('попкорн драма'))
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonPath('data.0.title', 'Фиаско');
+    }
+
     public function test_search_puts_title_match_above_description_match_with_photo(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
