@@ -79,6 +79,7 @@ class VenuesController extends Controller
         $query = $this->baseQuery()
             ->when($cityId !== null, fn ($qq) => $qq->where('venues.city_id', $cityId))
             ->when($match !== null, fn ($qq) => $this->whereNameMatches($qq, $match))
+            ->when($match !== null, fn ($qq) => $this->liveFirst($qq))
             ->when($kind !== '', fn ($qq) => $qq->where('venues.kind', $kind))
             ->orderByRaw('events_count DESC NULLS LAST')
             ->orderBy('venues.name');
@@ -457,7 +458,7 @@ class VenuesController extends Controller
             return;
         }
 
-        $upcoming = fn () => $this->upcomingEvents($ids);
+        $upcoming = fn () => $this->upcomingEvents()->whereIn('events.venue_id', $ids);
 
         // Отдельным запросом, потому что COUNT(DISTINCT …) OVER (…) postgres
         // не умеет. Считаем события, а не сеансы: см. events_count в
@@ -518,7 +519,8 @@ class VenuesController extends Controller
             return;
         }
 
-        $firstSessions = $this->upcomingEvents($ids)
+        $firstSessions = $this->upcomingEvents()
+            ->whereIn('events.venue_id', $ids)
             ->select(['events.venue_id', 'events.id', 'events.title', 'events.start_time', 'events.start_date', 'events.time_precision'])
             ->selectRaw("ROW_NUMBER() OVER (
                 PARTITION BY events.venue_id, COALESCE(events.event_group_id::text, 'e' || events.id)
@@ -546,16 +548,15 @@ class VenuesController extends Controller
     }
 
     /**
-     * Предстоящие видимые события площадок, от полуночи сегодняшнего дня по МСК. Один фильтр
-     * на «ближайшее», «всего предстоящих» и программку: иначе карточка противоречит сама себе.
+     * Предстоящие видимые события, от полуночи сегодняшнего дня по МСК. Один фильтр на «ближайшее»,
+     * «всего предстоящих», программку и порядок поиска: иначе карточка противоречит сама себе.
      */
-    private function upcomingEvents(array $ids)
+    private function upcomingEvents()
     {
         $todayMsk = now('Europe/Moscow')->toDateString();
 
         return Event::query()
             ->visibleWeb()
-            ->whereIn('events.venue_id', $ids)
             ->where(function ($w) use ($todayMsk) {
                 $w->where('events.start_time', '>=', $todayMsk)
                     ->orWhere(function ($x) use ($todayMsk) {
@@ -598,6 +599,16 @@ class VenuesController extends Controller
             }
         });
         $query->orderByRaw("CASE WHEN $name ~ ? THEN 0 ELSE 1 END", ['(^|[^[:alnum:]])'.$match->text]);
+    }
+
+    /**
+     * Места с афишей раньше пустых. Карточка в поиске афиши показывает только их и ведёт сюда же:
+     * без этого её места стоят в конце списка, а то и за первой страницей.
+     */
+    private function liveFirst($query): void
+    {
+        $live = $this->upcomingEvents()->whereColumn('events.venue_id', 'venues.id');
+        $query->orderByRaw('EXISTS ('.$live->toSql().') DESC', $live->getBindings());
     }
 
     /**

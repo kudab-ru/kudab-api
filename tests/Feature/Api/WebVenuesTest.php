@@ -98,6 +98,22 @@ class WebVenuesTest extends TestCase
         $this->assertSame(['Новый театр', 'Кинотеатр «Спартак»'], array_column($data, 'name'));
     }
 
+    public function test_index_search_puts_venues_with_upcoming_events_first(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-12 10:00:00', 'Europe/Moscow'));
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+        $dynamo = $this->createVenue($vrn->id, 'Парк «Динамо»', 'dynamo');
+        $grad = $this->createVenue($vrn->id, 'Сити-парк «Град»', 'grad');
+        $this->createEvent($vrn->id, $dynamo->id, $community->id, 'Забег', '2026-10-01 10:00:00');
+        $this->createEvent($vrn->id, $dynamo->id, $community->id, 'Ярмарка', '2026-10-04 10:00:00');
+        $this->createEvent($vrn->id, $grad->id, $community->id, 'Выставка', '2026-10-14 12:00:00');
+
+        $data = $this->getJson('/api/web/venues?city_id='.$vrn->id.'&q='.urlencode('парк'))->assertOk()->json('data');
+
+        $this->assertSame(['Сити-парк «Град»', 'Парк «Динамо»'], array_column($data, 'name'));
+    }
+
     public function test_index_schedule_lists_one_session_per_event_by_date(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-10-12 10:00:00', 'Europe/Moscow'));
