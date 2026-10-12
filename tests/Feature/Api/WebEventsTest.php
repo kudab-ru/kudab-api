@@ -17,6 +17,8 @@ class WebEventsTest extends TestCase
 {
     use RefreshDatabase;
 
+    private const BROWSER = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/128.0 Mobile Safari/537.36';
+
     protected function tearDown(): void
     {
         Carbon::setTestNow();
@@ -244,6 +246,44 @@ class WebEventsTest extends TestCase
         $data = $this->getJson('/api/web/events?city=voronezh&q=квиз')->assertOk()->json('data');
 
         $this->assertSame(['Квиз про кино', 'Вечер в баре'], array_column($data, 'title'));
+    }
+
+    public function test_site_search_is_recorded_with_the_number_found(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Организатор');
+        $games = $this->createEvent($vrn->id, $community->id, 'Вечер настольных игр', now()->addDay());
+        DB::table('events')->where('id', $games->id)->update(['price_status' => 'free']);
+        $this->createEvent($vrn->id, $community->id, 'Лекция', now()->addDays(2));
+
+        $this->withHeader('User-Agent', self::BROWSER)
+            ->getJson('/api/web/events?city=voronezh&per_page=25&free=1&q='.urlencode('настолки'))
+            ->assertOk();
+
+        $row = DB::table('search_queries')->sole();
+        $this->assertSame(['настолки', $vrn->id, 1, ['free' => '1']], [$row->q, (int) $row->city_id, (int) $row->found, json_decode($row->filters, true)]);
+    }
+
+    public static function notRecordedSearches(): array
+    {
+        return [
+            'следующая страница' => ['&per_page=25&page=2', self::BROWSER],
+            'число на кнопке фильтров' => ['&per_page=1', self::BROWSER],
+            'снимок страницы нашим браузером' => ['&per_page=25', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 HeadlessChrome/120.0 Safari/537.36'],
+        ];
+    }
+
+    #[DataProvider('notRecordedSearches')]
+    public function test_repeats_of_a_search_and_robots_are_not_recorded(string $params, string $agent): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $this->createEvent($vrn->id, $this->createCommunity($vrn->id, 'Организатор')->id, 'Вечер настольных игр', now()->addDay());
+
+        $this->withHeader('User-Agent', $agent)
+            ->getJson('/api/web/events?city=voronezh&q='.urlencode('настолки').$params)
+            ->assertOk();
+
+        $this->assertDatabaseCount('search_queries', 0);
     }
 
     /* ===================== interests filter (Этап 2) ===================== */

@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\WebEventResource;
 use App\Models\City;
 use App\Services\EventService;
+use App\Support\SearchLog;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use App\Http\Resources\WebEventDetailResource;
@@ -67,6 +68,9 @@ class EventsController extends Controller
         ]);
         $validator->after(fn ($v) => $this->rejectMixedInterests($request, $v));
         $v = $validator->validate();
+
+        // date_from без date_to сайт шлёт всегда («не показывать начавшееся»), это не фильтр
+        $searchFilters = Arr::except($v, ['q', 'city', 'page', 'per_page', 'grouped', 'grouped_by_post', 'date_from', 'sort', 'dir']);
 
         $pageNum = (int) ($v['page'] ?? 1);
 
@@ -148,6 +152,12 @@ class EventsController extends Controller
         // сколько из total_events подходит под выбор колеса
         if (($result['preferredTotal'] ?? null) !== null) {
             $meta['preferred_total'] = $result['preferredTotal'];
+        }
+
+        // Следующие страницы и число на кнопке фильтров (per_page=1, `FiltersOverlay`) повторяют
+        // уже записанный поиск.
+        if (($v['q'] ?? '') !== '' && $pageNum === 1 && $perPage > 1) {
+            SearchLog::record($request, $v['q'], $v['city_id'] ?? null, $totalEvents ?? $page->total(), $searchFilters);
         }
 
         return response()->json([
