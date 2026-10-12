@@ -2414,8 +2414,8 @@ class EventRepository
     }
 
     /**
-     * Отбирает события по строке поиска и возвращает выражение «насколько подходит»: 0 — слово
-     * в названии, 1 — похожее слово в названии, 2 — слово или похожее у организатора, 3 — только в описании.
+     * Отбирает события по строке поиска и возвращает выражение «насколько подходит»: 0 — слово в названии,
+     * 1 — похожее слово в названии, 2 — слово или похожее в имени организатора, 3 — только в описании события.
      *
      * @return array{0: string, 1: array<int, mixed>}|null [sql, параметры]; null — запроса нет
      */
@@ -2444,8 +2444,7 @@ class EventRepository
         $q->where(function ($w) use ($inTitle, $inOrg, $anyLike, $titleSimilar, $orgSimilar, $likes, $sim, $fuzzyOn) {
             $w->whereRaw($inTitle, $likes)
                 ->orWhereRaw($inOrg, $likes)
-                ->orWhereRaw($anyLike('public.ru_normalize(events.description)'), $likes)
-                ->orWhereRaw($anyLike('public.ru_normalize(cm.description)'), $likes);
+                ->orWhereRaw($anyLike('public.ru_normalize(events.description)'), $likes);
             if ($fuzzyOn) {
                 $w->orWhereRaw($titleSimilar, $sim)->orWhereRaw($orgSimilar, $sim);
             }
