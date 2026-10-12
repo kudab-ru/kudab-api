@@ -296,6 +296,45 @@ class WebEventsTest extends TestCase
         $this->assertSame([['Вечер настольных игр', 2], ['Игротека', 1]], array_map(fn ($e) => [$e['title'], $e['series_sessions']], $data));
     }
 
+    public function test_suggest_lists_upcoming_events_by_word_start_once_per_series(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $org = $this->createCommunity($vrn->id, 'Котокафе');
+        $first = $this->createEvent($vrn->id, $org->id, 'Вечер настольных игр', now()->addDay());
+        $second = $this->createEvent($vrn->id, $org->id, 'Вечер настольных игр', now()->addDays(8));
+        $group = DB::table('event_groups')->insertGetId([
+            'community_id' => $org->id, 'city_id' => $vrn->id, 'group_key' => 'eg:test:games',
+            'title_norm' => 'вечер настольных игр', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('events')->whereIn('id', [$first->id, $second->id])->update(['event_group_id' => $group]);
+        $this->createEvent($vrn->id, $org->id, 'Настольный турнир', now()->subDay());
+        $this->createEvent($vrn->id, $org->id, 'Концерт хора Валаамского монастыря', now()->addDays(2));
+
+        $events = $this->getJson('/api/web/search/suggest?city=voronezh&q='.urlencode('наст'))->assertOk()->json('events');
+
+        $this->assertSame([[$first->id, 'Вечер настольных игр']], array_map(fn ($e) => [$e['id'], $e['title']], $events));
+    }
+
+    public static function topicSuggestCases(): array
+    {
+        return [
+            'начало слова в названии темы' => ['игр', ['quiz-games']],
+            'середина слова не в счёт' => ['из', []],
+        ];
+    }
+
+    #[DataProvider('topicSuggestCases')]
+    public function test_suggest_offers_topics_whose_word_starts_with_the_query(string $q, array $slugs): void
+    {
+        $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $this->createInterest('Квизы и игры', 'quiz-games');
+        $this->createInterest('Выставки и искусство', 'exhibitions');
+
+        $topics = $this->getJson('/api/web/search/suggest?city=voronezh&q='.urlencode($q))->assertOk()->json('topics');
+
+        $this->assertSame($slugs, array_column($topics, 'slug'));
+    }
+
     public function test_search_typed_in_english_layout_finds_the_russian_word(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);

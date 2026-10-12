@@ -2141,6 +2141,75 @@ class EventRepository
     }
 
     /**
+     * Подсказки под полем поиска: предстоящие события, в названии которых слово начинается
+     * с набранного (см. SearchMatch::wordStart), по строке на серию, ближайшие первыми. Лёгкий запрос без картинок и цен: он идёт на
+     * каждую паузу в наборе.
+     *
+     * @param  array{q?: string|null, city_id?: int}  $filters
+     * @return list<array{id: int, title: string, start_at: ?string, start_date: ?string, time_precision: string, venue: ?string}>
+     */
+    public function suggestEvents(array $filters, int $limit = 3): array
+    {
+        $match = SearchMatch::from($filters['q'] ?? null);
+        if ($match === null) {
+            return [];
+        }
+
+        $nowMsk = CarbonImmutable::now('Europe/Moscow');
+        $title = 'public.ru_normalize(events.title)';
+        [$start, $startArgs] = $match->wordStart($title);
+        $similar = $match->similar($title);
+
+        $q = Event::query()
+            ->select(['events.id', 'events.title', 'events.start_time', 'events.start_date', 'events.time_precision', 'events.event_group_id', 'events.venue_id'])
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
+            ->where('events.status', 'active')
+            ->whereNull('events.deleted_at')
+            ->where(function ($w) use ($nowMsk) {
+                $w->where('events.start_time', '>=', $nowMsk->format('Y-m-d H:i:sP'))
+                    ->orWhere(function ($x) use ($nowMsk) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $nowMsk->toDateString());
+                    });
+            })
+            ->where(function ($w) use ($start, $startArgs, $similar) {
+                $w->whereRaw($start, $startArgs);
+                if ($similar !== null) {
+                    $w->orWhereRaw(...$similar);
+                }
+            })
+            ->selectRaw("CASE WHEN $start THEN 0 ELSE 1 END AS __rank", $startArgs)
+            ->with('venue:id,name');
+
+        if (! empty($filters['city_id'])) {
+            $q->where('events.city_id', (int) $filters['city_id']);
+        }
+        $this->excludeBlacklistedSources($q);
+        $this->applyMainFeedTaxonomyFilter($q, $filters);
+
+        $rows = $q->orderBy('__rank')
+            ->orderByRaw('events.start_date asc nulls last')
+            ->orderByRaw('events.start_time asc nulls last')
+            ->limit($limit * 20)
+            ->get();
+
+        return $rows->unique(fn (Event $e) => $e->event_group_id ?? 'e'.$e->id)
+            ->take($limit)
+            ->map(fn (Event $e) => [
+                'id' => (int) $e->id,
+                'title' => (string) $e->title,
+                'start_at' => $e->start_time?->copy()->setTimezone('Europe/Moscow')->toIso8601String(),
+                'start_date' => $e->start_date?->toDateString(),
+                'time_precision' => (string) ($e->time_precision ?? 'datetime'),
+                'venue' => $e->venue?->name,
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
      * Что недавно прошло по слову поиска, когда впереди ничего не нашлось. Правило слова то же,
      * что у поиска; по строке на серию, её последний сеанс; `series_sessions` — сколько раз
      * серия прошла за срок. Отбирает совпадения в названии раньше, а показывает по дате.

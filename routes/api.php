@@ -243,6 +243,7 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('events/map', [WebEventsController::class, 'map']);
     Route::get('event-groups/{id}', [WebEventGroupsController::class, 'show'])->whereNumber('id');
     Route::get('events/past', [WebEventsController::class, 'past']);
+    Route::get('search/suggest', \App\Http\Controllers\Api\Web\SearchSuggestController::class);
     Route::get('events/{id}', [WebEventsController::class, 'show'])->whereNumber('id');
     Route::get('events/{id}/related', [WebEventsController::class, 'related'])->whereNumber('id');
     Route::get('events/{id}/companions', [WebEventsController::class, 'companions'])->whereNumber('id');
