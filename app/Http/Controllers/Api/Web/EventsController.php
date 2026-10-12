@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\WebEventResource;
 use App\Models\City;
 use App\Services\EventService;
+use App\Support\KeyboardLayout;
 use App\Support\SearchLog;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -133,6 +134,14 @@ class EventsController extends Controller
         }
 
         $result = $this->service->listWeb($v, $perPage);
+        // ничего не нашлось, а запрос набран латиницей: пробуем его же в русской раскладке
+        $corrected = null;
+        if ($result['page']->total() === 0 && ($fixed = KeyboardLayout::toRussian($v['q'] ?? '')) !== null) {
+            $retry = $this->service->listWeb(['q' => $fixed] + $v, $perPage);
+            if ($retry['page']->total() > 0) {
+                [$result, $corrected] = [$retry, $fixed];
+            }
+        }
         $page = $result['page'];
         $totalEvents = $result['totalEvents'];
 
@@ -152,6 +161,11 @@ class EventsController extends Controller
         // сколько из total_events подходит под выбор колеса
         if (($result['preferredTotal'] ?? null) !== null) {
             $meta['preferred_total'] = $result['preferredTotal'];
+        }
+        // сайт подставляет это слово в поле поиска
+        if ($corrected !== null) {
+            $meta['corrected_q'] = $corrected;
+            $searchFilters['corrected_q'] = $corrected;
         }
 
         // Следующие страницы и число на кнопке фильтров (per_page=1, `FiltersOverlay`) повторяют

@@ -248,6 +248,17 @@ class WebEventsTest extends TestCase
         $this->assertSame(['Квиз про кино', 'Вечер в баре'], array_column($data, 'title'));
     }
 
+    public function test_search_typed_in_english_layout_finds_the_russian_word(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $this->createEvent($vrn->id, $this->createCommunity($vrn->id, 'Организатор')->id, 'Вечер настольных игр', now()->addDay());
+
+        $this->getJson('/api/web/events?city=voronezh&q=yfcnjkrb')
+            ->assertOk()
+            ->assertJsonPath('meta.corrected_q', 'настолки')
+            ->assertJsonPath('data.0.title', 'Вечер настольных игр');
+    }
+
     public function test_site_search_is_recorded_with_the_number_found(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
