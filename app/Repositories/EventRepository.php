@@ -309,31 +309,7 @@ class EventRepository
             $q->where('events.city', 'ILIKE', trim((string) $filters['city']));
         }
 
-        if (! empty($filters['date_from'])) {
-            $fromDate = substr((string) $filters['date_from'], 0, 10);
-
-            $q->where(function ($w) use ($filters, $fromDate) {
-                $w->where('events.start_time', '>=', $filters['date_from'])
-                    ->orWhere(function ($x) use ($fromDate) {
-                        $x->whereNull('events.start_time')
-                            ->whereNotNull('events.start_date')
-                            ->where('events.start_date', '>=', $fromDate);
-                    });
-            });
-        }
-
-        if (! empty($filters['date_to'])) {
-            $toDate = substr((string) $filters['date_to'], 0, 10);
-
-            $q->where(function ($w) use ($filters, $toDate) {
-                $w->where('events.start_time', '<=', $filters['date_to'])
-                    ->orWhere(function ($x) use ($toDate) {
-                        $x->whereNull('events.start_time')
-                            ->whereNotNull('events.start_date')
-                            ->where('events.start_date', '<=', $toDate);
-                    });
-            });
-        }
+        $this->applyDateRange($q, $filters);
 
         if (! empty($filters['community_id'])) {
             $q->where('events.community_id', (int) $filters['community_id']);
@@ -566,31 +542,7 @@ class EventRepository
             $q->where('events.created_at', '>=', $filters['created_from']);
         }
 
-        if (! empty($filters['date_from'])) {
-            $fromDate = substr((string) $filters['date_from'], 0, 10);
-
-            $q->where(function ($w) use ($filters, $fromDate) {
-                $w->where('events.start_time', '>=', $filters['date_from'])
-                    ->orWhere(function ($x) use ($fromDate) {
-                        $x->whereNull('events.start_time')
-                            ->whereNotNull('events.start_date')
-                            ->where('events.start_date', '>=', $fromDate);
-                    });
-            });
-        }
-
-        if (! empty($filters['date_to'])) {
-            $toDate = substr((string) $filters['date_to'], 0, 10);
-
-            $q->where(function ($w) use ($filters, $toDate) {
-                $w->where('events.start_time', '<=', $filters['date_to'])
-                    ->orWhere(function ($x) use ($toDate) {
-                        $x->whereNull('events.start_time')
-                            ->whereNotNull('events.start_date')
-                            ->where('events.start_date', '<=', $toDate);
-                    });
-            });
-        }
+        $this->applyDateRange($q, $filters);
 
         if (! empty($filters['community_id'])) {
             $q->where('events.community_id', (int) $filters['community_id']);
@@ -1089,29 +1041,7 @@ class EventRepository
             $q->where('events.city_id', (int) $filters['city_id']);
         }
 
-        if (! empty($filters['date_from'])) {
-            $fromDate = substr((string) $filters['date_from'], 0, 10);
-            $q->where(function ($w) use ($filters, $fromDate) {
-                $w->where('events.start_time', '>=', $filters['date_from'])
-                    ->orWhere(function ($x) use ($fromDate) {
-                        $x->whereNull('events.start_time')
-                            ->whereNotNull('events.start_date')
-                            ->where('events.start_date', '>=', $fromDate);
-                    });
-            });
-        }
-
-        if (! empty($filters['date_to'])) {
-            $toDate = substr((string) $filters['date_to'], 0, 10);
-            $q->where(function ($w) use ($filters, $toDate) {
-                $w->where('events.start_time', '<=', $filters['date_to'])
-                    ->orWhere(function ($x) use ($toDate) {
-                        $x->whereNull('events.start_time')
-                            ->whereNotNull('events.start_date')
-                            ->where('events.start_date', '<=', $toDate);
-                    });
-            });
-        }
+        $this->applyDateRange($q, $filters);
 
         if (! empty($filters['community_id'])) {
             $q->where('events.community_id', (int) $filters['community_id']);
@@ -3105,6 +3035,31 @@ class EventRepository
         });
     }
 
+    /**
+     * Границы `date_from` и `date_to`. Сайт, бот и пресеты «Сегодня», «Сейчас» присылают московское
+     * время без пояса, а сессия базы в UTC: такую строку база прочла бы по UTC, и граница уехала
+     * бы на три часа вперёд. Поэтому строку без пояса читаем по Москве и отдаём базе с поясом.
+     */
+    private function applyDateRange($q, array $filters): void
+    {
+        foreach (['date_from' => '>=', 'date_to' => '<='] as $key => $op) {
+            if (empty($filters[$key])) {
+                continue;
+            }
+            $at = CarbonImmutable::parse((string) $filters[$key], 'Europe/Moscow');
+            $day = $at->setTimezone('Europe/Moscow')->toDateString();
+
+            $q->where(function ($w) use ($at, $day, $op) {
+                $w->where('events.start_time', $op, $at->format('Y-m-d H:i:sP'))
+                    ->orWhere(function ($x) use ($day, $op) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', $op, $day);
+                    });
+            });
+        }
+    }
+
     private function applyOnlyActual($q): void
     {
         $nowMsk = now('Europe/Moscow');
@@ -3112,7 +3067,8 @@ class EventRepository
         $cutoffTs = $nowMsk->copy()->subHours(self::PAST_GRACE_HOURS);
 
         $q->where(function ($w) use ($cutoffTs, $todayMsk) {
-            $w->where('events.start_time', '>=', $cutoffTs)
+            // с поясом: голое московское время база прочла бы по UTC, см. applyDateRange
+            $w->where('events.start_time', '>=', $cutoffTs->format('Y-m-d H:i:sP'))
                 ->orWhere(function ($x) use ($todayMsk) {
                     $x->whereNull('events.start_time')
                         ->whereNotNull('events.start_date')

@@ -248,6 +248,30 @@ class WebEventsTest extends TestCase
         $this->assertSame(['Квиз про кино', 'Вечер в баре'], array_column($data, 'title'));
     }
 
+    public static function soonCases(): array
+    {
+        return [
+            'поиск: сайт шлёт московское время без пояса' => ['/api/web/events?city=voronezh&date_from=2026-10-12+20:07:00', '2026-10-12 21:00'],
+            'кнопка «Сейчас»: событие идёт полчаса' => ['/api/web/events?city=voronezh&when=now', '2026-10-12 19:40'],
+            'бот: только актуальные' => ['/api/bot/events?only_actual=1', '2026-10-12 21:00'],
+        ];
+    }
+
+    #[DataProvider('soonCases')]
+    public function test_events_of_the_next_hours_are_not_lost_to_the_time_zone(string $url, string $startMsk): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-12 20:07', 'Europe/Moscow'));
+        config(['services.bot.shared_token' => 'test-bot-token']);
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        // момент в UTC: время с московским поясом модель сохранила бы без пояса, и оно уехало бы
+        $start = Carbon::parse($startMsk, 'Europe/Moscow')->utc();
+        $this->createEvent($vrn->id, $this->createCommunity($vrn->id, 'Квесты')->id, 'Арканум', $start);
+
+        $data = $this->withToken('test-bot-token')->getJson($url)->assertOk()->json('data');
+
+        $this->assertSame(['Арканум'], array_column($data, 'title'));
+    }
+
     public function test_search_typed_in_english_layout_finds_the_russian_word(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
