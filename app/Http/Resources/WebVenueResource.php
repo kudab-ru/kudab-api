@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources;
 
+use App\Support\VenueKindLabel;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -29,6 +30,8 @@ class WebVenueResource extends JsonResource
             'slug'            => (string) ($this->slug ?? ''),
             'name'            => (string) ($this->name ?? ''),
             'kind'            => $this->kind !== null ? (string) $this->kind : null,
+            // «Музей», а не «Музеи»: подпись на карточке места в поиске
+            'kind_label'      => VenueKindLabel::for($this->kind !== null ? (string) $this->kind : null),
             'address'         => $this->address !== null ? (string) $this->address : null,
             'city_id'         => (int) ($this->city_id ?? 0),
             'city_slug'       => $this->getAttribute('city_slug') ?: null,
