@@ -16,7 +16,15 @@ use Illuminate\Support\Facades\DB;
 
 class EventRepository
 {
-    private const FUZZY_MIN_LEN = 3;
+    // У слов короче пяти букв похожими выходят чужие слова: «квиз» и «квинтет» дают 0.6.
+    private const FUZZY_MIN_LEN = 5;
+
+    // Другая форма слова: «выставка» и «выставке» дают 0.78, а слова, у которых
+    // совпадает только начало («концерт» и «конца»), — 0.5.
+    private const FUZZY_FORM_THRESHOLD = 0.6;
+
+    // Опечатку ловит сравнение слов целиком: «консерт» и «концерт» дают 0.45, «мафия» и «магия» — 0.33.
+    private const FUZZY_TYPO_THRESHOLD = 0.45;
 
     private const PAST_GRACE_HOURS = 1;
 
@@ -348,63 +356,20 @@ class EventRepository
             $q->where('events.venue_id', (int) $filters['venue_id']);
         }
 
-        $qNorm = $this->normalizeQ($filters['q'] ?? null);
+        $match = $this->applyTextSearch($q, $filters['q'] ?? null);
 
-        if ($qNorm !== null) {
-            $q->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id')
-                ->distinct();
+        if ($match !== null && empty($filters['sort'])) {
+            // Порядок как у поиска на сайте, см. paginateUpcomingWeb.
+            $q->selectRaw("{$match[0]} as __match_rank", $match[1]);
 
-            $like = '%'.$qNorm.'%';
-
-            $token = $this->pickFuzzyToken($qNorm);
-            $thr = $this->fuzzyThreshold($token);
-
-            $fuzzyOn = $this->trgmEnabled()
-                && $this->wordSimEnabled()
-                && mb_strlen($token) >= self::FUZZY_MIN_LEN
-                && mb_strlen($token) >= 4;
-
-            $q->where(function ($w) use ($like, $token, $thr, $fuzzyOn) {
-                $w->whereRaw('public.ru_normalize(events.title) LIKE ?', [$like])
-                    ->orWhereRaw('public.ru_normalize(events.description) LIKE ?', [$like])
-                    ->orWhereRaw('public.ru_normalize(cm.name) LIKE ?', [$like])
-                    ->orWhereRaw('public.ru_normalize(cm.description) LIKE ?', [$like]);
-
-                if ($fuzzyOn) {
-                    $w->orWhereRaw(
-                        'word_similarity(?, public.ru_normalize(events.title)) >= ?',
-                        [$token, $thr]
-                    )->orWhereRaw(
-                        'word_similarity(?, public.ru_normalize(cm.name)) >= ?',
-                        [$token, $thr]
-                    );
-                }
-            });
-
-            if (empty($filters['sort']) && $fuzzyOn) {
-                $isLikeExpr = 'CASE WHEN (
-                public.ru_normalize(events.title) LIKE ?
-                OR public.ru_normalize(cm.name) LIKE ?
-            ) THEN 0 ELSE 1 END';
-
-                $scoreExpr = 'GREATEST(
-                word_similarity(?, public.ru_normalize(events.title)),
-                word_similarity(?, public.ru_normalize(cm.name))
-            )';
-
-                $q->selectRaw("$isLikeExpr as __like_rank", [$like, $like]);
-                $q->selectRaw("$scoreExpr as __score", [$token, $token]);
-
-                $q->reorder()
-                    ->orderBy('__past_rank', 'asc')
-                    ->orderBy('__img_rank', 'asc')
-                    ->orderBy('__gray_rank', 'asc')
-                    ->orderBy('__like_rank', 'asc')
-                    ->orderBy('__score', 'desc')
-                    ->orderByRaw('events.start_date asc nulls last')
-                    ->orderByRaw('events.start_time asc nulls last')
-                    ->orderBy('events.id', 'asc');
-            }
+            $q->reorder()
+                ->orderBy('__past_rank', 'asc')
+                ->orderBy('__match_rank', 'asc')
+                ->orderBy('__img_rank', 'asc')
+                ->orderBy('__gray_rank', 'asc')
+                ->orderByRaw('events.start_date asc nulls last')
+                ->orderByRaw('events.start_time asc nulls last')
+                ->orderBy('events.id', 'asc');
         }
 
         if (! empty($filters['interests']) && is_array($filters['interests'])) {
@@ -421,7 +386,7 @@ class EventRepository
         $this->hydrateImages($events);
 
         $events->each(function (Event $e) {
-            $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
+            $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__match_rank']);
         });
 
         return $paginator->setCollection($events);
@@ -648,45 +613,7 @@ class EventRepository
             $q->where('events.venue_id', (int) $filters['venue_id']);
         }
 
-        $qNorm = $this->normalizeQ($filters['q'] ?? null);
-        $like = null;
-        $token = null;
-        $thr = null;
-        $fuzzyOn = false;
-        $hasDistinct = false;
-
-        if ($qNorm !== null) {
-            $q->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id')
-                ->distinct();
-
-            $hasDistinct = true;
-
-            $like = '%'.$qNorm.'%';
-            $token = $this->pickFuzzyToken($qNorm);
-            $thr = $this->fuzzyThreshold($token);
-
-            $fuzzyOn = $this->trgmEnabled()
-                && $this->wordSimEnabled()
-                && mb_strlen($token) >= self::FUZZY_MIN_LEN
-                && mb_strlen($token) >= 4;
-
-            $q->where(function ($w) use ($like, $token, $thr, $fuzzyOn) {
-                $w->whereRaw('public.ru_normalize(events.title) LIKE ?', [$like])
-                    ->orWhereRaw('public.ru_normalize(events.description) LIKE ?', [$like])
-                    ->orWhereRaw('public.ru_normalize(cm.name) LIKE ?', [$like])
-                    ->orWhereRaw('public.ru_normalize(cm.description) LIKE ?', [$like]);
-
-                if ($fuzzyOn) {
-                    $w->orWhereRaw(
-                        'word_similarity(?, public.ru_normalize(events.title)) >= ?',
-                        [$token, $thr]
-                    )->orWhereRaw(
-                        'word_similarity(?, public.ru_normalize(cm.name)) >= ?',
-                        [$token, $thr]
-                    );
-                }
-            });
-        }
+        $match = $this->applyTextSearch($q, $filters['q'] ?? null);
 
         if (! empty($filters['interests']) && is_array($filters['interests'])) {
             // Double-write: input — либо int[] (legacy), либо slug[] (Этап 2,
@@ -762,18 +689,9 @@ class EventRepository
         }
 
         $unknownLast = $hasRange && ! $priced;
-        if ($unknownLast && $hasDistinct) {
-            $q->selectRaw("$unknownCaseSql as __unknown_last");
-        }
 
         if ($unknownLast) {
-            $pastFirst($q->reorder());
-
-            if ($hasDistinct) {
-                $q->orderBy('__unknown_last', 'asc');
-            } else {
-                $q->orderByRaw("$unknownCaseSql asc");
-            }
+            $pastFirst($q->reorder())->orderByRaw("$unknownCaseSql asc");
 
             $q->orderBy('__img_rank', 'asc')
                 ->orderBy('__gray_rank', 'asc')
@@ -818,11 +736,7 @@ class EventRepository
             $pastFirst($q->reorder());
 
             if ($unknownLast) {
-                if ($hasDistinct) {
-                    $q->orderBy('__unknown_last', 'asc');
-                } else {
-                    $q->orderByRaw("$unknownCaseSql asc");
-                }
+                $q->orderByRaw("$unknownCaseSql asc");
             }
 
             $q->orderBy('__img_rank', 'asc')
@@ -852,34 +766,18 @@ class EventRepository
             $q->orderBy('events.id', 'asc');
         }
 
-        if (empty($filters['sort']) && $fuzzyOn && $like !== null && $token !== null) {
-            $isLikeExpr = 'CASE WHEN (
-            public.ru_normalize(events.title) LIKE ?
-            OR public.ru_normalize(cm.name) LIKE ?
-        ) THEN 0 ELSE 1 END';
+        if (empty($filters['sort']) && $match !== null) {
+            $q->selectRaw("{$match[0]} as __match_rank", $match[1]);
 
-            $scoreExpr = 'GREATEST(
-            word_similarity(?, public.ru_normalize(events.title)),
-            word_similarity(?, public.ru_normalize(cm.name))
-        )';
-
-            $q->selectRaw("$isLikeExpr as __like_rank", [$like, $like]);
-            $q->selectRaw("$scoreExpr as __score", [$token, $token]);
-
-            $pastFirst($q->reorder());
+            // В поиске важнее, насколько событие подходит, чем есть ли у него картинка.
+            $pastFirst($q->reorder())->orderBy('__match_rank', 'asc');
 
             if ($unknownLast) {
-                if ($hasDistinct) {
-                    $q->orderBy('__unknown_last', 'asc');
-                } else {
-                    $q->orderByRaw("$unknownCaseSql asc");
-                }
+                $q->orderByRaw("$unknownCaseSql asc");
             }
 
             $q->orderBy('__img_rank', 'asc')
                 ->orderBy('__gray_rank', 'asc')
-                ->orderBy('__like_rank', 'asc')
-                ->orderBy('__score', 'desc')
                 ->orderByRaw('events.start_date asc nulls last')
                 ->orderByRaw('events.start_time asc nulls last')
                 ->orderBy('events.id', 'asc');
@@ -1094,10 +992,8 @@ class EventRepository
                 '__is_past',
                 '__gray_rank',
                 '__img_rank',
-                '__like_rank',
-                '__score',
+                '__match_rank',
                 '__top_score',
-                '__unknown_last',
                 '__prefer_rank',
             ]);
         });
@@ -1238,34 +1134,7 @@ class EventRepository
             $q->where('events.venue_id', (int) $filters['venue_id']);
         }
 
-        $qNorm = $this->normalizeQ($filters['q'] ?? null);
-        if ($qNorm !== null) {
-            $like = '%'.$qNorm.'%';
-            $token = $this->pickFuzzyToken($qNorm);
-            $thr = $this->fuzzyThreshold($token);
-            $fuzzyOn = $this->trgmEnabled()
-                && $this->wordSimEnabled()
-                && mb_strlen($token) >= self::FUZZY_MIN_LEN
-                && mb_strlen($token) >= 4;
-
-            $q->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id')->distinct();
-
-            $q->where(function ($w) use ($like, $token, $thr, $fuzzyOn) {
-                $w->whereRaw('public.ru_normalize(events.title) LIKE ?', [$like])
-                    ->orWhereRaw('public.ru_normalize(events.description) LIKE ?', [$like])
-                    ->orWhereRaw('public.ru_normalize(cm.name) LIKE ?', [$like])
-                    ->orWhereRaw('public.ru_normalize(cm.description) LIKE ?', [$like]);
-                if ($fuzzyOn) {
-                    $w->orWhereRaw(
-                        'word_similarity(?, public.ru_normalize(events.title)) >= ?',
-                        [$token, $thr]
-                    )->orWhereRaw(
-                        'word_similarity(?, public.ru_normalize(cm.name)) >= ?',
-                        [$token, $thr]
-                    );
-                }
-            });
-        }
+        $this->applyTextSearch($q, $filters['q'] ?? null);
 
         if (! empty($filters['interests']) && is_array($filters['interests'])) {
             // Double-write — см. resolveInterestFilterIds().
@@ -1393,7 +1262,7 @@ class EventRepository
 
         $this->hydrateImages(new EloquentCollection([$event]));
 
-        $event->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
+        $event->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__match_rank']);
 
         return $event;
     }
@@ -1425,7 +1294,7 @@ class EventRepository
         $this->hydrateGroupDates(new EloquentCollection([$event]), self::DETAIL_SERIES_DAYS);
         $this->hydrateSiblings(new EloquentCollection([$event]));
 
-        $event->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__like_rank', '__score', '__unknown_last']);
+        $event->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank', '__match_rank']);
 
         return $event;
     }
@@ -2538,17 +2407,49 @@ class EventRepository
         return $token !== '' ? $token : $qNorm;
     }
 
-    private function fuzzyThreshold(string $token): float
+    /**
+     * Отбирает события по строке поиска и возвращает выражение «насколько подходит»: 0 — слово
+     * в названии, 1 — похожее слово в названии, 2 — слово или похожее у организатора, 3 — только в описании.
+     *
+     * @return array{0: string, 1: array<int, mixed>}|null [sql, параметры]; null — запроса нет
+     */
+    private function applyTextSearch($q, ?string $query): ?array
     {
-        $n = mb_strlen($token);
-        if ($n <= 4) {
-            return 0.20;
-        }
-        if ($n <= 6) {
-            return 0.18;
+        $qNorm = $this->normalizeQ($query);
+        if ($qNorm === null) {
+            return null;
         }
 
-        return 0.14;
+        $q->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id');
+
+        $like = '%'.$qNorm.'%';
+        $token = $this->pickFuzzyToken($qNorm);
+        $fuzzyOn = mb_strlen($token) >= self::FUZZY_MIN_LEN && $this->trgmEnabled() && $this->wordSimEnabled();
+
+        $title = 'public.ru_normalize(events.title)';
+        $org = 'public.ru_normalize(cm.name)';
+        $titleSimilar = "(word_similarity(?, $title) >= ? OR strict_word_similarity(?, $title) >= ?)";
+        $orgSimilar = "(word_similarity(?, $org) >= ? OR strict_word_similarity(?, $org) >= ?)";
+        $sim = [$token, self::FUZZY_FORM_THRESHOLD, $token, self::FUZZY_TYPO_THRESHOLD];
+
+        $q->where(function ($w) use ($title, $org, $titleSimilar, $orgSimilar, $like, $sim, $fuzzyOn) {
+            $w->whereRaw("$title LIKE ?", [$like])
+                ->orWhereRaw("$org LIKE ?", [$like])
+                ->orWhereRaw('public.ru_normalize(events.description) LIKE ?', [$like])
+                ->orWhereRaw('public.ru_normalize(cm.description) LIKE ?', [$like]);
+            if ($fuzzyOn) {
+                $w->orWhereRaw($titleSimilar, $sim)->orWhereRaw($orgSimilar, $sim);
+            }
+        });
+
+        if (! $fuzzyOn) {
+            return ["CASE WHEN $title LIKE ? THEN 0 WHEN $org LIKE ? THEN 2 ELSE 3 END", [$like, $like]];
+        }
+
+        return [
+            "CASE WHEN $title LIKE ? THEN 0 WHEN $titleSimilar THEN 1 WHEN $org LIKE ? OR $orgSimilar THEN 2 ELSE 3 END",
+            [$like, ...$sim, $like, ...$sim],
+        ];
     }
 
     private function trgmEnabled(): bool
@@ -2574,7 +2475,7 @@ class EventRepository
         }
 
         try {
-            DB::selectOne("select word_similarity('a','a') as s");
+            DB::selectOne("select strict_word_similarity('a','a') as s");
             $this->hasWordSim = true;
         } catch (\Throwable $e) {
             $this->hasWordSim = false;

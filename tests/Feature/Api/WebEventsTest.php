@@ -174,6 +174,42 @@ class WebEventsTest extends TestCase
         ]);
     }
 
+    public static function similarWordCases(): array
+    {
+        return [
+            'другая форма слова находится' => ['настолки', 'Вечер настольных игр', 'Ветер, куда нас несёт?'],
+            'опечатка прощается' => ['консерт', 'Концерт хора', 'Занятия в консультационном центре'],
+            'общее начало слова не в счёт' => ['мафия', 'Воронежская мафия', 'Клод Моне. Магия воды и света'],
+        ];
+    }
+
+    #[DataProvider('similarWordCases')]
+    public function test_search_tells_similar_word_from_word_with_the_same_beginning(string $q, string $found, string $other): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Организатор');
+        $this->createEvent($vrn->id, $community->id, $found, now()->addDay());
+        $this->createEvent($vrn->id, $community->id, $other, now()->addDays(2));
+
+        $data = $this->getJson('/api/web/events?city=voronezh&q='.urlencode($q))->assertOk()->json('data');
+
+        $this->assertSame([$found], array_column($data, 'title'));
+    }
+
+    public function test_search_puts_title_match_above_description_match_with_photo(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Организатор');
+        $this->createEvent($vrn->id, $community->id, 'Квиз про кино', now()->addDays(3));
+        $bar = $this->createEvent($vrn->id, $community->id, 'Вечер в баре', now()->addDay());
+        DB::table('events')->where('id', $bar->id)->update(['description' => 'Сыграем в квиз и послушаем музыку']);
+        $this->attachPhoto($bar->id, $community->id);
+
+        $data = $this->getJson('/api/web/events?city=voronezh&q=квиз')->assertOk()->json('data');
+
+        $this->assertSame(['Квиз про кино', 'Вечер в баре'], array_column($data, 'title'));
+    }
+
     /* ===================== interests filter (Этап 2) ===================== */
 
     public function test_filter_by_leaf_slug_returns_only_tagged_events(): void
@@ -525,6 +561,19 @@ class WebEventsTest extends TestCase
             ->assertOk()
             ->assertJsonPath('meta.total', 1)
             ->assertJsonPath('data.title', 'Буратино');
+    }
+
+    public function test_random_with_search_picks_from_found_events(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Организатор');
+        $this->createEvent($vrn->id, $community->id, 'Квиз про кино', now()->addDay());
+        $this->createEvent($vrn->id, $community->id, 'Рок-концерт', now()->addDay());
+
+        $this->getJson('/api/web/events/random?city=voronezh&q=квиз')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonPath('data.title', 'Квиз про кино');
     }
 
     /* ===================== related (Interests Этап 3) ===================== */
@@ -1433,6 +1482,24 @@ class WebEventsTest extends TestCase
             'name' => $name,
             'slug' => $slug,
             'status' => 'active',
+        ]);
+    }
+
+    private function attachPhoto(int $eventId, int $communityId): void
+    {
+        $networkId = DB::table('social_networks')->insertGetId(['name' => 'vk', 'slug' => 'vk-'.$eventId]);
+        $linkId = DB::table('community_social_links')->insertGetId([
+            'community_id' => $communityId,
+            'social_network_id' => $networkId,
+            'url' => 'https://vk.com/src_'.$eventId,
+            'status' => 'active',
+        ]);
+        DB::table('event_sources')->insert([
+            'event_id' => $eventId,
+            'social_link_id' => $linkId,
+            'source' => 'vk',
+            'post_external_id' => 'post-'.$eventId,
+            'images' => json_encode(['https://example.com/poster.jpg']),
         ]);
     }
 
