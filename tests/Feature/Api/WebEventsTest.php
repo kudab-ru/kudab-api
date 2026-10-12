@@ -274,6 +274,28 @@ class WebEventsTest extends TestCase
         $this->assertSame(['Арканум'], array_column($data, 'title'));
     }
 
+    public function test_past_search_lists_recent_events_once_per_series(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-12 12:00', 'Europe/Moscow'));
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $org = $this->createCommunity($vrn->id, 'Котокафе');
+        $last = $this->createEvent($vrn->id, $org->id, 'Вечер настольных игр', now()->subDays(3));
+        $before = $this->createEvent($vrn->id, $org->id, 'Вечер настольных игр', now()->subDays(10));
+        $group = DB::table('event_groups')->insertGetId([
+            'community_id' => $org->id, 'city_id' => $vrn->id, 'group_key' => 'eg:test:games',
+            'title_norm' => 'вечер настольных игр', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('events')->whereIn('id', [$last->id, $before->id])->update(['event_group_id' => $group]);
+        $this->createEvent($vrn->id, $org->id, 'Игротека', now()->subDays(20));
+        $this->createEvent($vrn->id, $org->id, 'Турнир по настольным играм', now()->subDays(200));
+        $this->createEvent($vrn->id, $org->id, 'Настолки на неделе', now()->addDay());
+        $this->createEvent($vrn->id, $org->id, 'Лекция', now()->subDays(2));
+
+        $data = $this->getJson('/api/web/events/past?city=voronezh&q='.urlencode('настолки'))->assertOk()->json('data');
+
+        $this->assertSame([['Вечер настольных игр', 2], ['Игротека', 1]], array_map(fn ($e) => [$e['title'], $e['series_sessions']], $data));
+    }
+
     public function test_search_typed_in_english_layout_finds_the_russian_word(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);

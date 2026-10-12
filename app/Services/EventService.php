@@ -60,6 +60,12 @@ class EventService
         return $this->repo->paginateUpcomingWeb($filters, $perPage);
     }
 
+    /** «Недавно было» в пустом поиске, см. EventRepository::listSearchPast. */
+    public function listSearchPast(array $filters, int $limit = 5): EloquentCollection
+    {
+        return $this->repo->listSearchPast($filters, $limit);
+    }
+
     /**
      * Лента прошедших событий площадки («Здесь уже проходило») — all-time,
      * в обход lookback-окна ленты. См. EventRepository::listVenuePast.

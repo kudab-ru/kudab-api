@@ -28,6 +28,9 @@ class EventRepository
      */
     public const PAST_LOOKBACK_DAYS = 7;
 
+    // «Недавно было» в пустом поиске: за этот срок видно, что такое в городе бывает
+    public const SEARCH_PAST_DAYS = 90;
+
     private const DETAIL_SERIES_DAYS = 62;
 
     /**
@@ -2135,6 +2138,68 @@ class EventRepository
         $events->each(fn (Event $e) => $e->makeHidden(['__past_rank', '__is_past']));
 
         return ['page' => $paginator, 'totalEvents' => (int) $paginator->total()];
+    }
+
+    /**
+     * Что недавно прошло по слову поиска, когда впереди ничего не нашлось. Правило слова то же,
+     * что у поиска; по строке на серию, её последний сеанс; `series_sessions` — сколько раз
+     * серия прошла за срок. Отбирает совпадения в названии раньше, а показывает по дате.
+     *
+     * @param  array{q?: string|null, city_id?: int}  $filters
+     * @return EloquentCollection<int, Event>
+     */
+    public function listSearchPast(array $filters, int $limit = 5): EloquentCollection
+    {
+        $past = self::pastExpression();
+        $since = now('Europe/Moscow')->subDays(self::SEARCH_PAST_DAYS)->startOfDay();
+
+        $q = Event::query()
+            ->select('events.*', 'ct.slug as city_slug')
+            ->selectRaw("COUNT(*) OVER (PARTITION BY COALESCE(events.event_group_id::text, 'e' || events.id)) AS series_sessions")
+            ->join('cities as ct', 'ct.id', '=', 'events.city_id')
+            ->where('ct.status', 'active')
+            ->where('events.status', 'active')
+            ->whereNull('events.deleted_at')
+            ->whereRaw(...$past)
+            ->where(function ($w) use ($since) {
+                $w->where('events.start_time', '>=', $since->format('Y-m-d H:i:sP'))
+                    ->orWhere(function ($x) use ($since) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $since->toDateString());
+                    });
+            })
+            ->with(['interests:id,slug,name', 'venue:id,slug,name,kind']);
+
+        if (! empty($filters['city_id'])) {
+            $q->where('events.city_id', (int) $filters['city_id']);
+        }
+
+        $match = $this->applyTextSearch($q, $filters['q'] ?? null);
+        if ($match === null) {
+            return new EloquentCollection();
+        }
+
+        $this->addPastFlags($q, $past);
+        $this->excludeBlacklistedSources($q);
+        $this->applyMainFeedTaxonomyFilter($q, $filters);
+
+        $rows = $q->selectRaw("{$match[0]} as __match_rank", $match[1])
+            ->orderBy('__match_rank')
+            ->orderByRaw('events.start_date desc nulls last')
+            ->orderByRaw('events.start_time desc nulls last')
+            ->orderBy('events.id', 'desc')
+            ->limit($limit * 20)
+            ->get();
+
+        $events = $rows->unique(fn (Event $e) => $e->event_group_id ?? 'e'.$e->id)
+            ->take($limit)
+            ->sortByDesc(fn (Event $e) => $e->start_time?->getTimestamp() ?? strtotime((string) $e->start_date))
+            ->values();
+        $this->hydrateImages($events);
+        $events->each(fn (Event $e) => $e->makeHidden(['__past_rank', '__is_past', '__match_rank']));
+
+        return $events;
     }
 
     /**

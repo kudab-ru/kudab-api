@@ -242,6 +242,7 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     // Порядок: до events/{id} (иначе "map" уедет в show как id; whereNumber всё равно подстрахует).
     Route::get('events/map', [WebEventsController::class, 'map']);
     Route::get('event-groups/{id}', [WebEventGroupsController::class, 'show'])->whereNumber('id');
+    Route::get('events/past', [WebEventsController::class, 'past']);
     Route::get('events/{id}', [WebEventsController::class, 'show'])->whereNumber('id');
     Route::get('events/{id}/related', [WebEventsController::class, 'related'])->whereNumber('id');
     Route::get('events/{id}/companions', [WebEventsController::class, 'companions'])->whereNumber('id');

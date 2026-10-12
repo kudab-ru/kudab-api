@@ -181,6 +181,30 @@ class EventsController extends Controller
     }
 
     /**
+     * GET /api/web/events/past — что недавно прошло по слову, для пустого поиска на сайте.
+     */
+    public function past(Request $request): JsonResponse
+    {
+        $v = $request->validate([
+            'city' => ['sometimes', 'string', 'max:64', 'regex:/^[a-z0-9-]+$/'],
+            'q' => ['required', 'string', 'max:255'],
+        ]);
+
+        $filters = ['q' => trim($v['q'])];
+        if (! empty($v['city'])) {
+            $cityId = City::query()->where('slug', $v['city'])->where('status', 'active')->value('id');
+            if (! $cityId) {
+                return response()->json(['data' => []]);
+            }
+            $filters['city_id'] = (int) $cityId;
+        }
+
+        return response()->json([
+            'data' => WebEventResource::collection($this->service->listSearchPast($filters)),
+        ]);
+    }
+
+    /**
      * GET /api/web/events/map
      * Точки событий для карты города (/map): GeoJSON FeatureCollection, отбор по городу
      * и окну даты, БЕЗ пагинации (все точки окна разом). Отдельная ручка, потому что
