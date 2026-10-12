@@ -198,6 +198,18 @@ class WebEventsTest extends TestCase
         $this->assertSame([$found], array_column($data, 'title'));
     }
 
+    public function test_search_shows_family_events_that_the_feed_hides(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $event = $this->createEvent($vrn->id, $this->createCommunity($vrn->id, 'Котокафе')->id, 'Игротека', now()->addDay());
+        $this->setTaxonomy($event->id, 'family', 'entertainment');
+
+        $this->getJson('/api/web/events?city=voronezh&q='.urlencode('игротека'))
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonPath('data.0.title', 'Игротека');
+    }
+
     public function test_search_puts_title_match_above_description_match_with_photo(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
