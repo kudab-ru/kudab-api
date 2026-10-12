@@ -9,6 +9,7 @@ use App\Models\Venue;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -59,6 +60,60 @@ class WebVenuesTest extends TestCase
             ->assertOk()
             ->assertJsonPath('meta.total', 1)
             ->assertJsonPath('data.0.name', 'Зелёный театр');
+    }
+
+    public static function nameSearchCases(): array
+    {
+        return [
+            'дефис и опечатка' => ['попкорн-драмма', 'Попкорн Драма', 'Драмтеатр'],
+            'другая форма слова' => ['крамской', 'Художественный музей им. И.Н. Крамского', 'Музей «Арсенал»'],
+        ];
+    }
+
+    #[DataProvider('nameSearchCases')]
+    public function test_index_finds_venue_by_the_same_rule_as_events(string $q, string $found, string $other): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $this->createVenue($vrn->id, $found, 'found');
+        $this->createVenue($vrn->id, $other, 'other');
+
+        $data = $this->getJson('/api/web/venues?city_id='.$vrn->id.'&q='.urlencode($q))->assertOk()->json('data');
+
+        $this->assertSame([$found], array_column($data, 'name'));
+    }
+
+    public function test_index_search_puts_whole_word_before_part_of_word(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+        $cinema = $this->createVenue($vrn->id, 'Кинотеатр «Спартак»', 'spartak');
+        $theatre = $this->createVenue($vrn->id, 'Новый театр', 'novyi-teatr');
+        // событий у кинотеатра больше, и без ранга по слову он встал бы первым
+        $this->createEvent($vrn->id, $cinema->id, $community->id, 'Сеанс', '2026-10-20 19:00:00');
+        $this->createEvent($vrn->id, $cinema->id, $community->id, 'Другой сеанс', '2026-10-21 19:00:00');
+        $this->createEvent($vrn->id, $theatre->id, $community->id, 'Спектакль', '2026-10-22 19:00:00');
+
+        $data = $this->getJson('/api/web/venues?city_id='.$vrn->id.'&q='.urlencode('театр'))->assertOk()->json('data');
+
+        $this->assertSame(['Новый театр', 'Кинотеатр «Спартак»'], array_column($data, 'name'));
+    }
+
+    public function test_index_schedule_lists_one_session_per_event_by_date(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-12 10:00:00', 'Europe/Moscow'));
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+        $venue = $this->createVenue($vrn->id, 'Театр оперы и балета', 'opera');
+        $group = $this->createEventGroup($vrn->id, $community->id, 'shchelkunchik');
+        $first = $this->createEvent($vrn->id, $venue->id, $community->id, 'Щелкунчик', '2026-10-14 19:00:00');
+        $second = $this->createEvent($vrn->id, $venue->id, $community->id, 'Щелкунчик', '2026-10-16 19:00:00');
+        DB::table('events')->whereIn('id', [$first->id, $second->id])->update(['event_group_id' => $group]);
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Лебединое озеро', '2026-10-15 19:00:00');
+        $this->createEvent($vrn->id, $venue->id, $community->id, 'Прошедший балет', '2026-10-10 19:00:00');
+
+        $schedule = $this->getJson('/api/web/venues?city_id='.$vrn->id.'&schedule=5')->assertOk()->json('data.0.schedule');
+
+        $this->assertSame(['Щелкунчик', 'Лебединое озеро'], array_column($schedule, 'title'));
     }
 
     public function test_show_returns_venue_with_city_relation(): void

@@ -9,6 +9,7 @@ use App\Models\Event;
 use App\Models\Venue;
 use App\Repositories\EventRepository;
 use App\Services\EventService;
+use App\Support\SearchMatch;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -69,13 +70,15 @@ class VenuesController extends Controller
     {
         $cityId = $this->resolveCityId($request);
 
-        $perPage = max(1, min((int) $request->input('per_page', 20), 50));
-        $q       = trim((string) $request->input('q', ''));
-        $kind    = trim((string) $request->input('kind', ''));
+        $perPage  = max(1, min((int) $request->input('per_page', 20), 50));
+        $rawQ     = $request->input('q');
+        $match    = SearchMatch::from(is_string($rawQ) ? $rawQ : null);
+        $kind     = trim((string) $request->input('kind', ''));
+        $schedule = $this->intInput($request, 'schedule', 0, 0, 8);
 
         $query = $this->baseQuery()
             ->when($cityId !== null, fn ($qq) => $qq->where('venues.city_id', $cityId))
-            ->when($q !== '',    fn ($qq) => $qq->where('venues.name', 'ILIKE', '%' . $q . '%'))
+            ->when($match !== null, fn ($qq) => $this->whereNameMatches($qq, $match))
             ->when($kind !== '', fn ($qq) => $qq->where('venues.kind', $kind))
             ->orderByRaw('events_count DESC NULLS LAST')
             ->orderBy('venues.name');
@@ -83,6 +86,9 @@ class VenuesController extends Controller
         $page = $query->paginate($perPage);
 
         $this->attachUpcoming($page->items());
+        if ($schedule > 0) {
+            $this->attachSchedule($page->items(), $schedule);
+        }
 
         return response()->json([
             'meta' => [
@@ -451,22 +457,7 @@ class VenuesController extends Controller
             return;
         }
 
-        $todayMsk = now('Europe/Moscow')->toDateString();
-
-        // Один фильтр на оба запроса — «ближайшее» и «всего предстоящих»
-        // обязаны описывать одно и то же множество, иначе карточка начнёт
-        // противоречить сама себе.
-        $upcoming = fn () => Event::query()
-            ->visibleWeb()
-            ->whereIn('events.venue_id', $ids)
-            ->where(function ($w) use ($todayMsk) {
-                $w->where('events.start_time', '>=', $todayMsk)
-                    ->orWhere(function ($x) use ($todayMsk) {
-                        $x->whereNull('events.start_time')
-                            ->whereNotNull('events.start_date')
-                            ->where('events.start_date', '>=', $todayMsk);
-                    });
-            });
+        $upcoming = fn () => $this->upcomingEvents($ids);
 
         // Отдельным запросом, потому что COUNT(DISTINCT …) OVER (…) postgres
         // не умеет. Считаем события, а не сеансы: см. events_count в
@@ -501,23 +492,9 @@ class VenuesController extends Controller
 
         $byVenue = [];
         foreach ($rows as $r) {
-            $startAt = null;
-            if ($r->start_time !== null) {
-                // как WebEventResource: инстант сохраняем, отдаём в МСК с offset
-                $startAt = Carbon::parse($r->start_time)
-                    ->setTimezone('Europe/Moscow')
-                    ->toIso8601String();
-            }
-
             $byVenue[(int) $r->venue_id] = [
                 'total' => (int) ($totals[(int) $r->venue_id] ?? 0),
-                'next'  => [
-                    'id'             => (int) $r->id,
-                    'title'          => (string) $r->title,
-                    'start_at'       => $startAt,
-                    'start_date'     => $r->start_date !== null ? substr((string) $r->start_date, 0, 10) : null,
-                    'time_precision' => (string) ($r->time_precision ?? 'datetime'),
-                ],
+                'next'  => $this->eventPayload($r),
             ];
         }
 
@@ -526,6 +503,101 @@ class VenuesController extends Controller
             $v->setAttribute('upcoming_total', $hit['total'] ?? 0);
             $v->setAttribute('next_event_payload', $hit['next'] ?? null);
         }
+    }
+
+    /**
+     * Ближайшие события площадок для программки на карточке в поиске: по одному сеансу
+     * на событие, по дате. Иначе сеансы одного спектакля заняли бы всю программку.
+     *
+     * @param array<int, Venue> $venues
+     */
+    private function attachSchedule(array $venues, int $limit): void
+    {
+        $ids = array_map(fn ($v) => (int) $v->id, $venues);
+        if ($ids === []) {
+            return;
+        }
+
+        $firstSessions = $this->upcomingEvents($ids)
+            ->select(['events.venue_id', 'events.id', 'events.title', 'events.start_time', 'events.start_date', 'events.time_precision'])
+            ->selectRaw("ROW_NUMBER() OVER (
+                PARTITION BY events.venue_id, COALESCE(events.event_group_id::text, 'e' || events.id)
+                ORDER BY events.start_date ASC NULLS LAST, events.start_time ASC NULLS LAST, events.id ASC
+            ) AS rn_session");
+
+        $ranked = DB::query()
+            ->fromSub($firstSessions, 'f')
+            ->where('f.rn_session', 1)
+            ->select('f.*')
+            ->selectRaw('ROW_NUMBER() OVER (
+                PARTITION BY f.venue_id
+                ORDER BY f.start_date ASC NULLS LAST, f.start_time ASC NULLS LAST, f.id ASC
+            ) AS rn');
+
+        $rows = DB::query()->fromSub($ranked, 'r')->where('r.rn', '<=', $limit)->orderBy('r.rn')->get();
+
+        $byVenue = [];
+        foreach ($rows as $r) {
+            $byVenue[(int) $r->venue_id][] = $this->eventPayload($r);
+        }
+        foreach ($venues as $v) {
+            $v->setAttribute('schedule_payload', $byVenue[(int) $v->id] ?? []);
+        }
+    }
+
+    /**
+     * Предстоящие видимые события площадок, от полуночи сегодняшнего дня по МСК. Один фильтр
+     * на «ближайшее», «всего предстоящих» и программку: иначе карточка противоречит сама себе.
+     */
+    private function upcomingEvents(array $ids)
+    {
+        $todayMsk = now('Europe/Moscow')->toDateString();
+
+        return Event::query()
+            ->visibleWeb()
+            ->whereIn('events.venue_id', $ids)
+            ->where(function ($w) use ($todayMsk) {
+                $w->where('events.start_time', '>=', $todayMsk)
+                    ->orWhere(function ($x) use ($todayMsk) {
+                        $x->whereNull('events.start_time')
+                            ->whereNotNull('events.start_date')
+                            ->where('events.start_date', '>=', $todayMsk);
+                    });
+            });
+    }
+
+    /** @return array{id: int, title: string, start_at: ?string, start_date: ?string, time_precision: string} */
+    private function eventPayload(object $r): array
+    {
+        return [
+            'id'             => (int) $r->id,
+            'title'          => (string) $r->title,
+            // как WebEventResource: инстант сохраняем, отдаём в МСК с offset
+            'start_at'       => $r->start_time !== null
+                ? Carbon::parse($r->start_time)->setTimezone('Europe/Moscow')->toIso8601String()
+                : null,
+            'start_date'     => $r->start_date !== null ? substr((string) $r->start_date, 0, 10) : null,
+            'time_precision' => (string) ($r->time_precision ?? 'datetime'),
+        ];
+    }
+
+    /**
+     * Площадка по имени ищется тем же правилом, что события. Слово целиком в имени идёт
+     * раньше, чем внутри другого слова: по «театр» театры раньше кинотеатров.
+     */
+    private function whereNameMatches($query, SearchMatch $match): void
+    {
+        $name = 'public.ru_normalize(venues.name)';
+        [$like, $likeArgs] = $match->like($name);
+        $similar = $match->similar($name);
+
+        $query->where(function ($w) use ($like, $likeArgs, $similar) {
+            $w->whereRaw($like, $likeArgs);
+            if ($similar !== null) {
+                $w->orWhereRaw(...$similar);
+            }
+        });
+        $query->orderByRaw("CASE WHEN $name ~ ? THEN 0 ELSE 1 END", ['(^|[^[:alnum:]])'.$match->text]);
     }
 
     /**

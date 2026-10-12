@@ -24,7 +24,7 @@ class WebVenueResource extends JsonResource
 {
     public function toArray(Request $request): array
     {
-        return [
+        $out = [
             'id'              => (int) $this->id,
             'slug'            => (string) ($this->slug ?? ''),
             'name'            => (string) ($this->name ?? ''),
@@ -58,5 +58,13 @@ class WebVenueResource extends JsonResource
                 ? (int) round((float) $this->getAttribute('distance_m'))
                 : null,
         ];
+
+        // Программка для карточки в поиске, только при ?schedule=N. Каталог зовёт toArray()
+        // напрямую, и пропуск поля через when() там не срабатывает, поэтому ключ ставим сами.
+        if ($this->getAttribute('schedule_payload') !== null) {
+            $out['schedule'] = $this->getAttribute('schedule_payload');
+        }
+
+        return $out;
     }
 }
