@@ -26,6 +26,12 @@ class EventRepository
     // Опечатку ловит сравнение слов целиком: «консерт» и «концерт» дают 0.45, «мафия» и «магия» — 0.33.
     private const FUZZY_TYPO_THRESHOLD = 0.45;
 
+    // Одно и то же люди называют по-разному. Если слово запроса начинается с основы
+    // из группы, поиск ищет и остальные основы этой группы.
+    private const SEARCH_SYNONYMS = [
+        ['настолк', 'настольн', 'игротек'],
+    ];
+
     private const PAST_GRACE_HOURS = 1;
 
     /**
@@ -2422,34 +2428,55 @@ class EventRepository
 
         $q->leftJoin('communities as cm', 'cm.id', '=', 'events.community_id');
 
-        $like = '%'.$qNorm.'%';
+        $likes = $this->searchLikes($qNorm);
+        $anyLike = fn (string $col) => '('.implode(' OR ', array_fill(0, count($likes), "$col LIKE ?")).')';
         $token = $this->pickFuzzyToken($qNorm);
         $fuzzyOn = mb_strlen($token) >= self::FUZZY_MIN_LEN && $this->trgmEnabled() && $this->wordSimEnabled();
 
         $title = 'public.ru_normalize(events.title)';
         $org = 'public.ru_normalize(cm.name)';
+        $inTitle = $anyLike($title);
+        $inOrg = $anyLike($org);
         $titleSimilar = "(word_similarity(?, $title) >= ? OR strict_word_similarity(?, $title) >= ?)";
         $orgSimilar = "(word_similarity(?, $org) >= ? OR strict_word_similarity(?, $org) >= ?)";
         $sim = [$token, self::FUZZY_FORM_THRESHOLD, $token, self::FUZZY_TYPO_THRESHOLD];
 
-        $q->where(function ($w) use ($title, $org, $titleSimilar, $orgSimilar, $like, $sim, $fuzzyOn) {
-            $w->whereRaw("$title LIKE ?", [$like])
-                ->orWhereRaw("$org LIKE ?", [$like])
-                ->orWhereRaw('public.ru_normalize(events.description) LIKE ?', [$like])
-                ->orWhereRaw('public.ru_normalize(cm.description) LIKE ?', [$like]);
+        $q->where(function ($w) use ($inTitle, $inOrg, $anyLike, $titleSimilar, $orgSimilar, $likes, $sim, $fuzzyOn) {
+            $w->whereRaw($inTitle, $likes)
+                ->orWhereRaw($inOrg, $likes)
+                ->orWhereRaw($anyLike('public.ru_normalize(events.description)'), $likes)
+                ->orWhereRaw($anyLike('public.ru_normalize(cm.description)'), $likes);
             if ($fuzzyOn) {
                 $w->orWhereRaw($titleSimilar, $sim)->orWhereRaw($orgSimilar, $sim);
             }
         });
 
         if (! $fuzzyOn) {
-            return ["CASE WHEN $title LIKE ? THEN 0 WHEN $org LIKE ? THEN 2 ELSE 3 END", [$like, $like]];
+            return ["CASE WHEN $inTitle THEN 0 WHEN $inOrg THEN 2 ELSE 3 END", [...$likes, ...$likes]];
         }
 
         return [
-            "CASE WHEN $title LIKE ? THEN 0 WHEN $titleSimilar THEN 1 WHEN $org LIKE ? OR $orgSimilar THEN 2 ELSE 3 END",
-            [$like, ...$sim, $like, ...$sim],
+            "CASE WHEN $inTitle THEN 0 WHEN $titleSimilar THEN 1 WHEN $inOrg OR $orgSimilar THEN 2 ELSE 3 END",
+            [...$likes, ...$sim, ...$likes, ...$sim],
         ];
+    }
+
+    /** Шаблоны LIKE для запроса вместе с синонимами, см. SEARCH_SYNONYMS. */
+    private function searchLikes(string $qNorm): array
+    {
+        $likes = ['%'.$qNorm.'%'];
+        foreach (self::SEARCH_SYNONYMS as $group) {
+            foreach ($group as $stem) {
+                if (preg_match('~(?:^|\s)'.preg_quote($stem, '~').'~u', $qNorm)) {
+                    foreach ($group as $synonym) {
+                        $likes[] = '%'.$synonym.'%';
+                    }
+                    break;
+                }
+            }
+        }
+
+        return array_values(array_unique($likes));
     }
 
     private function trgmEnabled(): bool

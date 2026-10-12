@@ -174,17 +174,19 @@ class WebEventsTest extends TestCase
         ]);
     }
 
-    public static function similarWordCases(): array
+    public static function searchCases(): array
     {
         return [
             'другая форма слова находится' => ['настолки', 'Вечер настольных игр', 'Ветер, куда нас несёт?'],
             'опечатка прощается' => ['консерт', 'Концерт хора', 'Занятия в консультационном центре'],
             'общее начало слова не в счёт' => ['мафия', 'Воронежская мафия', 'Клод Моне. Магия воды и света'],
+            'настолки находят игротеку' => ['настолки', 'Игротека в Котокафе', 'Дискотека'],
+            'игротека находит настольные игры' => ['игротека', 'Фестиваль настольных игр', 'Дискотека'],
         ];
     }
 
-    #[DataProvider('similarWordCases')]
-    public function test_search_tells_similar_word_from_word_with_the_same_beginning(string $q, string $found, string $other): void
+    #[DataProvider('searchCases')]
+    public function test_search_finds_the_matching_event_and_not_the_lookalike(string $q, string $found, string $other): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $community = $this->createCommunity($vrn->id, 'Организатор');
