@@ -73,6 +73,7 @@ class VenuesController extends Controller
         $match    = SearchMatch::from(is_string($rawQ) ? $rawQ : null);
         $kind     = trim((string) $request->input('kind', ''));
         $schedule = $this->intInput($request, 'schedule', 0, 0, 8);
+        $detail   = $request->boolean('detail');
 
         $query = $this->baseQuery()
             ->when($cityId !== null, fn ($qq) => $qq->where('venues.city_id', $cityId))
@@ -87,6 +88,13 @@ class VenuesController extends Controller
         $this->attachUpcoming($page->items());
         if ($schedule > 0) {
             $this->attachSchedule($page->items(), $schedule);
+        }
+        // Поиск показывает единственную подошедшую площадку шапкой, как на её странице.
+        if ($detail && $page->total() === 1) {
+            $venue = $page->items()[0];
+            $venue->setAttribute('genre_profile', $this->genreProfile((int) $venue->id));
+            $venue->setAttribute('frames', $this->pastFrames((int) $venue->id, 3));
+            $this->attachRhythm([$venue]);
         }
 
         return response()->json([
@@ -543,6 +551,32 @@ class VenuesController extends Controller
         foreach ($venues as $v) {
             $v->setAttribute('schedule_payload', $byVenue[(int) $v->id] ?? []);
         }
+    }
+
+    /**
+     * Картинки прошедших событий площадки, свежие первыми и без повторов: одна картинка
+     * часто стоит у всей серии.
+     *
+     * @return list<string>
+     */
+    private function pastFrames(int $venueId, int $limit): array
+    {
+        [$past, $pastAt] = EventRepository::pastExpression();
+
+        return Event::query()
+            ->visibleWeb()
+            ->where('events.venue_id', $venueId)
+            ->whereRaw($past, $pastAt)
+            ->join('event_sources as es', 'es.event_id', '=', 'events.id')
+            ->whereNotNull('es.images')
+            ->whereRaw('json_array_length(es.images) > 0')
+            ->selectRaw("es.images->>0 as img, MAX(COALESCE(events.start_time, events.start_date::timestamp)) as last_at")
+            ->groupByRaw('es.images->>0')
+            ->orderByDesc('last_at')
+            ->limit($limit)
+            ->pluck('img')
+            ->map(fn ($u) => (string) $u)
+            ->all();
     }
 
     /**

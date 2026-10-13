@@ -68,6 +68,13 @@ class WebVenueResource extends JsonResource
             $out['schedule'] = $this->getAttribute('schedule_payload');
         }
 
+        // Шапка единственной площадки в поиске, только при ?detail=1. rhythm — null, когда событий не было.
+        if (is_array($this->getAttribute('genre_profile'))) {
+            $out['rhythm'] = $this->getAttribute('rhythm');
+            $out['genre_profile'] = $this->getAttribute('genre_profile');
+            $out['frames'] = $this->getAttribute('frames') ?? [];
+        }
+
         return $out;
     }
 }

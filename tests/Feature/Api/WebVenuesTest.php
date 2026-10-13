@@ -128,6 +128,23 @@ class WebVenuesTest extends TestCase
         $this->assertSame(['Кольцовский сквер', 'Парк «Динамо»'], array_column($data, 'name'));
     }
 
+    public function test_index_detail_describes_only_a_single_found_venue(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-12 10:00:00', 'Europe/Moscow'));
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = Community::create(['name' => 'Тест', 'city_id' => $vrn->id]);
+        $kramskoy = $this->createVenue($vrn->id, 'Музей Крамского', 'kramskoy');
+        $this->createVenue($vrn->id, 'Музей Бунина', 'bunin');
+        $past = $this->createEvent($vrn->id, $kramskoy->id, $community->id, 'Выставка', '2026-10-01 12:00:00');
+        $this->attachSourceWithImages($past->id, $community->id, ['https://img.test/frame.jpg']);
+
+        $one = $this->getJson('/api/web/venues?city_id='.$vrn->id.'&detail=1&q='.urlencode('крамского'))->json('data');
+        $many = $this->getJson('/api/web/venues?city_id='.$vrn->id.'&detail=1&q='.urlencode('музей'))->json('data');
+
+        $this->assertSame(['https://img.test/frame.jpg'], $one[0]['frames']);
+        $this->assertArrayNotHasKey('frames', $many[0]);
+    }
+
     public function test_index_schedule_lists_one_session_per_event_by_date(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-10-12 10:00:00', 'Europe/Moscow'));
