@@ -72,7 +72,6 @@ class VenuesController extends Controller
         $rawQ     = $request->input('q');
         $match    = SearchMatch::from(is_string($rawQ) ? $rawQ : null);
         $kind     = trim((string) $request->input('kind', ''));
-        $schedule = $this->intInput($request, 'schedule', 0, 0, 8);
         $detail   = $request->boolean('detail');
 
         $query = $this->baseQuery()
@@ -86,9 +85,6 @@ class VenuesController extends Controller
         $page = $query->paginate($perPage);
 
         $this->attachUpcoming($page->items());
-        if ($schedule > 0) {
-            $this->attachSchedule($page->items(), $schedule);
-        }
         // Поиск показывает единственную подошедшую площадку шапкой, как на её странице.
         if ($detail && $page->total() === 1) {
             $venue = $page->items()[0];
@@ -513,55 +509,20 @@ class VenuesController extends Controller
     }
 
     /**
-     * Ближайшие события площадок для программки на карточке в поиске: по одному сеансу
-     * на событие, по дате. Иначе сеансы одного спектакля заняли бы всю программку.
-     *
-     * @param array<int, Venue> $venues
-     */
-    private function attachSchedule(array $venues, int $limit): void
-    {
-        $ids = array_map(fn ($v) => (int) $v->id, $venues);
-        if ($ids === []) {
-            return;
-        }
-
-        $firstSessions = $this->upcomingEvents()
-            ->whereIn('events.venue_id', $ids)
-            ->select(['events.venue_id', 'events.id', 'events.title', 'events.start_time', 'events.start_date', 'events.time_precision'])
-            ->selectRaw("ROW_NUMBER() OVER (
-                PARTITION BY events.venue_id, COALESCE(events.event_group_id::text, 'e' || events.id)
-                ORDER BY events.start_date ASC NULLS LAST, events.start_time ASC NULLS LAST, events.id ASC
-            ) AS rn_session");
-
-        $ranked = DB::query()
-            ->fromSub($firstSessions, 'f')
-            ->where('f.rn_session', 1)
-            ->select('f.*')
-            ->selectRaw('ROW_NUMBER() OVER (
-                PARTITION BY f.venue_id
-                ORDER BY f.start_date ASC NULLS LAST, f.start_time ASC NULLS LAST, f.id ASC
-            ) AS rn');
-
-        $rows = DB::query()->fromSub($ranked, 'r')->where('r.rn', '<=', $limit)->orderBy('r.rn')->get();
-
-        $byVenue = [];
-        foreach ($rows as $r) {
-            $byVenue[(int) $r->venue_id][] = $this->eventPayload($r);
-        }
-        foreach ($venues as $v) {
-            $v->setAttribute('schedule_payload', $byVenue[(int) $v->id] ?? []);
-        }
-    }
-
-    /**
      * Картинки прошедших событий площадки, свежие первыми и без повторов: одна картинка
-     * часто стоит у всей серии.
+     * часто стоит у всей серии. Постеры будущих событий не берём, они и так видны в афише.
      *
      * @return list<string>
      */
     private function pastFrames(int $venueId, int $limit): array
     {
         [$past, $pastAt] = EventRepository::pastExpression();
+        $ahead = $this->upcomingEvents()
+            ->where('events.venue_id', $venueId)
+            ->join('event_sources as ues', 'ues.event_id', '=', 'events.id')
+            ->whereRaw('ues.images->>0 IS NOT NULL')
+            ->selectRaw('ues.images->>0')
+            ->toBase();
 
         return Event::query()
             ->visibleWeb()
@@ -570,6 +531,7 @@ class VenuesController extends Controller
             ->join('event_sources as es', 'es.event_id', '=', 'events.id')
             ->whereNotNull('es.images')
             ->whereRaw('json_array_length(es.images) > 0')
+            ->whereRaw('es.images->>0 NOT IN ('.$ahead->toSql().')', $ahead->getBindings())
             ->selectRaw("es.images->>0 as img, MAX(COALESCE(events.start_time, events.start_date::timestamp)) as last_at")
             ->groupByRaw('es.images->>0')
             ->orderByDesc('last_at')

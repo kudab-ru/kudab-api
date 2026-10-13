@@ -62,13 +62,8 @@ class WebVenueResource extends JsonResource
                 : null,
         ];
 
-        // Программка для карточки в поиске, только при ?schedule=N. Каталог зовёт toArray()
-        // напрямую, и пропуск поля через when() там не срабатывает, поэтому ключ ставим сами.
-        if ($this->getAttribute('schedule_payload') !== null) {
-            $out['schedule'] = $this->getAttribute('schedule_payload');
-        }
-
         // Шапка единственной площадки в поиске, только при ?detail=1. rhythm — null, когда событий не было.
+        // Каталог зовёт toArray() напрямую, и пропуск поля через when() там не срабатывает: ключи ставим сами.
         if (is_array($this->getAttribute('genre_profile'))) {
             $out['rhythm'] = $this->getAttribute('rhythm');
             $out['genre_profile'] = $this->getAttribute('genre_profile');
