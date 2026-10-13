@@ -162,6 +162,11 @@ class EventsController extends Controller
         if (($result['preferredTotal'] ?? null) !== null) {
             $meta['preferred_total'] = $result['preferredTotal'];
         }
+        // тема запроса и сколько событий добрано только по ней
+        if (($result['topic'] ?? null) !== null) {
+            $meta['topic'] = $result['topic'];
+            $searchFilters['topic_total'] = $result['topic']['total'];
+        }
         // сайт подставляет это слово в поле поиска
         if ($corrected !== null) {
             $meta['corrected_q'] = $corrected;

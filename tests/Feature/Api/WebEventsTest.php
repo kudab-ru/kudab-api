@@ -252,6 +252,24 @@ class WebEventsTest extends TestCase
         $this->assertSame(['Ярмарка'], array_column($data, 'title'));
     }
 
+    public function test_search_by_topic_word_adds_events_of_the_topic_after_word_matches(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Афиша');
+        $music = $this->createInterest('Музыка', 'music');
+        DB::table('interest_aliases')->insert(['interest_id' => $music->id, 'alias' => 'концерт']);
+        $artist = $this->createEvent($vrn->id, $community->id, 'Cream Soda', now()->addDay());
+        $this->tagEventLeafOnly($artist->id, $music->id);
+        $this->createEvent($vrn->id, $community->id, 'Концерт хора', now()->addDays(2));
+        $this->createEvent($vrn->id, $community->id, 'Лекция о кометах', now()->addDays(3));
+
+        $response = $this->getJson('/api/web/events?city=voronezh&grouped=1&grouped_by_post=1&q='.urlencode('концерт'))->assertOk();
+
+        $this->assertSame(['Концерт хора', 'Cream Soda'], array_column($response->json('data'), 'title'));
+        $this->assertSame([false, true], array_column($response->json('data'), 'by_topic'));
+        $response->assertJsonPath('meta.topic', ['slug' => 'music', 'name' => 'Музыка', 'total' => 1]);
+    }
+
     public function test_search_puts_title_match_above_description_match_with_photo(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);

@@ -435,10 +435,11 @@ class EventRepository
     }
 
     /**
-     * @return array{page: LengthAwarePaginator, totalEvents: int|null}
+     * @return array{page: LengthAwarePaginator, totalEvents: int|null, preferredTotal: int|null, topic: array{slug: string, name: string, total: int|null}|null}
      *                                                                  - page: пагинатор reps (используется для hasMore-логики на фронте)
      *                                                                  - totalEvents: количество events до схлопывания (для display-счётчика),
      *                                                                  либо null если ни grouped, ни grouped_by_post не были запрошены
+     *                                                                  - topic: тема запроса и сколько событий добрано только по ней
      */
     public function paginateUpcomingWeb(array $filters, int $perPage = 20): array
     {
@@ -555,7 +556,12 @@ class EventRepository
             $q->where('events.venue_id', (int) $filters['venue_id']);
         }
 
-        $match = $this->applyTextSearch($q, $filters['q'] ?? null);
+        // Слово-тема («концерт») добирает события своей темы и без слова: последней ступенью, сайт
+        // отделяет их строкой «ещё по теме». С выбранной темой, колесом или своим порядком не добираем.
+        $topic = empty($filters['interests']) && empty($filters['sort']) && ! $preferIds
+            ? $this->searchTopic($filters['q'] ?? null)
+            : null;
+        $match = $this->applyTextSearch($q, $filters['q'] ?? null, $topic['ids'] ?? []);
 
         if (! empty($filters['interests']) && is_array($filters['interests'])) {
             // Double-write: input — либо int[] (legacy), либо slug[] (Этап 2,
@@ -928,6 +934,10 @@ class EventRepository
         $events = $paginator->getCollection();
         $this->hydrateImages($events);
 
+        if ($topic !== null) {
+            $events->each(fn (Event $e) => $e->setAttribute('__by_topic', (int) $e->getAttribute('__match_rank') === 4));
+        }
+
         $events->each(function (Event $e) {
             $e->makeHidden([
                 '__past_rank',
@@ -937,6 +947,7 @@ class EventRepository
                 '__match_rank',
                 '__top_score',
                 '__prefer_rank',
+                '__by_topic',
             ]);
         });
 
@@ -946,15 +957,22 @@ class EventRepository
 
         $totalEvents = null;
         $eligibleEventIds = null;
+        $topicTotal = null;
         if ($uncollapsedQ !== null) {
             // Snapshot used both для count (`total_events`) и для siblings —
             // гарантирует консистентность: события в siblings — subset тех
             // же, что попали в `total_events`. Без этого siblings могли
             // содержать events из другого города / категории / blacklisted
             // source, и фронтенд показывал «84 из 78».
-            $eligibleEventIds = $uncollapsedQ->toBase()->pluck('events.id')
-                ->map(fn ($v) => (int) $v)
-                ->all();
+            if ($topic !== null) {
+                $ranks = $uncollapsedQ->toBase()->pluck('__match_rank', 'id');
+                $eligibleEventIds = $ranks->keys()->map(fn ($v) => (int) $v)->all();
+                $topicTotal = $ranks->filter(fn ($r) => (int) $r === 4)->count();
+            } else {
+                $eligibleEventIds = $uncollapsedQ->toBase()->pluck('events.id')
+                    ->map(fn ($v) => (int) $v)
+                    ->all();
+            }
             $totalEvents = count($eligibleEventIds);
         }
 
@@ -981,7 +999,12 @@ class EventRepository
                 ->count('event_id');
         }
 
-        return ['page' => $page, 'totalEvents' => $totalEvents, 'preferredTotal' => $preferredTotal];
+        return [
+            'page' => $page,
+            'totalEvents' => $totalEvents,
+            'preferredTotal' => $preferredTotal,
+            'topic' => $topic === null ? null : ['slug' => $topic['slug'], 'name' => $topic['name'], 'total' => $topicTotal],
+        ];
     }
 
     /**
@@ -2426,11 +2449,13 @@ class EventRepository
 
     /**
      * Отбирает события по строке поиска и возвращает выражение «насколько подходит»: 0 — слово в названии,
-     * 1 — похожее слово в названии, 2 — слово или похожее в имени организатора или площадки, 3 — только в описании.
+     * 1 — похожее слово в названии, 2 — слово или похожее в имени организатора или площадки, 3 — только в описании,
+     * 4 — слова нет нигде, но у события тема из $topicIds.
      *
+     * @param  list<int>  $topicIds
      * @return array{0: string, 1: array<int, mixed>}|null [sql, параметры]; null — запроса нет
      */
-    private function applyTextSearch($q, ?string $query): ?array
+    private function applyTextSearch($q, ?string $query, array $topicIds = []): ?array
     {
         $match = SearchMatch::from($query);
         if ($match === null) {
@@ -2457,21 +2482,50 @@ class EventRepository
         }
         [$place, $placeArgs] = $match->place($byName, $byNameArgs, 'vn.kind');
 
-        $q->where(function ($w) use ($inTitle, $titleArgs, $place, $placeArgs, $inText, $textArgs, $titleSimilar) {
+        $q->where(function ($w) use ($inTitle, $titleArgs, $place, $placeArgs, $inText, $textArgs, $titleSimilar, $topicIds) {
             $w->whereRaw($inTitle, $titleArgs)
                 ->orWhereRaw($place, $placeArgs)
                 ->orWhereRaw($inText, $textArgs);
             if ($titleSimilar !== null) {
                 $w->orWhereRaw(...$titleSimilar);
             }
+            if ($topicIds !== []) {
+                $w->orWhereIn('events.id', DB::table('event_interest')->select('event_id')->whereIn('interest_id', $topicIds));
+            }
         });
 
         $similarTitle = $titleSimilar !== null ? "WHEN {$titleSimilar[0]} THEN 1 " : '';
+        [$rest, $restArgs] = $topicIds !== [] ? ["WHEN $inText THEN 3 ELSE 4", $textArgs] : ['ELSE 3', []];
 
         return [
-            "CASE WHEN $inTitle THEN 0 {$similarTitle}WHEN $place THEN 2 ELSE 3 END",
-            [...$titleArgs, ...($titleSimilar[1] ?? []), ...$placeArgs],
+            "CASE WHEN $inTitle THEN 0 {$similarTitle}WHEN $place THEN 2 $rest END",
+            [...$titleArgs, ...($titleSimilar[1] ?? []), ...$placeArgs, ...$restArgs],
         ];
+    }
+
+    /**
+     * Тема, которую называет весь запрос: «концерт» — музыка, «спектакль» — театр. Слова тем лежат
+     * в `interest_aliases`, по ним же парсер ставит темы событиям.
+     *
+     * @return array{slug: string, name: string, ids: list<int>}|null
+     */
+    private function searchTopic(?string $query): ?array
+    {
+        $match = SearchMatch::from($query);
+        if ($match === null) {
+            return null;
+        }
+
+        $words = fn (string $column) => "trim(regexp_replace(public.ru_normalize($column), '[^[:alnum:]]+', ' ', 'g')) = ?";
+        $topic = DB::table('interests as i')
+            ->leftJoin('interest_aliases as a', 'a.interest_id', '=', 'i.id')
+            ->where(fn ($w) => $w->whereRaw($words('a.alias'), [$match->text])->orWhereRaw($words('i.name'), [$match->text]))
+            ->orderBy('i.id')
+            ->first(['i.slug', 'i.name']);
+
+        $ids = $topic === null ? [] : $this->expandInterestSlugsToIds([(string) $topic->slug]);
+
+        return $ids === [] ? null : ['slug' => (string) $topic->slug, 'name' => (string) $topic->name, 'ids' => $ids];
     }
 
     private function excludeBlacklistedSources($q): void

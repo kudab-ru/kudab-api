@@ -134,6 +134,12 @@ class WebEventResource extends JsonResource
             $out['preferred'] = (int) $preferRank === 0;
         }
 
+        // только у поиска словом-темой: true — событие подошло по теме, слова в нём нет
+        $byTopic = $this->getAttribute('__by_topic');
+        if ($byTopic !== null) {
+            $out['by_topic'] = (bool) $byTopic;
+        }
+
         // Есть только у карточек блоков «что дальше», см. NextEventsPicker.
         $reason = $this->getAttribute('rec_reason');
         if (is_string($reason) && $reason !== '') {
