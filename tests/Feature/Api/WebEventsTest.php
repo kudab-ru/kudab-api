@@ -330,42 +330,20 @@ class WebEventsTest extends TestCase
         $this->assertSame([['Вечер настольных игр', 2], ['Игротека', 1]], array_map(fn ($e) => [$e['title'], $e['series_sessions']], $data));
     }
 
-    public function test_suggest_completes_the_word_from_upcoming_titles_merging_forms(): void
+    public function test_search_vocab_merges_word_forms_of_upcoming_titles(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $org = $this->createCommunity($vrn->id, 'Афиша');
         $this->createEvent($vrn->id, $org->id, 'Театр кукол «Сказка»', now()->addDay());
         $this->createEvent($vrn->id, $org->id, 'Театр кукол: Репка', now()->addDays(2));
         $this->createEvent($vrn->id, $org->id, 'Премьера театра', now()->addDays(3));
-        $this->createEvent($vrn->id, $org->id, 'Театральный капустник', now()->addDays(4));
         $this->createEvent($vrn->id, $org->id, 'Театрализованный бал', now()->subDay());
 
-        $words = $this->getJson('/api/web/search/suggest?city=voronezh&q='.urlencode('теа'))->assertOk()->json('words');
+        $vocab = $this->getJson('/api/web/search/vocab?city=voronezh')->assertOk()->json();
 
-        $this->assertSame(['театр', 'театр кукол', 'театральный'], $words);
-    }
-
-    public static function topicSuggestCases(): array
-    {
-        return [
-            'начало слова в названии темы' => ['игр', ['quiz-games']],
-            'середина слова не в счёт' => ['кус', []],
-            'начало слова темы' => ['конц', ['music']],
-        ];
-    }
-
-    #[DataProvider('topicSuggestCases')]
-    public function test_suggest_offers_the_topic_named_by_the_typed_word(string $q, array $slugs): void
-    {
-        $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
-        $this->createInterest('Квизы и игры', 'quiz-games');
-        $this->createInterest('Выставки и искусство', 'exhibitions');
-        $music = $this->createInterest('Музыка', 'music');
-        DB::table('interest_aliases')->insert(['interest_id' => $music->id, 'alias' => 'концерт']);
-
-        $topics = $this->getJson('/api/web/search/suggest?city=voronezh&q='.urlencode($q))->assertOk()->json('topics');
-
-        $this->assertSame($slugs, array_column($topics, 'slug'));
+        $this->assertSame([['театр', 3], ['кукол', 2]], array_slice($vocab['words'], 0, 2));
+        $this->assertSame([['театр кукол', 2]], $vocab['pairs']);
+        $this->assertNotContains('театрализованный', array_column($vocab['words'], 0));
     }
 
     public function test_search_typed_in_english_layout_finds_the_russian_word(): void

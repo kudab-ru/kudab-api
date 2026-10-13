@@ -10,12 +10,12 @@ use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Cache;
 
 /**
- * Слова и сочетания из названий будущих событий и имён площадок города. Из них автодополнение
- * поиска дописывает набранное слово, поэтому любой вариант что-то находит.
+ * Слова и сочетания из названий будущих событий и имён площадок города. Из них сайт дописывает
+ * набираемое в поиске слово, поэтому любой вариант что-то находит.
  */
 final class SearchVocabulary
 {
-    // Подсказки зовутся на каждую паузу в наборе, а афиша за десять минут почти не меняется.
+    // Афиша за десять минут почти не меняется.
     private const TTL = 600;
 
     // Сочетание из одного названия ещё не сочетание, а кусок этого названия.
@@ -29,6 +29,9 @@ final class SearchVocabulary
         'эта', 'эти', 'тот', 'том', 'той', 'год', 'года', 'днём', 'днем',
     ];
 
+    // Формы с такими окончаниями в подсказке звучат странно («музыкальном»): берём другую форму, если она есть.
+    private const OBLIQUE = ['ого', 'его', 'ому', 'ему', 'ыми', 'ими', 'ами', 'ями', 'ом', 'ем', 'ым', 'им', 'ах', 'ях', 'ов', 'ев'];
+
     // Снимается одно, самое длинное окончание: «выставка», «выставки» и «выставке» сводятся в одно слово.
     private const ENDINGS = [
         'ого', 'его', 'ому', 'ему', 'ыми', 'ими', 'ами', 'ями',
@@ -38,45 +41,25 @@ final class SearchVocabulary
     ];
 
     /**
-     * Варианты для набранного, частые первыми: одно слово дописывается словом или сочетанием,
-     * второе — только до сочетания из афиши. Поиск ищет фразу целиком, и выдуманная пара
-     * («театр кулаков») не нашла бы ничего. Третье слово не дописываем по той же причине.
+     * Словарь города: формы слова сведены, у каждого слова и сочетания самая частая форма
+     * и число названий. Сочетание — только встреченное хотя бы в двух разных названиях:
+     * поиск ищет фразу целиком, и случайная пара не нашла бы ничего.
      *
-     * @return list<string>
+     * @return array{words: list<array{0: string, 1: int}>, pairs: list<array{0: string, 1: int}>}
      */
-    public static function complete(int $cityId, string $typed, int $limit = 6): array
+    public static function forCity(int $cityId): array
     {
-        $words = self::words($typed);
-        if ($words === [] || count($words) > 2 || preg_match('~\s$~u', $typed)) {
-            return [];
-        }
-        $prefix = self::key((string) array_pop($words));
-        if (mb_strlen($prefix) < 2) {
-            return [];
-        }
-        $prev = $words === [] ? null : self::stem(self::key($words[0]));
+        return Cache::remember("search-vocab:v2:$cityId", self::TTL, function () use ($cityId) {
+            $vocab = self::build($cityId);
+            $sorted = function (array $items): array {
+                $items = array_values($items);
+                usort($items, fn ($a, $b) => $b[1] <=> $a[1]);
 
-        $vocab = Cache::remember("search-vocab:$cityId", self::TTL, fn () => self::build($cityId));
-        $found = [];
-        foreach ($vocab['pairs'] as $key => [$text, $n]) {
-            [$first, $second] = explode(' ', $key, 2);
-            $fits = $prev === null
-                ? str_starts_with($key, $prefix)
-                : self::stem($first) === $prev && str_starts_with($second, $prefix);
-            if ($fits) {
-                $found[$text] = $n;
-            }
-        }
-        if ($prev === null) {
-            foreach ($vocab['words'] as $key => [$text, $n]) {
-                if ($key !== $prefix && str_starts_with($key, $prefix)) {
-                    $found[$text] ??= $n;
-                }
-            }
-        }
-        arsort($found);
+                return $items;
+            };
 
-        return array_slice(array_map('strval', array_keys($found)), 0, $limit);
+            return ['words' => $sorted($vocab['words']), 'pairs' => $sorted($vocab['pairs'])];
+        });
     }
 
     /** @return array{words: array<string, array{0: string, 1: int}>, pairs: array<string, array{0: string, 1: int}>} */
@@ -107,7 +90,7 @@ final class SearchVocabulary
             $seq = self::words((string) $title);
             $seenWord = [];
             $seenPair = [];
-            foreach ($seq as $i => $word) {
+            foreach ($seq as $i => [$word]) {
                 if (! self::useful($word)) {
                     continue;
                 }
@@ -116,8 +99,9 @@ final class SearchVocabulary
                     $seenWord[$stem] = true;
                     $forms[$stem][$word] = ($forms[$stem][$word] ?? 0) + 1;
                 }
-                $next = $seq[$i + 1] ?? null;
-                if ($next === null || ! self::useful($next)) {
+                // с косвенной формы сочетание не начинают: «музыкальном фестивале» обрывок фразы
+                [$next, $joined] = $seq[$i + 1] ?? [null, false];
+                if ($next === null || ! $joined || ! self::useful($next) || self::oblique($word)) {
                     continue;
                 }
                 $pair = $stem.' '.self::stem(self::key($next));
@@ -132,7 +116,7 @@ final class SearchVocabulary
     }
 
     /**
-     * Из форм одного слова — самая частая, с суммой по всем формам.
+     * Из форм одного слова — самая частая не косвенная, с суммой по всем формам.
      *
      * @param  array<string, array<string, int>>  $groups
      * @return array<string, array{0: string, 1: int}>
@@ -145,20 +129,46 @@ final class SearchVocabulary
             if ($n < $min) {
                 continue;
             }
-            arsort($forms);
-            $text = (string) array_key_first($forms);
-            $out[self::key($text)] = [$text, $n];
+            $texts = array_map('strval', array_keys($forms));
+            usort($texts, fn ($a, $b) => [self::oblique($a), $forms[$b]] <=> [self::oblique($b), $forms[$a]]);
+            $out[self::key($texts[0])] = [$texts[0], $n];
         }
 
         return $out;
     }
 
-    /** @return list<string> слова строчными, дефис внутри слова остаётся: «мастер-класс» одно слово */
+    private static function oblique(string $text): bool
+    {
+        $last = (string) preg_replace('~^.*\s~u', '', $text);
+        foreach (self::OBLIQUE as $end) {
+            if (str_ends_with($last, $end)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Слова строчными, дефис внутри слова остаётся: «мастер-класс» одно слово. Второе в паре —
+     * отделено ли слово от прошлого одним пробелом: через кавычку, точку или цифру сочетание
+     * не тянем, «Спектакль «Любовь и голуби»» не даёт «спектакль любовь».
+     *
+     * @return list<array{0: string, 1: bool}>
+     */
     private static function words(string $text): array
     {
-        preg_match_all('~\p{L}+(?:-\p{L}+)*~u', mb_strtolower($text), $m);
+        $lower = mb_strtolower($text);
+        preg_match_all('~\p{L}+(?:-\p{L}+)*~u', $lower, $m, PREG_OFFSET_CAPTURE);
+        $out = [];
+        $end = null;
+        foreach ($m[0] as [$word, $at]) {
+            $joined = $end !== null && preg_match('~^ +$~u', substr($lower, $end, $at - $end)) === 1;
+            $out[] = [$word, $joined];
+            $end = $at + strlen($word);
+        }
 
-        return $m[0];
+        return $out;
     }
 
     private static function useful(string $word): bool
