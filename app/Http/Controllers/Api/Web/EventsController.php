@@ -551,11 +551,16 @@ class EventsController extends Controller
      * GET /api/web/events/{id}/next
      * Блоки «что дальше» для страницы события: в этот день, на той же площадке и
      * похожее. Одно событие попадает только в один блок; у карточки бывает
-     * `reason` — короткая причина, почему она здесь.
+     * `reason` — короткая причина, почему она здесь. `prefer[]` — темы из колеса
+     * «Чего хочется?»: подходящее идёт выше.
      */
-    public function next(int $id): JsonResponse
+    public function next(int $id, Request $request): JsonResponse
     {
-        $res = $this->service->nextWeb($id);
+        $v = $request->validate([
+            'prefer'   => ['sometimes', 'array', 'max:20'],
+            'prefer.*' => ['string', 'max:64', 'regex:/^[a-z0-9-]+$/'],
+        ]);
+        $res = $this->service->nextWeb($id, array_values($v['prefer'] ?? []));
 
         return response()->json([
             'data' => [

@@ -20,12 +20,12 @@ class EventService
      *
      * @return array{day: ?string, same_day: EloquentCollection, companions: EloquentCollection, similar: EloquentCollection, companions_meta: ?array<string, mixed>}
      */
-    public function nextWeb(int $id): array
+    public function nextWeb(int $id, array $prefer = []): array
     {
         $pool = $this->repo->nextPool($id);
         $picked = $pool['base'] === null
             ? ['day' => null, 'same_day' => [], 'companions' => [], 'similar' => []]
-            : $this->picker->pick($pool['base'], $pool['items'], $pool['today'], $pool['scope']);
+            : $this->picker->pick($pool['base'], $pool['items'], $pool['today'], $pool['scope'], $prefer);
 
         $sections = [];
         foreach (['same_day', 'companions', 'similar'] as $name) {

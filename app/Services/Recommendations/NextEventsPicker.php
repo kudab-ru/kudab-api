@@ -25,6 +25,9 @@ final class NextEventsPicker
 
     private const FAMILY_AGE_LIMIT = 18;
 
+    // выбор в колесе «Чего хочется?» весит как общий жанр: заметно, но похожесть не перебивает
+    private const PREFER_BONUS = 1.0;
+
     // Слова для причины «тоже …». Темы без слова причину не дают.
     private const TOPIC_WORDS = [
         'music' => 'музыка',
@@ -71,9 +74,10 @@ final class NextEventsPicker
      * @param  array<string, mixed>  $base  признаки события, см. `EventRepository::nextPool`
      * @param  list<array<string, mixed>>  $items  признаки кандидатов
      * @param  'venue'|'community'|null  $companionsScope
+     * @param  list<string>  $prefer  темы глаголов, выбранных в колесе на афише
      * @return array{day: ?string, same_day: list<array{id: int, reason: ?string}>, companions: list<array{id: int, reason: ?string}>, similar: list<array{id: int, reason: ?string}>}
      */
-    public function pick(array $base, array $items, string $today, ?string $companionsScope): array
+    public function pick(array $base, array $items, string $today, ?string $companionsScope, array $prefer = []): array
     {
         $hasDay = $base['day'] !== null && $base['day'] >= $today;
         $refDay = $hasDay ? $base['day'] : $today;
@@ -81,7 +85,7 @@ final class NextEventsPicker
         $scored = [];
         foreach ($items as $e) {
             if ($this->fits($base, $e)) {
-                $scored[] = $e + $this->score($base, $e, $refDay);
+                $scored[] = $e + $this->score($base, $e, $refDay, $prefer);
             }
         }
 
@@ -165,7 +169,7 @@ final class NextEventsPicker
      *
      * @return array{score: float, reason: ?string, shares: bool}
      */
-    private function score(array $base, array $e, string $refDay): array
+    private function score(array $base, array $e, string $refDay, array $prefer): array
     {
         $shared = array_values(array_intersect($base['topics'], $e['topics']));
         $union = count(array_unique(array_merge($base['topics'], $e['topics'])));
@@ -194,7 +198,8 @@ final class NextEventsPicker
             + ($e['photo'] ? 0.3 : 0.0)
             - ($e['gray'] ? 0.3 : 0.0)
             + ($e['day'] !== null ? 1.0 / (1.0 + abs($this->daysBetween($refDay, $e['day'])) / 3.0) : 0.0)
-            + $sameDayHours;
+            + $sameDayHours
+            + (array_intersect($e['topics'], $prefer) !== [] ? self::PREFER_BONUS : 0.0);
 
         return [
             'score' => $score,

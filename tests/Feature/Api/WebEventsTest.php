@@ -1375,6 +1375,32 @@ class WebEventsTest extends TestCase
             ->assertJsonPath('data.same_day.1.title', 'Утренний спектакль');
     }
 
+    public function test_next_same_day_lifts_topics_chosen_on_the_wheel(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 3, 22, 9, 0, 0, 'Europe/Moscow'));
+
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $music = $this->createInterest('Музыка', 'music');
+        $theatre = $this->createInterest('Театр', 'theatre');
+        $standup = $this->createInterest('Стендап', 'standup');
+
+        $base = $this->createEvent($msk->id, $community->id, 'Джаз в саду', Carbon::create(2026, 3, 22, 19, 0, 0, 'Europe/Moscow')->utc());
+        $this->tagEventLeafOnly($base->id, $music->id);
+        $play = $this->createEvent($msk->id, $community->id, 'Дневной спектакль', Carbon::create(2026, 3, 22, 12, 0, 0, 'Europe/Moscow')->utc());
+        $this->tagEventLeafOnly($play->id, $theatre->id);
+        $comic = $this->createEvent($msk->id, $community->id, 'Утренний стендап', Carbon::create(2026, 3, 22, 10, 0, 0, 'Europe/Moscow')->utc());
+        $this->tagEventLeafOnly($comic->id, $standup->id);
+
+        $this->getJson("/api/web/events/{$base->id}/next")
+            ->assertOk()
+            ->assertJsonPath('data.same_day.*.title', ['Дневной спектакль', 'Утренний стендап']);
+
+        $this->getJson("/api/web/events/{$base->id}/next?prefer[]=standup")
+            ->assertOk()
+            ->assertJsonPath('data.same_day.*.title', ['Утренний стендап', 'Дневной спектакль']);
+    }
+
     public function test_next_skips_the_event_itself_written_by_another_source(): void
     {
         Carbon::setTestNow(Carbon::create(2026, 3, 22, 9, 0, 0, 'Europe/Moscow'));
