@@ -74,19 +74,6 @@ final class SearchMatch
     }
 
     /**
-     * Слово колонки начинается со слова запроса или основы из его группы. Для подсказок при
-     * наборе: «наст» должно дать «настольные», а не «монастырь».
-     *
-     * @return array{0: string, 1: list<string>} [sql, параметры]
-     */
-    public function wordStart(string $column): array
-    {
-        $patterns = array_map(fn (string $like) => '(^|[^[:alnum:]])'.trim($like, '%'), $this->likes);
-
-        return ['('.implode(' OR ', array_fill(0, count($patterns), "$column ~ ?")).')', $patterns];
-    }
-
-    /**
      * В колонке есть похожее слово: другая форма или опечатка. null — у короткого запроса
      * похожие слова не ищутся.
      *

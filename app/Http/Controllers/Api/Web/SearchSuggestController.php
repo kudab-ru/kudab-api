@@ -5,18 +5,19 @@ namespace App\Http\Controllers\Api\Web;
 use App\Http\Controllers\Controller;
 use App\Models\City;
 use App\Models\Interest;
-use App\Repositories\EventRepository;
 use App\Support\SearchMatch;
+use App\Support\SearchVocabulary;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 /**
- * GET /api/web/search/suggest — подсказки под полем поиска на сайте: события по названию и темы.
- * Площадки сайт берёт из /api/web/venues?q=, там то же правило и порядок.
+ * Автодополнение поиска на сайте: как дописать набираемое слово (`words`) и какая тема подходит
+ * (`topics`). Сайт ставит варианты в строку быстрых фильтров.
  */
 class SearchSuggestController extends Controller
 {
-    public function __construct(private readonly EventRepository $events) {}
+    // С двух букв подходит почти любая тема.
+    private const TOPIC_MIN_LEN = 3;
 
     public function __invoke(Request $request): JsonResponse
     {
@@ -25,35 +26,45 @@ class SearchSuggestController extends Controller
             'q' => ['required', 'string', 'max:100'],
         ]);
 
-        $match = SearchMatch::from($v['q']);
-        $filters = ['q' => $v['q']];
+        $cityId = null;
         if (! empty($v['city'])) {
             $cityId = City::query()->where('slug', $v['city'])->where('status', 'active')->value('id');
             if (! $cityId) {
-                return response()->json(['events' => [], 'topics' => []]);
+                return response()->json(['words' => [], 'topics' => []]);
             }
-            $filters['city_id'] = (int) $cityId;
         }
+        $match = SearchMatch::from($v['q']);
 
         return response()->json([
-            'events' => $this->events->suggestEvents($filters),
-            'topics' => $match !== null ? $this->topics($match) : [],
+            'words' => $cityId !== null ? SearchVocabulary::complete((int) $cityId, $v['q']) : [],
+            'topics' => $match !== null && mb_strlen($match->text) >= self::TOPIC_MIN_LEN ? $this->topics($match) : [],
         ]);
     }
 
     /**
-     * Темы верхнего уровня, где слово названия начинается с запроса: «игр» даёт «Квизы и игры»,
-     * а «из» не даёт. Нажатие на тему ставит фильтр темы вместо поиска словом.
+     * Тема, где слово названия начинается с набранного («игр» — «Квизы и игры»), а если такой
+     * нет, тема со словом, которое с него начинается («конц» — «Музыка» по слову «концерт»).
+     * Нажатие ставит фильтр темы.
      *
      * @return list<array{slug: string, name: string}>
      */
     private function topics(SearchMatch $match): array
     {
+        $byName = ['public.ru_normalize(interests.name) ~ ?', ['(^|[^[:alnum:]])'.$match->text]];
+        $words = "trim(regexp_replace(public.ru_normalize(%s), '[^[:alnum:]]+', ' ', 'g'))";
+
         return Interest::query()
-            ->whereNull('parent_id')
-            ->whereRaw('public.ru_normalize(name) ~ ?', ['(^|[^[:alnum:]])'.$match->text])
-            ->orderBy('id')
-            ->limit(2)
+            ->where(function ($w) use ($match, $words, $byName) {
+                $w->whereRaw(...$byName)
+                    ->orWhereExists(fn ($a) => $a->selectRaw('1')
+                        ->from('interest_aliases as a')
+                        ->whereColumn('a.interest_id', 'interests.id')
+                        ->whereRaw(sprintf($words, 'a.alias').' LIKE ?', [$match->text.'%']));
+            })
+            ->orderByRaw("CASE WHEN {$byName[0]} THEN 0 ELSE 1 END", $byName[1])
+            ->orderByRaw('interests.parent_id IS NOT NULL')
+            ->orderBy('interests.id')
+            ->limit(1)
             ->get(['slug', 'name'])
             ->map(fn (Interest $i) => ['slug' => (string) $i->slug, 'name' => (string) $i->name])
             ->all();

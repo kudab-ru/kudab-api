@@ -330,39 +330,38 @@ class WebEventsTest extends TestCase
         $this->assertSame([['Вечер настольных игр', 2], ['Игротека', 1]], array_map(fn ($e) => [$e['title'], $e['series_sessions']], $data));
     }
 
-    public function test_suggest_lists_upcoming_events_by_word_start_once_per_series(): void
+    public function test_suggest_completes_the_word_from_upcoming_titles_merging_forms(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
-        $org = $this->createCommunity($vrn->id, 'Котокафе');
-        $first = $this->createEvent($vrn->id, $org->id, 'Вечер настольных игр', now()->addDay());
-        $second = $this->createEvent($vrn->id, $org->id, 'Вечер настольных игр', now()->addDays(8));
-        $group = DB::table('event_groups')->insertGetId([
-            'community_id' => $org->id, 'city_id' => $vrn->id, 'group_key' => 'eg:test:games',
-            'title_norm' => 'вечер настольных игр', 'created_at' => now(), 'updated_at' => now(),
-        ]);
-        DB::table('events')->whereIn('id', [$first->id, $second->id])->update(['event_group_id' => $group]);
-        $this->createEvent($vrn->id, $org->id, 'Настольный турнир', now()->subDay());
-        $this->createEvent($vrn->id, $org->id, 'Концерт хора Валаамского монастыря', now()->addDays(2));
+        $org = $this->createCommunity($vrn->id, 'Афиша');
+        $this->createEvent($vrn->id, $org->id, 'Театр кукол «Сказка»', now()->addDay());
+        $this->createEvent($vrn->id, $org->id, 'Театр кукол: Репка', now()->addDays(2));
+        $this->createEvent($vrn->id, $org->id, 'Премьера театра', now()->addDays(3));
+        $this->createEvent($vrn->id, $org->id, 'Театральный капустник', now()->addDays(4));
+        $this->createEvent($vrn->id, $org->id, 'Театрализованный бал', now()->subDay());
 
-        $events = $this->getJson('/api/web/search/suggest?city=voronezh&q='.urlencode('наст'))->assertOk()->json('events');
+        $words = $this->getJson('/api/web/search/suggest?city=voronezh&q='.urlencode('теа'))->assertOk()->json('words');
 
-        $this->assertSame([[$first->id, 'Вечер настольных игр']], array_map(fn ($e) => [$e['id'], $e['title']], $events));
+        $this->assertSame(['театр', 'театр кукол', 'театральный'], $words);
     }
 
     public static function topicSuggestCases(): array
     {
         return [
             'начало слова в названии темы' => ['игр', ['quiz-games']],
-            'середина слова не в счёт' => ['из', []],
+            'середина слова не в счёт' => ['кус', []],
+            'начало слова темы' => ['конц', ['music']],
         ];
     }
 
     #[DataProvider('topicSuggestCases')]
-    public function test_suggest_offers_topics_whose_word_starts_with_the_query(string $q, array $slugs): void
+    public function test_suggest_offers_the_topic_named_by_the_typed_word(string $q, array $slugs): void
     {
         $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $this->createInterest('Квизы и игры', 'quiz-games');
         $this->createInterest('Выставки и искусство', 'exhibitions');
+        $music = $this->createInterest('Музыка', 'music');
+        DB::table('interest_aliases')->insert(['interest_id' => $music->id, 'alias' => 'концерт']);
 
         $topics = $this->getJson('/api/web/search/suggest?city=voronezh&q='.urlencode($q))->assertOk()->json('topics');
 
