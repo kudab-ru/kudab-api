@@ -2411,26 +2411,29 @@ class EventRepository
             $byName .= " OR {$orgSimilar[0]} OR {$venueSimilar[0]}";
             $byNameArgs = [...$byNameArgs, ...$orgSimilar[1], ...$venueSimilar[1]];
         }
-        [$place, $placeArgs] = $match->place($byName, $byNameArgs, 'vn.kind');
 
-        $q->where(function ($w) use ($inTitle, $titleArgs, $place, $placeArgs, $inText, $textArgs, $titleSimilar, $topicIds) {
-            $w->whereRaw($inTitle, $titleArgs)
-                ->orWhereRaw($place, $placeArgs)
-                ->orWhereRaw($inText, $textArgs);
-            if ($titleSimilar !== null) {
-                $w->orWhereRaw(...$titleSimilar);
-            }
+        // Слово вида места («парк») ищет события в местах этого вида, а у места другого вида
+        // не подходит ничего: ни имя, ни название события («Централ Парк Вест» идёт в театре).
+        $kind = $match->venueKind();
+        $plain = "$inTitle OR $byName OR $inText".($titleSimilar !== null ? " OR {$titleSimilar[0]}" : '');
+        $plainArgs = [...$titleArgs, ...$byNameArgs, ...$textArgs, ...($titleSimilar[1] ?? [])];
+        [$words, $wordsArgs] = $match->place($plain, $plainArgs, 'vn.kind');
+
+        $q->where(function ($w) use ($words, $wordsArgs, $topicIds) {
+            $w->whereRaw($words, $wordsArgs);
             if ($topicIds !== []) {
                 $w->orWhereIn('events.id', DB::table('event_interest')->select('event_id')->whereIn('interest_id', $topicIds));
             }
         });
 
+        // В месте нужного вида событие подходит так же, как словом в названии.
+        [$first, $firstArgs] = $kind !== null ? ["$inTitle OR vn.kind = ?", [...$titleArgs, $kind]] : [$inTitle, $titleArgs];
         $similarTitle = $titleSimilar !== null ? "WHEN {$titleSimilar[0]} THEN 1 " : '';
         [$rest, $restArgs] = $topicIds !== [] ? ["WHEN $inText THEN 3 ELSE 4", $textArgs] : ['ELSE 3', []];
 
         return [
-            "CASE WHEN $inTitle THEN 0 {$similarTitle}WHEN $place THEN 2 $rest END",
-            [...$titleArgs, ...($titleSimilar[1] ?? []), ...$placeArgs, ...$restArgs],
+            "CASE WHEN $first THEN 0 {$similarTitle}WHEN $byName THEN 2 $rest END",
+            [...$firstArgs, ...($titleSimilar[1] ?? []), ...$byNameArgs, ...$restArgs],
         ];
     }
 

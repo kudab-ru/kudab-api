@@ -186,6 +186,7 @@ class WebEventsTest extends TestCase
             'игротека находит настольные игры' => ['игротека', 'Фестиваль настольных игр', 'Дискотека'],
             'квест находит quest' => ['квест', 'Quest «Тени Готэма»', 'Квартирник'],
             'стендап находит stand-up' => ['стендап', 'Большой Stand-up', 'Концерт хора'],
+            'вид места ищется целым словом' => ['бар', 'Вечер в баре', 'Спектакль «Добрый барин»'],
         ];
     }
 
@@ -242,10 +243,13 @@ class WebEventsTest extends TestCase
         $community = $this->createCommunity($vrn->id, 'Афиша');
         $square = $this->createVenue($vrn->id, 'Кольцовский сквер', 'skver');
         $cinema = $this->createVenue($vrn->id, 'Синема Парк', 'cinema-park');
+        $theatre = $this->createVenue($vrn->id, 'Никитинский театр', 'nikitinsky');
         DB::table('venues')->where('id', $square->id)->update(['kind' => 'Парки']);
         DB::table('venues')->where('id', $cinema->id)->update(['kind' => 'Кинотеатры']);
+        DB::table('venues')->where('id', $theatre->id)->update(['kind' => 'Сцены']);
         $this->createEvent($vrn->id, $community->id, 'Ярмарка', now()->addDay(), $square->id);
         $this->createEvent($vrn->id, $community->id, 'Чебурашка', now()->addDays(2), $cinema->id);
+        $this->createEvent($vrn->id, $community->id, 'Централ Парк Вест', now()->addDays(3), $theatre->id);
 
         $data = $this->getJson('/api/web/events?city=voronezh&q='.urlencode('парк'))->assertOk()->json('data');
 
