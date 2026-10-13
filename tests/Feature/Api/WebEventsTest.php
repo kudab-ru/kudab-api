@@ -785,6 +785,68 @@ class WebEventsTest extends TestCase
             ->assertJsonPath('data.title', 'Квиз про кино');
     }
 
+    public function test_random_draws_among_events_not_their_sessions(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Организатор');
+        $this->createEvent($vrn->id, $community->id, 'Концерт', now()->addDays(2));
+        $this->createSessions($vrn->id, $community->id, 'Пила', 30);
+
+        $concerts = 0;
+        for ($i = 0; $i < 30; $i++) {
+            $title = $this->getJson('/api/web/events/random?city=voronezh')->assertOk()->json('data.title');
+            $concerts += $title === 'Концерт' ? 1 : 0;
+        }
+
+        // поровну между двумя событиями; если тянуть по сеансам, концерт выпадает раз в 31
+        $this->assertGreaterThanOrEqual(5, $concerts);
+    }
+
+    public function test_random_skips_seen_event_with_all_its_sessions_then_starts_over(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Организатор');
+        [$started, $next] = $this->createSessions($vrn->id, $community->id, 'Пила', 3, now()->subMinutes(30));
+        $concert = $this->createEvent($vrn->id, $community->id, 'Концерт', now()->addDays(2));
+
+        $this->getJson("/api/web/events/random?city=voronezh&seen_ids[]={$started->id}")
+            ->assertOk()
+            ->assertJsonPath('data.title', 'Концерт')
+            ->assertJsonPath('meta.again', false);
+
+        $this->getJson("/api/web/events/random?city=voronezh&seen_ids[]={$started->id}&exclude_ids[]={$concert->id}")
+            ->assertOk()
+            ->assertJsonPath('data.id', $next->id)
+            ->assertJsonPath('data.group.count', 3)
+            ->assertJsonPath('meta.again', true);
+    }
+
+    public function test_random_takes_first_group_with_events_and_widens_to_whole_afisha(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Организатор');
+        $music = $this->createInterest('Музыка', 'music');
+        $this->createInterest('Стендап', 'standup');
+        $concert = $this->createEvent($vrn->id, $community->id, 'Концерт', now()->addDays(20));
+        $this->tagEventLeafOnly($concert->id, $music->id);
+
+        $week = [
+            'city' => 'voronezh',
+            'date_from' => now()->toIso8601String(),
+            'date_to' => now()->addDays(6)->toIso8601String(),
+            'groups' => ['standup', 'music'],
+        ];
+
+        $this->getJson('/api/web/events/random?'.http_build_query($week))
+            ->assertOk()
+            ->assertJsonPath('data', null);
+
+        $this->getJson('/api/web/events/random?'.http_build_query($week + ['widen' => 1]))
+            ->assertOk()
+            ->assertJsonPath('data.title', 'Концерт')
+            ->assertJsonPath('meta.group', 1);
+    }
+
     /* ===================== related (Interests Этап 3) ===================== */
 
     public function test_related_ranks_by_shared_interest_count(): void
@@ -1682,6 +1744,32 @@ class WebEventsTest extends TestCase
         $event->save();
 
         return $event;
+    }
+
+    /**
+     * Сеансы одного события через час друг от друга, связанные одной группой, как у квеста.
+     *
+     * @return list<Event>
+     */
+    private function createSessions(int $cityId, int $communityId, string $title, int $count, ?Carbon $from = null): array
+    {
+        $from ??= now()->addHour();
+        $events = [];
+        for ($i = 0; $i < $count; $i++) {
+            $events[] = $this->createEvent($cityId, $communityId, $title, $from->copy()->addHours($i));
+        }
+        $groupId = DB::table('event_groups')->insertGetId([
+            'community_id' => $communityId,
+            'city_id' => $cityId,
+            'group_key' => 'sessions:'.$title,
+            'title_norm' => mb_strtolower($title),
+            'current_event_id' => $events[0]->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('events')->whereIn('id', array_map(fn (Event $e) => $e->id, $events))->update(['event_group_id' => $groupId]);
+
+        return $events;
     }
 
     private function createVenue(int $cityId, string $name, string $slug): Venue

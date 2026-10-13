@@ -397,8 +397,9 @@ class EventsController extends Controller
 
     /**
      * GET /api/web/events/random
-     * Случайное событие под те же фильтры что /events, для компаса на kudab-frontend.
-     * Без grouped/grouped_by_post — выбор из всех событий (включая siblings).
+     * Случайное событие под те же фильтры что /events, для «Удиви меня» на kudab-frontend.
+     * Сеансы одного события считаются одним событием. `groups[]` — темы через запятую,
+     * в ответе `meta.group` — номер группы, из которой взято событие.
      */
     public function random(Request $request): JsonResponse
     {
@@ -421,6 +422,11 @@ class EventsController extends Controller
             'tod'          => ['sometimes', Rule::in(['morning', 'day', 'evening', 'night'])],
             'exclude_ids'  => ['sometimes', 'array', 'max:50'],
             'exclude_ids.*' => ['integer'],
+            'seen_ids'     => ['sometimes', 'array', 'max:50'],
+            'seen_ids.*'   => ['integer'],
+            'groups'       => ['sometimes', 'array', 'max:10'],
+            'groups.*'     => ['string', 'max:255', 'regex:/^[a-z0-9-]+(,[a-z0-9-]+)*$/'],
+            'widen'        => ['sometimes', 'boolean'],
         ]);
         $validator->after(fn ($v) => $this->rejectMixedInterests($request, $v));
         $v = $validator->validate();
@@ -471,7 +477,11 @@ class EventsController extends Controller
             unset($v['city']);
         }
 
-        $result = $this->service->pickRandomWeb($v);
+        if (isset($v['groups'])) {
+            $v['groups'] = array_map(fn (string $g) => explode(',', $g), array_values($v['groups']));
+        }
+
+        $result = $this->service->pickSurpriseWeb($v);
         $event = $result['event'];
         $total = (int) $result['total'];
 
@@ -484,7 +494,7 @@ class EventsController extends Controller
 
         return response()->json([
             'data' => (new WebEventResource($event))->toArray($request),
-            'meta' => ['total' => $total],
+            'meta' => ['total' => $total, 'group' => $result['group'], 'again' => $result['again']],
         ]);
     }
 

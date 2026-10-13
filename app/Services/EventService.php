@@ -85,6 +85,41 @@ class EventService
         return $this->repo->pickRandomWeb($filters);
     }
 
+    /**
+     * «Удиви меня» одним запросом. `groups` — темы глаголов колеса в порядке очереди, берётся
+     * первая группа, где есть что показать. `widen` — если в окне дат пусто, вся афиша.
+     * Показанное (`seen_ids`) обходим, пока есть другое, потом второй круг (`again`).
+     *
+     * @return array{event: Event|null, total: int, group: int|null, again: bool}
+     */
+    public function pickSurpriseWeb(array $filters): array
+    {
+        $groups = $filters['groups'] ?? [$filters['interests'] ?? []];
+        $exclude = $filters['exclude_ids'] ?? [];
+        $seen = $filters['seen_ids'] ?? [];
+        $widen = ! empty($filters['widen']);
+        unset($filters['groups'], $filters['interests'], $filters['seen_ids'], $filters['widen']);
+
+        $windows = [$filters];
+        if ($widen && (isset($filters['date_from']) || isset($filters['date_to']))) {
+            $windows[] = array_diff_key($filters, ['date_from' => 1, 'date_to' => 1]);
+        }
+        $passes = $seen ? [array_merge($exclude, $seen), $exclude] : [$exclude];
+
+        foreach ($passes as $pass => $ids) {
+            foreach ($windows as $window) {
+                foreach ($groups as $i => $topics) {
+                    $res = $this->repo->pickRandomWeb(['interests' => $topics, 'exclude_ids' => $ids] + $window);
+                    if ($res['event'] !== null) {
+                        return $res + ['group' => $i, 'again' => $pass > 0];
+                    }
+                }
+            }
+        }
+
+        return ['event' => null, 'total' => 0, 'group' => null, 'again' => false];
+    }
+
     public function get(int $id): Event
     {
         return $this->repo->findWithDetails($id);

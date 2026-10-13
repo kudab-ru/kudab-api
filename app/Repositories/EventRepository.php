@@ -1174,22 +1174,45 @@ class EventRepository
             }
         }
 
+        // Жребий тянем среди событий, а не сеансов: у квеста строка на каждый час, и он выпадал
+        // в разы чаще одиночного концерта. Сеансы одного события сводит тот же ключ, что в ленте.
+        $q->leftJoin('event_groups as eg', function ($j) {
+            $j->on('eg.id', '=', 'events.event_group_id')->whereNull('eg.deleted_at');
+        });
+        $thing = 'COALESCE(eg.federation_id, events.event_group_id, -events.id)';
+
         if ($excludeIds) {
-            $q->whereNotIn('events.id', $excludeIds);
+            // показанное убираем со всеми сеансами, иначе та же комната квеста вернётся в другой час
+            $in = implode(',', array_fill(0, count($excludeIds), '?'));
+            $q->whereRaw("$thing NOT IN (
+                SELECT COALESCE(xg.federation_id, x.event_group_id, -x.id) FROM events x
+                LEFT JOIN event_groups xg ON xg.id = x.event_group_id AND xg.deleted_at IS NULL
+                WHERE x.id IN ($in))", $excludeIds);
         }
 
-        $total = (int) (clone $q)->toBase()->getCountForPagination();
+        $base = (clone $q)->reorder()->toBase()->distinct(false);
+        $total = (int) (clone $base)->select(DB::raw("COUNT(DISTINCT $thing)"))->value('count');
 
         if ($total === 0) {
             return ['event' => null, 'total' => 0];
         }
 
-        $q->reorder()->orderByRaw('RANDOM()');
+        $key = (clone $base)->select(DB::raw("$thing AS k"))->groupByRaw($thing)->orderByRaw('RANDOM()')->value('k');
+        // ближайший сеанс; начавшийся час назад — только если других не осталось
+        $id = (clone $base)->select('events.id')->whereRaw("$thing = ?", [$key])
+            ->orderByRaw('CASE WHEN events.start_time IS NULL OR events.start_time >= now() THEN 0 ELSE 1 END')
+            ->orderByRaw('events.start_date asc nulls last')
+            ->orderByRaw('events.start_time asc nulls last')
+            ->orderBy('events.id')
+            ->value('id');
+
         /** @var Event|null $event */
-        $event = $q->limit(1)->first();
+        $event = $q->reorder()->where('events.id', $id)->first();
 
         if ($event !== null) {
             $this->hydrateImages(EloquentCollection::make([$event]));
+            // остальные сеансы, чтобы карточка показала и другое время
+            $this->hydrateGroupDates(EloquentCollection::make([$event]));
         }
 
         return ['event' => $event, 'total' => $total];
