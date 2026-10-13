@@ -8,6 +8,7 @@ use App\Models\Interest;
 use App\Models\Venue;
 use App\Services\Recommendations\NextEventsPicker;
 use App\Support\SearchMatch;
+use App\Support\VenueKindLabel;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
@@ -562,6 +563,9 @@ class EventRepository
             ? $this->searchTopic($filters['q'] ?? null)
             : null;
         $match = $this->applyTextSearch($q, $filters['q'] ?? null, $topic['ids'] ?? []);
+        // Ступени выдачи держатся на порядке совпадения, а свой порядок или колесо его перебивают.
+        $kind = empty($filters['sort']) && ! $preferIds ? SearchMatch::from($filters['q'] ?? null)?->venueKind() : null;
+        $tiered = $kind !== null || $topic !== null;
 
         if (! empty($filters['interests']) && is_array($filters['interests'])) {
             // Double-write: input — либо int[] (legacy), либо slug[] (Этап 2,
@@ -934,8 +938,8 @@ class EventRepository
         $events = $paginator->getCollection();
         $this->hydrateImages($events);
 
-        if ($topic !== null) {
-            $events->each(fn (Event $e) => $e->setAttribute('__by_topic', (int) $e->getAttribute('__match_rank') === 4));
+        if ($tiered) {
+            $events->each(fn (Event $e) => $e->setAttribute('__search_tier', self::searchTier((int) $e->getAttribute('__match_rank'), $kind !== null)));
         }
 
         $events->each(function (Event $e) {
@@ -947,7 +951,7 @@ class EventRepository
                 '__match_rank',
                 '__top_score',
                 '__prefer_rank',
-                '__by_topic',
+                '__search_tier',
             ]);
         });
 
@@ -958,16 +962,18 @@ class EventRepository
         $totalEvents = null;
         $eligibleEventIds = null;
         $topicTotal = null;
+        $placeTotal = null;
         if ($uncollapsedQ !== null) {
             // Snapshot used both для count (`total_events`) и для siblings —
             // гарантирует консистентность: события в siblings — subset тех
             // же, что попали в `total_events`. Без этого siblings могли
             // содержать events из другого города / категории / blacklisted
             // source, и фронтенд показывал «84 из 78».
-            if ($topic !== null) {
+            if ($tiered) {
                 $ranks = $uncollapsedQ->toBase()->pluck('__match_rank', 'id');
                 $eligibleEventIds = $ranks->keys()->map(fn ($v) => (int) $v)->all();
                 $topicTotal = $ranks->filter(fn ($r) => (int) $r === 4)->count();
+                $placeTotal = $ranks->filter(fn ($r) => (int) $r === 0)->count();
             } else {
                 $eligibleEventIds = $uncollapsedQ->toBase()->pluck('events.id')
                     ->map(fn ($v) => (int) $v)
@@ -1004,7 +1010,14 @@ class EventRepository
             'totalEvents' => $totalEvents,
             'preferredTotal' => $preferredTotal,
             'topic' => $topic === null ? null : ['slug' => $topic['slug'], 'name' => $topic['name'], 'total' => $topicTotal],
+            'place' => $kind === null ? null : ['kind' => $kind, 'where' => VenueKindLabel::where($kind), 'total' => $placeTotal],
         ];
+    }
+
+    /** Ступень события в выдаче для сайта: в месте нужного вида, по слову или только по теме (см. applyTextSearch). */
+    private static function searchTier(int $rank, bool $byKind): string
+    {
+        return $rank === 4 ? 'topic' : ($byKind && $rank === 0 ? 'place' : 'word');
     }
 
     /**
@@ -2202,6 +2215,11 @@ class EventRepository
         if ($match === null) {
             return new EloquentCollection();
         }
+        // по «парк» сайт подписывает блок «Недавно было в парках»
+        $kind = SearchMatch::from($filters['q'] ?? null)?->venueKind();
+        if ($kind !== null) {
+            $q->where('vn.kind', $kind);
+        }
 
         $this->addPastFlags($q, $past);
         $this->excludeBlacklistedSources($q);
@@ -2381,7 +2399,8 @@ class EventRepository
     /**
      * Отбирает события по строке поиска и возвращает выражение «насколько подходит»: 0 — слово в названии,
      * 1 — похожее слово в названии, 2 — слово или похожее в имени организатора или площадки, 3 — только в описании,
-     * 4 — слова нет нигде, но у события тема из $topicIds.
+     * 4 — слова нет нигде, но у события тема из $topicIds. У слова вида места («парк») 0 — событие в месте этого
+     * вида, 1 — слово в названии, 2 — в имени места или организатора; одного описания ему мало.
      *
      * @param  list<int>  $topicIds
      * @return array{0: string, 1: array<int, mixed>}|null [sql, параметры]; null — запроса нет
@@ -2412,12 +2431,17 @@ class EventRepository
             $byNameArgs = [...$byNameArgs, ...$orgSimilar[1], ...$venueSimilar[1]];
         }
 
-        // Слово вида места («парк») ищет события в местах этого вида, а у места другого вида
-        // не подходит ничего: ни имя, ни название события («Централ Парк Вест» идёт в театре).
+        // Слово вида места («парк») находит и события в местах этого вида, где слова нет. Описание
+        // для него не в счёт: там «парк» чаще адрес («МТС Live Холл, Сити-парк «Град»»), а сайт
+        // подписывает эту ступень «в названии или в имени места».
         $kind = $match->venueKind();
-        $plain = "$inTitle OR $byName OR $inText".($titleSimilar !== null ? " OR {$titleSimilar[0]}" : '');
-        $plainArgs = [...$titleArgs, ...$byNameArgs, ...$textArgs, ...($titleSimilar[1] ?? [])];
-        [$words, $wordsArgs] = $match->place($plain, $plainArgs, 'vn.kind');
+        [$plain, $plainArgs] = $kind !== null
+            ? ["$inTitle OR $byName", [...$titleArgs, ...$byNameArgs]]
+            : [
+                "$inTitle OR $byName OR $inText".($titleSimilar !== null ? " OR {$titleSimilar[0]}" : ''),
+                [...$titleArgs, ...$byNameArgs, ...$textArgs, ...($titleSimilar[1] ?? [])],
+            ];
+        [$words, $wordsArgs] = $match->orKind($plain, $plainArgs, 'vn.kind');
 
         $q->where(function ($w) use ($words, $wordsArgs, $topicIds) {
             $w->whereRaw($words, $wordsArgs);
@@ -2426,14 +2450,19 @@ class EventRepository
             }
         });
 
-        // В месте нужного вида событие подходит так же, как словом в названии.
-        [$first, $firstArgs] = $kind !== null ? ["$inTitle OR vn.kind = ?", [...$titleArgs, $kind]] : [$inTitle, $titleArgs];
+        if ($kind !== null) {
+            return [
+                "CASE WHEN vn.kind = ? THEN 0 WHEN $inTitle THEN 1 WHEN $byName THEN 2 ELSE 4 END",
+                [$kind, ...$titleArgs, ...$byNameArgs],
+            ];
+        }
+
         $similarTitle = $titleSimilar !== null ? "WHEN {$titleSimilar[0]} THEN 1 " : '';
         [$rest, $restArgs] = $topicIds !== [] ? ["WHEN $inText THEN 3 ELSE 4", $textArgs] : ['ELSE 3', []];
 
         return [
-            "CASE WHEN $first THEN 0 {$similarTitle}WHEN $byName THEN 2 $rest END",
-            [...$firstArgs, ...($titleSimilar[1] ?? []), ...$byNameArgs, ...$restArgs],
+            "CASE WHEN $inTitle THEN 0 {$similarTitle}WHEN $byName THEN 2 $rest END",
+            [...$titleArgs, ...($titleSimilar[1] ?? []), ...$byNameArgs, ...$restArgs],
         ];
     }
 

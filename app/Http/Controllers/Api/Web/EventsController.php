@@ -167,6 +167,11 @@ class EventsController extends Controller
             $meta['topic'] = $result['topic'];
             $searchFilters['topic_total'] = $result['topic']['total'];
         }
+        // вид места из запроса («парк») и сколько событий в местах этого вида
+        if (($result['place'] ?? null) !== null) {
+            $meta['place'] = $result['place'];
+            $searchFilters['place_total'] = $result['place']['total'];
+        }
         // сайт подставляет это слово в поле поиска
         if ($corrected !== null) {
             $meta['corrected_q'] = $corrected;

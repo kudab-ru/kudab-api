@@ -579,7 +579,8 @@ class VenuesController extends Controller
     /**
      * Площадка по имени ищется тем же правилом, что события. Слово целиком в имени идёт
      * раньше, чем внутри другого слова: по «театр» театры раньше кинотеатров. По виду места
-     * («парк») подходит и место этого вида без слова в имени, наравне со словом целиком.
+     * («парк») подходит и место этого вида без слова в имени, и такие места идут первыми:
+     * парки раньше кинотеатра «Синема Парк».
      */
     private function whereNameMatches($query, SearchMatch $match): void
     {
@@ -590,14 +591,13 @@ class VenuesController extends Controller
             $byName .= " OR {$similar[0]}";
             $args = [...$args, ...$similar[1]];
         }
-        $query->whereRaw(...$match->place($byName, $args, 'venues.kind'));
+        $query->whereRaw(...$match->orKind($byName, $args, 'venues.kind'));
 
-        $first = ["$name ~ ?", ['(^|[^[:alnum:]])'.$match->text]];
+        $wordStart = '(^|[^[:alnum:]])'.$match->text;
         $kind = $match->venueKind();
-        if ($kind !== null) {
-            $first = ["{$first[0]} OR venues.kind = ?", [...$first[1], $kind]];
-        }
-        $query->orderByRaw("CASE WHEN {$first[0]} THEN 0 ELSE 1 END", $first[1]);
+        $kind === null
+            ? $query->orderByRaw("CASE WHEN $name ~ ? THEN 1 ELSE 2 END", [$wordStart])
+            : $query->orderByRaw("CASE WHEN venues.kind = ? THEN 0 WHEN $name ~ ? THEN 1 ELSE 2 END", [$kind, $wordStart]);
     }
 
     /**

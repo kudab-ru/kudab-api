@@ -31,23 +31,19 @@ final class SearchMatch
         ['стендап', 'stand up', 'stand-up', 'standup'],
     ];
 
-    // Запрос из одного слова, которое называет вид места. Виды — значения `venues.kind`.
+    // Запрос из одного слова, которое называет вид места: вид (значение `venues.kind`), как слово
+    // выглядит в запросе и как ищется в тексте. В тексте — целым словом в любой форме, а «кино»
+    // и «квест» началом слова (кинопоказ, квест-маршрут): кусок слова врёт, «бар» есть в «барине».
+    // «Бар» и «клуб» — один вид, но в тексте каждое ищется само: по «бар» не нужен книжный клуб.
     private const KIND_WORDS = [
-        'Парки' => '(парк|сквер)(и|ы|ов|а|е|у)?',
-        'Музеи' => 'музе(й|и|я|е|ев)',
-        'Кинотеатры' => 'кино|кинотеатр(ы|ов|а|е)?',
-        'Квесты' => 'квест(ы|ов|а|е)?',
-        'Клубы и бары' => '(бар|клуб|паб)(ы|ов|а|е)?',
-    ];
-
-    // Как слово вида ищется в тексте: целым словом в любой форме, а «кино» и «квест» началом
-    // слова (кинопоказ, квест-маршрут). Кусок слова тут врёт: «бар» в «барине», «парк» в «Парковой».
-    private const KIND_TEXT = [
-        'Парки' => '(парк|сквер)(и|ы|ов|а|е|у|ом|ам|ах|ами)?([^[:alnum:]]|$)',
-        'Музеи' => 'музе(й|и|я|е|ю|ев|ям|ях|ями)([^[:alnum:]]|$)',
-        'Кинотеатры' => 'кино',
-        'Квесты' => '(квест|quest)',
-        'Клубы и бары' => '(бар|клуб|паб)(ы|ов|а|е|у|ом|ах|ами)?([^[:alnum:]]|$)',
+        ['Парки', 'парк(и|ов|а|е|у)?', 'парк(и|ов|а|е|у|ом|ам|ах|ами)?([^[:alnum:]]|$)'],
+        ['Парки', 'сквер(ы|ов|а|е|у)?', 'сквер(ы|ов|а|е|у|ом|ам|ах|ами)?([^[:alnum:]]|$)'],
+        ['Музеи', 'музе(й|и|я|е|ев)', 'музе(й|и|я|е|ю|ев|ям|ях|ями)([^[:alnum:]]|$)'],
+        ['Кинотеатры', 'кино|кинотеатр(ы|ов|а|е)?', 'кино'],
+        ['Квесты', 'квест(ы|ов|а|е)?', '(квест|quest)'],
+        ['Клубы и бары', 'бар(ы|ов|а|е)?', 'бар(ы|ов|а|е|у|ом|ах|ами)?([^[:alnum:]]|$)'],
+        ['Клубы и бары', 'клуб(ы|ов|а|е)?', 'клуб(ы|ов|а|е|у|ом|ах|ами)?([^[:alnum:]]|$)'],
+        ['Клубы и бары', 'паб(ы|ов|а|е)?', 'паб(ы|ов|а|е|у|ом|ах|ами)?([^[:alnum:]]|$)'],
     ];
 
     private static ?bool $trgm = null;
@@ -75,15 +71,15 @@ final class SearchMatch
 
     /**
      * В колонке есть слово запроса или основа из его группы синонимов. Слово вида места — целым
-     * словом, см. KIND_TEXT.
+     * словом, см. KIND_WORDS.
      *
      * @return array{0: string, 1: list<string>} [sql, параметры]
      */
     public function like(string $column): array
     {
-        $kind = $this->venueKind();
-        if ($kind !== null) {
-            return ["($column ~ ?)", ['(^|[^[:alnum:]])'.self::KIND_TEXT[$kind]]];
+        $word = $this->kindWord();
+        if ($word !== null) {
+            return ["($column ~ ?)", ['(^|[^[:alnum:]])'.$word[2]]];
         }
 
         return ['('.implode(' OR ', array_fill(0, count($this->likes), "$column LIKE ?")).')', $this->likes];
@@ -97,7 +93,7 @@ final class SearchMatch
      */
     public function similar(string $column): ?array
     {
-        // у слова вида формы перечислены в KIND_TEXT, а похожими вышли бы чужие слова
+        // у слова вида формы перечислены в KIND_WORDS, а похожими вышли бы чужие слова
         if (! $this->fuzzy || $this->venueKind() !== null) {
             return null;
         }
@@ -111,9 +107,15 @@ final class SearchMatch
     /** Вид места, который называет весь запрос: «парк», «музеи», «бары». null — запрос не про вид. */
     public function venueKind(): ?string
     {
-        foreach (self::KIND_WORDS as $kind => $words) {
-            if (preg_match('~^(?:'.$words.')$~u', $this->text)) {
-                return $kind;
+        return $this->kindWord()[0] ?? null;
+    }
+
+    /** @return array{0: string, 1: string, 2: string}|null строка KIND_WORDS, которой равен запрос */
+    private function kindWord(): ?array
+    {
+        foreach (self::KIND_WORDS as $word) {
+            if (preg_match('~^(?:'.$word[1].')$~u', $this->text)) {
+                return $word;
             }
         }
 
@@ -121,20 +123,17 @@ final class SearchMatch
     }
 
     /**
-     * Совпадение с поправкой на вид: по «парк» подходит любой парк, а место другого вида
-     * не подходит, даже если слово есть в имени (кинотеатр «Синема Парк») или в названии события.
+     * Совпадение по словам или место нужного вида: по «парк» подходит и Кольцовский сквер, где
+     * слова нет. Места этого вида ставит первыми вызывающий.
      *
      * @param  list<mixed>  $args
      * @return array{0: string, 1: list<mixed>} [sql, параметры]
      */
-    public function place(string $byName, array $args, string $kindColumn): array
+    public function orKind(string $words, array $args, string $kindColumn): array
     {
         $kind = $this->venueKind();
-        if ($kind === null) {
-            return ["($byName)", $args];
-        }
 
-        return ["((($byName) AND COALESCE($kindColumn, '') IN ('', ?)) OR $kindColumn = ?)", [...$args, $kind, $kind]];
+        return $kind === null ? ["($words)", $args] : ["(($words) OR $kindColumn = ?)", [...$args, $kind]];
     }
 
     private static function normalize(?string $query): ?string

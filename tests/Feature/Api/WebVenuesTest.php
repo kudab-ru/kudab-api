@@ -114,7 +114,7 @@ class WebVenuesTest extends TestCase
         $this->assertSame(['Сити-парк «Град»', 'Парк «Динамо»'], array_column($data, 'name'));
     }
 
-    public function test_index_search_by_kind_word_finds_places_of_that_kind_only(): void
+    public function test_index_search_by_kind_word_puts_places_of_that_kind_first(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $square = $this->createVenue($vrn->id, 'Кольцовский сквер', 'skver');
@@ -125,7 +125,7 @@ class WebVenuesTest extends TestCase
 
         $data = $this->getJson('/api/web/venues?city_id='.$vrn->id.'&q='.urlencode('парки'))->assertOk()->json('data');
 
-        $this->assertSame(['Кольцовский сквер', 'Парк «Динамо»'], array_column($data, 'name'));
+        $this->assertSame(['Кольцовский сквер', 'Парк «Динамо»', 'Синема Парк'], array_column($data, 'name'));
     }
 
     public function test_index_detail_describes_only_a_single_found_venue(): void

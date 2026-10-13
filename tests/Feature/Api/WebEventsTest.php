@@ -237,7 +237,7 @@ class WebEventsTest extends TestCase
             ->assertJsonPath('data.0.title', 'Фиаско');
     }
 
-    public function test_search_by_kind_word_finds_events_at_places_of_that_kind_only(): void
+    public function test_search_by_kind_word_puts_events_at_places_of_that_kind_first(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $community = $this->createCommunity($vrn->id, 'Афиша');
@@ -247,11 +247,31 @@ class WebEventsTest extends TestCase
         DB::table('venues')->where('id', $square->id)->update(['kind' => 'Парки']);
         DB::table('venues')->where('id', $cinema->id)->update(['kind' => 'Кинотеатры']);
         DB::table('venues')->where('id', $theatre->id)->update(['kind' => 'Сцены']);
-        $this->createEvent($vrn->id, $community->id, 'Ярмарка', now()->addDay(), $square->id);
-        $this->createEvent($vrn->id, $community->id, 'Чебурашка', now()->addDays(2), $cinema->id);
-        $this->createEvent($vrn->id, $community->id, 'Централ Парк Вест', now()->addDays(3), $theatre->id);
+        $this->createEvent($vrn->id, $community->id, 'Чебурашка', now()->addDay(), $cinema->id);
+        $this->createEvent($vrn->id, $community->id, 'Централ Парк Вест', now()->addDays(2), $theatre->id);
+        $this->createEvent($vrn->id, $community->id, 'Ярмарка', now()->addDays(3), $square->id);
+        $concert = $this->createEvent($vrn->id, $community->id, 'Концерт', now()->addDays(4), $theatre->id);
+        DB::table('events')->where('id', $concert->id)->update(['description' => 'Зал у входа в парк']);
 
-        $data = $this->getJson('/api/web/events?city=voronezh&q='.urlencode('парк'))->assertOk()->json('data');
+        $response = $this->getJson('/api/web/events?city=voronezh&grouped=1&grouped_by_post=1&q='.urlencode('парк'))->assertOk();
+
+        $this->assertSame(['Ярмарка', 'Централ Парк Вест', 'Чебурашка'], array_column($response->json('data'), 'title'));
+        $this->assertSame(['place', 'word', 'word'], array_column($response->json('data'), 'search_tier'));
+        $response->assertJsonPath('meta.place', ['kind' => 'Парки', 'where' => 'в парках', 'total' => 1]);
+    }
+
+    public function test_past_search_by_kind_word_lists_only_places_of_that_kind(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Афиша');
+        $square = $this->createVenue($vrn->id, 'Кольцовский сквер', 'skver');
+        $cinema = $this->createVenue($vrn->id, 'Синема Парк', 'cinema-park');
+        DB::table('venues')->where('id', $square->id)->update(['kind' => 'Парки']);
+        DB::table('venues')->where('id', $cinema->id)->update(['kind' => 'Кинотеатры']);
+        $this->createEvent($vrn->id, $community->id, 'Ярмарка', now()->subDays(2), $square->id);
+        $this->createEvent($vrn->id, $community->id, 'Чебурашка', now()->subDays(3), $cinema->id);
+
+        $data = $this->getJson('/api/web/events/past?city=voronezh&q='.urlencode('парк'))->assertOk()->json('data');
 
         $this->assertSame(['Ярмарка'], array_column($data, 'title'));
     }
@@ -270,7 +290,7 @@ class WebEventsTest extends TestCase
         $response = $this->getJson('/api/web/events?city=voronezh&grouped=1&grouped_by_post=1&q='.urlencode('концерт'))->assertOk();
 
         $this->assertSame(['Концерт хора', 'Cream Soda'], array_column($response->json('data'), 'title'));
-        $this->assertSame([false, true], array_column($response->json('data'), 'by_topic'));
+        $this->assertSame(['word', 'topic'], array_column($response->json('data'), 'search_tier'));
         $response->assertJsonPath('meta.topic', ['slug' => 'music', 'name' => 'Музыка', 'total' => 1]);
     }
 
