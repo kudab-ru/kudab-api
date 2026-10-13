@@ -582,21 +582,26 @@ class VenuesController extends Controller
 
     /**
      * Площадка по имени ищется тем же правилом, что события. Слово целиком в имени идёт
-     * раньше, чем внутри другого слова: по «театр» театры раньше кинотеатров.
+     * раньше, чем внутри другого слова: по «театр» театры раньше кинотеатров. По виду места
+     * («парк») подходит и место этого вида без слова в имени, наравне со словом целиком.
      */
     private function whereNameMatches($query, SearchMatch $match): void
     {
         $name = 'public.ru_normalize(venues.name)';
-        [$like, $likeArgs] = $match->like($name);
+        [$byName, $args] = $match->like($name);
         $similar = $match->similar($name);
+        if ($similar !== null) {
+            $byName .= " OR {$similar[0]}";
+            $args = [...$args, ...$similar[1]];
+        }
+        $query->whereRaw(...$match->place($byName, $args, 'venues.kind'));
 
-        $query->where(function ($w) use ($like, $likeArgs, $similar) {
-            $w->whereRaw($like, $likeArgs);
-            if ($similar !== null) {
-                $w->orWhereRaw(...$similar);
-            }
-        });
-        $query->orderByRaw("CASE WHEN $name ~ ? THEN 0 ELSE 1 END", ['(^|[^[:alnum:]])'.$match->text]);
+        $first = ["$name ~ ?", ['(^|[^[:alnum:]])'.$match->text]];
+        $kind = $match->venueKind();
+        if ($kind !== null) {
+            $first = ["{$first[0]} OR venues.kind = ?", [...$first[1], $kind]];
+        }
+        $query->orderByRaw("CASE WHEN {$first[0]} THEN 0 ELSE 1 END", $first[1]);
     }
 
     /**

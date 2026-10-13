@@ -2448,25 +2448,24 @@ class EventRepository
         $orgSimilar = $match->similar('public.ru_normalize(cm.name)');
         $venueSimilar = $match->similar('public.ru_normalize(vn.name)');
 
-        $q->where(function ($w) use ($inTitle, $titleArgs, $inOrg, $orgArgs, $inVenue, $venueArgs, $inText, $textArgs, $titleSimilar, $orgSimilar, $venueSimilar) {
+        // Площадка весит как организатор: «Попкорн Драма» находит и спектакли, которые продаёт агрегатор.
+        $byName = "$inOrg OR $inVenue";
+        $byNameArgs = [...$orgArgs, ...$venueArgs];
+        if ($orgSimilar !== null && $venueSimilar !== null) {
+            $byName .= " OR {$orgSimilar[0]} OR {$venueSimilar[0]}";
+            $byNameArgs = [...$byNameArgs, ...$orgSimilar[1], ...$venueSimilar[1]];
+        }
+        [$place, $placeArgs] = $match->place($byName, $byNameArgs, 'vn.kind');
+
+        $q->where(function ($w) use ($inTitle, $titleArgs, $place, $placeArgs, $inText, $textArgs, $titleSimilar) {
             $w->whereRaw($inTitle, $titleArgs)
-                ->orWhereRaw($inOrg, $orgArgs)
-                ->orWhereRaw($inVenue, $venueArgs)
+                ->orWhereRaw($place, $placeArgs)
                 ->orWhereRaw($inText, $textArgs);
-            foreach ([$titleSimilar, $orgSimilar, $venueSimilar] as $similar) {
-                if ($similar !== null) {
-                    $w->orWhereRaw(...$similar);
-                }
+            if ($titleSimilar !== null) {
+                $w->orWhereRaw(...$titleSimilar);
             }
         });
 
-        // Площадка весит как организатор: «Попкорн Драма» находит и спектакли, которые продаёт агрегатор.
-        $place = "$inOrg OR $inVenue";
-        $placeArgs = [...$orgArgs, ...$venueArgs];
-        if ($orgSimilar !== null && $venueSimilar !== null) {
-            $place .= " OR {$orgSimilar[0]} OR {$venueSimilar[0]}";
-            $placeArgs = [...$placeArgs, ...$orgSimilar[1], ...$venueSimilar[1]];
-        }
         $similarTitle = $titleSimilar !== null ? "WHEN {$titleSimilar[0]} THEN 1 " : '';
 
         return [

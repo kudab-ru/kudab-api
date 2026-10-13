@@ -114,6 +114,20 @@ class WebVenuesTest extends TestCase
         $this->assertSame(['Сити-парк «Град»', 'Парк «Динамо»'], array_column($data, 'name'));
     }
 
+    public function test_index_search_by_kind_word_finds_places_of_that_kind_only(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $square = $this->createVenue($vrn->id, 'Кольцовский сквер', 'skver');
+        $cinema = $this->createVenue($vrn->id, 'Синема Парк', 'cinema-park');
+        $this->createVenue($vrn->id, 'Парк «Динамо»', 'dynamo');
+        DB::table('venues')->where('id', $square->id)->update(['kind' => 'Парки']);
+        DB::table('venues')->where('id', $cinema->id)->update(['kind' => 'Кинотеатры']);
+
+        $data = $this->getJson('/api/web/venues?city_id='.$vrn->id.'&q='.urlencode('парки'))->assertOk()->json('data');
+
+        $this->assertSame(['Кольцовский сквер', 'Парк «Динамо»'], array_column($data, 'name'));
+    }
+
     public function test_index_schedule_lists_one_session_per_event_by_date(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-10-12 10:00:00', 'Europe/Moscow'));

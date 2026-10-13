@@ -236,6 +236,22 @@ class WebEventsTest extends TestCase
             ->assertJsonPath('data.0.title', 'Фиаско');
     }
 
+    public function test_search_by_kind_word_finds_events_at_places_of_that_kind_only(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Афиша');
+        $square = $this->createVenue($vrn->id, 'Кольцовский сквер', 'skver');
+        $cinema = $this->createVenue($vrn->id, 'Синема Парк', 'cinema-park');
+        DB::table('venues')->where('id', $square->id)->update(['kind' => 'Парки']);
+        DB::table('venues')->where('id', $cinema->id)->update(['kind' => 'Кинотеатры']);
+        $this->createEvent($vrn->id, $community->id, 'Ярмарка', now()->addDay(), $square->id);
+        $this->createEvent($vrn->id, $community->id, 'Чебурашка', now()->addDays(2), $cinema->id);
+
+        $data = $this->getJson('/api/web/events?city=voronezh&q='.urlencode('парк'))->assertOk()->json('data');
+
+        $this->assertSame(['Ярмарка'], array_column($data, 'title'));
+    }
+
     public function test_search_puts_title_match_above_description_match_with_photo(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);

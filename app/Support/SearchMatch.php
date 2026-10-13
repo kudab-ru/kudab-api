@@ -31,6 +31,15 @@ final class SearchMatch
         ['стендап', 'stand up', 'stand-up', 'standup'],
     ];
 
+    // Запрос из одного слова, которое называет вид места. Виды — значения `venues.kind`.
+    private const KIND_WORDS = [
+        'Парки' => '(парк|сквер)(и|ы|ов|а|е|у)?',
+        'Музеи' => 'музе(й|и|я|е|ев)',
+        'Кинотеатры' => 'кино|кинотеатр(ы|ов|а|е)?',
+        'Квесты' => 'квест(ы|ов|а|е)?',
+        'Клубы и бары' => '(бар|клуб|паб)(ы|ов|а|е)?',
+    ];
+
     private static ?bool $trgm = null;
 
     /** @param list<string> $likes */
@@ -93,6 +102,35 @@ final class SearchMatch
             "(word_similarity(?, $column) >= ? OR strict_word_similarity(?, $column) >= ?)",
             [$this->token, self::FORM_THRESHOLD, $this->token, self::TYPO_THRESHOLD],
         ];
+    }
+
+    /** Вид места, который называет весь запрос: «парк», «музеи», «бары». null — запрос не про вид. */
+    public function venueKind(): ?string
+    {
+        foreach (self::KIND_WORDS as $kind => $words) {
+            if (preg_match('~^(?:'.$words.')$~u', $this->text)) {
+                return $kind;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Совпадение по имени места с поправкой на вид: по «парк» подходит любой парк, а место другого
+     * вида не подходит, даже если слово есть в имени (кинотеатр «Синема Парк»).
+     *
+     * @param  list<mixed>  $args
+     * @return array{0: string, 1: list<mixed>} [sql, параметры]
+     */
+    public function place(string $byName, array $args, string $kindColumn): array
+    {
+        $kind = $this->venueKind();
+        if ($kind === null) {
+            return ["($byName)", $args];
+        }
+
+        return ["((($byName) AND COALESCE($kindColumn, '') IN ('', ?)) OR $kindColumn = ?)", [...$args, $kind, $kind]];
     }
 
     private static function normalize(?string $query): ?string
