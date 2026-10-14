@@ -1665,21 +1665,11 @@ class WebEventsTest extends TestCase
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $community = $this->createCommunity($vrn->id, 'Театр');
         $event = $this->createEvent($vrn->id, $community->id, 'Спектакль «Дым»', now()->addDays(3));
-        $network = DB::table('social_networks')->insertGetId(['name' => 'VK', 'slug' => 'vk', 'created_at' => now(), 'updated_at' => now()]);
-        $link = DB::table('community_social_links')->insertGetId([
-            'community_id' => $community->id, 'social_network_id' => $network, 'url' => 'https://vk.com/theatre',
-            'created_at' => now(), 'updated_at' => now(),
-        ]);
 
         $poster = 'https://sun9-1.userapi.com/poster.jpg';
         $scene = 'https://sun9-1.userapi.com/scene.jpg';
         $reposted = 'https://sun9-2.userapi.com/poster-again.jpg';
-        foreach (['post-1' => [$poster, $scene], 'post-2' => [$reposted]] as $post => $images) {
-            DB::table('event_sources')->insert([
-                'event_id' => $event->id, 'social_link_id' => $link, 'source' => 'vk', 'post_external_id' => $post,
-                'images' => json_encode($images), 'created_at' => now(), 'updated_at' => now(),
-            ]);
-        }
+        $this->addPostImages($event, ['post-1' => [$poster, $scene], 'post-2' => [$reposted]]);
         // перезалитый постер светлее первого на две ступени из 255, кадр из спектакля совсем другой
         foreach ([$poster => 100, $scene => 200, $reposted => 102] as $url => $level) {
             $gray = base64_encode(str_repeat(chr($level), 256));
@@ -1689,6 +1679,38 @@ class WebEventsTest extends TestCase
         $this->getJson("/api/web/events/{$event->id}")
             ->assertOk()
             ->assertJsonPath('data.images', [$poster, $scene]);
+    }
+
+    public function test_picture_deleted_at_the_source_is_not_shown_and_the_next_one_becomes_the_poster(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Театр');
+        $event = $this->createEvent($vrn->id, $community->id, 'Вафельное сердце', now()->addDays(3));
+        $deleted = 'https://cdn4.telesco.pe/file/expired.jpg';
+        $alive = 'https://sun9-1.userapi.com/poster.jpg';
+        $this->addPostImages($event, ['post-1' => [$deleted, $alive]]);
+        DB::table('image_prints')->insert(['url_md5' => md5($deleted), 'status' => 404, 'gone' => true, 'checked_at' => now()]);
+
+        $this->getJson("/api/web/events/{$event->id}")
+            ->assertOk()
+            ->assertJsonPath('data.images', [$alive])
+            ->assertJsonPath('data.poster', $alive);
+    }
+
+    /** @param array<string, list<string>> $posts пост → его картинки */
+    private function addPostImages(Event $event, array $posts): void
+    {
+        $network = DB::table('social_networks')->insertGetId(['name' => 'VK', 'slug' => 'vk', 'created_at' => now(), 'updated_at' => now()]);
+        $link = DB::table('community_social_links')->insertGetId([
+            'community_id' => $event->community_id, 'social_network_id' => $network, 'url' => 'https://vk.com/theatre',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        foreach ($posts as $post => $images) {
+            DB::table('event_sources')->insert([
+                'event_id' => $event->id, 'social_link_id' => $link, 'source' => 'vk', 'post_external_id' => $post,
+                'images' => json_encode($images), 'created_at' => now(), 'updated_at' => now(),
+            ]);
+        }
     }
 
     public function test_web_event_start_at_returned_in_moscow_time(): void

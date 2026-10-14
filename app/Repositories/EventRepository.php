@@ -2018,22 +2018,32 @@ class EventRepository
     }
 
     /**
+     * Сверка картинок по `image_prints`: серые копии для поиска повторов и картинки, которых у
+     * источника больше нет. Ключ — md5 адреса.
+     *
      * @param  list<string>  $urls
-     * @return array<string, list<int>> md5 адреса картинки → яркость точек серой копии, см. `image_prints`
+     * @return array{gray: array<string, list<int>>, gone: array<string, true>}
      */
     private function imagePrints(array $urls): array
     {
-        $out = [];
+        $out = ['gray' => [], 'gone' => []];
         try {
             foreach (array_chunk(array_values(array_unique(array_map('md5', $urls))), 1000) as $chunk) {
-                $rows = DB::table('image_prints')->whereIn('url_md5', $chunk)->whereNotNull('gray')->get(['url_md5', 'gray']);
+                $rows = DB::table('image_prints')
+                    ->whereIn('url_md5', $chunk)
+                    ->where(fn ($w) => $w->whereNotNull('gray')->orWhere('gone', true))
+                    ->get(['url_md5', 'gray', 'gone']);
                 foreach ($rows as $r) {
-                    $out[$r->url_md5] = array_values(unpack('C*', (string) base64_decode($r->gray)));
+                    if ($r->gone) {
+                        $out['gone'][$r->url_md5] = true;
+                    } elseif ($r->gray !== null) {
+                        $out['gray'][$r->url_md5] = array_values(unpack('C*', (string) base64_decode($r->gray)));
+                    }
                 }
             }
         } catch (QueryException) {
             // таблицы ещё нет, пока выкат не дошёл до миграции: картинки идут без сверки, как раньше
-            return [];
+            return ['gray' => [], 'gone' => []];
         }
 
         return $out;
@@ -2196,12 +2206,13 @@ class EventRepository
                 $images = $evRows->get($e->id, []);
             }
 
-            $images = array_values($images);
+            // картинку, которой у источника больше нет, не показываем: постером станет следующая
+            $images = array_values(array_filter($images, fn (string $u) => ! isset($prints['gone'][md5($u)])));
 
             // Порядок обложки задаёт `App\Support\CoverPicker` — там же почему.
             if (count($images) > 1) {
                 $images = \App\Support\CoverPicker::pickBest($images);
-                $images = self::withoutRepeatedPictures($images, $prints);
+                $images = self::withoutRepeatedPictures($images, $prints['gray']);
             }
 
             $e->setAttribute('images', $images);
