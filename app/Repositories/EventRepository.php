@@ -13,12 +13,17 @@ use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 class EventRepository
 {
     private const PAST_GRACE_HOURS = 1;
+
+    // средняя разница серых копий по точке, из 255. Ниже, чем у разных афиш в одном оформлении:
+    // лишний повтор лучше спрятанной афиши
+    private const SAME_PICTURE_DIFF = 3.0;
 
     /**
      * Окно «event ещё актуален» для лент и счётчиков: события могут отображаться
@@ -2012,6 +2017,73 @@ class EventRepository
         $this->hydrateImages($events);
     }
 
+    /**
+     * @param  list<string>  $urls
+     * @return array<string, list<int>> md5 адреса картинки → яркость точек серой копии, см. `image_prints`
+     */
+    private function imagePrints(array $urls): array
+    {
+        $out = [];
+        try {
+            foreach (array_chunk(array_values(array_unique(array_map('md5', $urls))), 1000) as $chunk) {
+                $rows = DB::table('image_prints')->whereIn('url_md5', $chunk)->whereNotNull('gray')->get(['url_md5', 'gray']);
+                foreach ($rows as $r) {
+                    $out[$r->url_md5] = array_values(unpack('C*', (string) base64_decode($r->gray)));
+                }
+            }
+        } catch (QueryException) {
+            // таблицы ещё нет, пока выкат не дошёл до миграции: картинки идут без сверки, как раньше
+            return [];
+        }
+
+        return $out;
+    }
+
+    /**
+     * Одно фото из повторных постов приходит с разными адресами. Оставляем первую копию: её уже
+     * поставил выше выбор обложки. Картинка без отпечатка остаётся.
+     *
+     * @param  list<string>  $images
+     * @param  array<string, list<int>>  $prints
+     * @return list<string>
+     */
+    private static function withoutRepeatedPictures(array $images, array $prints): array
+    {
+        $kept = [];
+        $seen = [];
+        foreach ($images as $url) {
+            $print = $prints[md5($url)] ?? null;
+            if ($print !== null) {
+                foreach ($seen as $other) {
+                    if (self::pictureDiff($print, $other) <= self::SAME_PICTURE_DIFF) {
+                        continue 2;
+                    }
+                }
+                $seen[] = $print;
+            }
+            $kept[] = $url;
+        }
+
+        return $kept;
+    }
+
+    /**
+     * @param  list<int>  $a
+     * @param  list<int>  $b
+     */
+    private static function pictureDiff(array $a, array $b): float
+    {
+        if (count($a) !== count($b) || $a === []) {
+            return INF;
+        }
+        $sum = 0;
+        foreach ($a as $i => $v) {
+            $sum += abs($v - $b[$i]);
+        }
+
+        return $sum / count($a);
+    }
+
     private function hydrateImages(EloquentCollection $events): void
     {
         if ($events->isEmpty()) {
@@ -2113,7 +2185,9 @@ class EventRepository
                 return $uniq;
             });
 
-        $events->each(function (Event $e) use ($esRows, $cpRows, $evRows) {
+        $prints = $this->imagePrints($esRows->flatten()->merge($cpRows->flatten())->merge($evRows->flatten())->all());
+
+        $events->each(function (Event $e) use ($esRows, $cpRows, $evRows, $prints) {
             $images = $esRows->get($e->id, []);
             if (empty($images) && $e->original_post_id) {
                 $images = $cpRows->get($e->original_post_id, []);
@@ -2127,6 +2201,7 @@ class EventRepository
             // Порядок обложки задаёт `App\Support\CoverPicker` — там же почему.
             if (count($images) > 1) {
                 $images = \App\Support\CoverPicker::pickBest($images);
+                $images = self::withoutRepeatedPictures($images, $prints);
             }
 
             $e->setAttribute('images', $images);

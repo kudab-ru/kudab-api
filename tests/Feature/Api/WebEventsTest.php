@@ -1660,6 +1660,37 @@ class WebEventsTest extends TestCase
         $this->assertContains('entertainment', $kindSeq);
     }
 
+    public function test_event_shows_one_copy_of_a_picture_reposted_under_another_address(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Театр');
+        $event = $this->createEvent($vrn->id, $community->id, 'Спектакль «Дым»', now()->addDays(3));
+        $network = DB::table('social_networks')->insertGetId(['name' => 'VK', 'slug' => 'vk', 'created_at' => now(), 'updated_at' => now()]);
+        $link = DB::table('community_social_links')->insertGetId([
+            'community_id' => $community->id, 'social_network_id' => $network, 'url' => 'https://vk.com/theatre',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $poster = 'https://sun9-1.userapi.com/poster.jpg';
+        $scene = 'https://sun9-1.userapi.com/scene.jpg';
+        $reposted = 'https://sun9-2.userapi.com/poster-again.jpg';
+        foreach (['post-1' => [$poster, $scene], 'post-2' => [$reposted]] as $post => $images) {
+            DB::table('event_sources')->insert([
+                'event_id' => $event->id, 'social_link_id' => $link, 'source' => 'vk', 'post_external_id' => $post,
+                'images' => json_encode($images), 'created_at' => now(), 'updated_at' => now(),
+            ]);
+        }
+        // перезалитый постер светлее первого на две ступени из 255, кадр из спектакля совсем другой
+        foreach ([$poster => 100, $scene => 200, $reposted => 102] as $url => $level) {
+            $gray = base64_encode(str_repeat(chr($level), 256));
+            DB::table('image_prints')->insert(['url_md5' => md5($url), 'gray' => $gray, 'checked_at' => now()]);
+        }
+
+        $this->getJson("/api/web/events/{$event->id}")
+            ->assertOk()
+            ->assertJsonPath('data.images', [$poster, $scene]);
+    }
+
     public function test_web_event_start_at_returned_in_moscow_time(): void
     {
         // start_time хранится в UTC; API должен отдавать start_at в МСК с offset,
