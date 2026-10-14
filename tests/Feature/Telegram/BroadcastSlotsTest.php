@@ -904,6 +904,8 @@ class BroadcastSlotsTest extends TestCase
         return [
             'слито по ссылке' => ['link', null, true],
             'слито по dedup_key' => ['dedup_key', null, true],
+            'слито без журнала, исходный пост у выжившего' => ['source', null, true],
+            'удалено не склейкой, пост делит с соседом' => ['sibling', null, false],
             'удалено без двойника' => [null, null, false],
             'у выжившего уже есть строка, отклонённая' => ['link', TelegramChatBroadcastItem::STATUS_REJECTED, false],
             'у выжившего уже есть строка, снятая' => ['link', TelegramChatBroadcastItem::STATUS_SKIPPED, false],
@@ -989,7 +991,32 @@ class BroadcastSlotsTest extends TestCase
             ]);
         }
 
+        if ($merge === 'source' || $merge === 'sibling') {
+            // пост-афиша объявлял и следующий день
+            $nextDay = $this->eventAt((int) $deleted->city_id, 'Guf', Carbon::parse($deleted->start_time)->addDay());
+            $this->postOf($deleted, $merge === 'source' ? [$twin, $nextDay] : [$deleted, $twin, $nextDay]);
+        }
+
         return $twin;
+    }
+
+    /** @param  list<Event>  $holders  события, у которых пост в источниках */
+    private function postOf(Event $event, array $holders): void
+    {
+        $network = DB::table('social_networks')->insertGetId(['name' => 'VK', 'slug' => 'vk', 'created_at' => now(), 'updated_at' => now()]);
+        $link = DB::table('community_social_links')->insertGetId([
+            'community_id' => $event->community_id, 'social_network_id' => $network, 'url' => 'https://vk.com/guf',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $post = DB::table('context_posts')->insertGetId(['social_link_id' => $link, 'created_at' => now(), 'updated_at' => now()]);
+        DB::table('events')->where('id', $event->id)->update(['original_post_id' => $post]);
+
+        foreach ($holders as $holder) {
+            DB::table('event_sources')->insert([
+                'event_id' => $holder->id, 'social_link_id' => $link, 'context_post_id' => $post,
+                'source' => 'vk', 'post_external_id' => 'wall-1_'.$post, 'created_at' => now(), 'updated_at' => now(),
+            ]);
+        }
     }
 
     /**

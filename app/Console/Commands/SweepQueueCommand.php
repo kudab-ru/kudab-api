@@ -26,6 +26,7 @@ class SweepQueueCommand extends Command
     private const VIA = [
         'link' => 'по журналу склеек',
         'dedup_key' => 'по общему ключу склейки',
+        'source' => 'по исходному посту',
     ];
 
     public function handle(BroadcastQueueSweeper $sweeper): int

@@ -684,14 +684,10 @@ class TelegramChatBroadcastService
                     'photo_urls' => $photoUrls,
                 ];
             } else {
-                // софт-удаление строку очереди не снимает, снимаем здесь, до выдачи боту
+                // софт-удаление строку очереди не снимает: перевешиваем или снимаем здесь, до выдачи боту
                 $event = $item->event_id ? Event::query()->find($item->event_id) : null;
+                $event ??= $this->rescueDeletedEvent($broadcast, $item, $now);
                 if (! $event) {
-                    $this->broadcastItemRepository->markSkipped(
-                        $item,
-                        'событие '.($item->event_id ?? '?').' недоступно (удалено) — снято из очереди',
-                    );
-
                     continue;
                 }
 
@@ -779,6 +775,45 @@ class TelegramChatBroadcastService
         }
 
         return $tasks;
+    }
+
+    /**
+     * Пост удалённого события: перевесить на выжившее по правилам уборщика или снять. Под блокировкой
+     * ленты: уборщик мог перевесить запись, пока доставка её читала. null — запись снята или изменилась.
+     */
+    private function rescueDeletedEvent(TelegramChatBroadcast $broadcast, TelegramChatBroadcastItem $item, Carbon $now): ?Event
+    {
+        return DB::transaction(function () use ($broadcast, $item, $now) {
+            $status = $item->status;
+            TelegramChatBroadcast::lockFeed((int) $broadcast->id);
+            $item->refresh();
+            if ($item->status !== $status) {
+                return null;
+            }
+
+            $event = $item->event_id ? Event::query()->find($item->event_id) : null;
+            if ($event === null && $item->publish_at !== null) {
+                $moved = app(BroadcastQueueSweeper::class)->moveToSurvivor($broadcast, $item, $now);
+                if ($moved !== null) {
+                    Log::info('broadcast.queue.moved', ['broadcast_id' => $broadcast->id, 'by' => 'delivery'] + $moved);
+                    $event = Event::query()->find($item->event_id);
+                }
+            }
+
+            if ($event === null) {
+                $this->broadcastItemRepository->markSkipped(
+                    $item,
+                    'событие '.($item->event_id ?? '?').' недоступно (удалено) — снято из очереди',
+                );
+                Log::warning('broadcast.poll.skipped_event_deleted', [
+                    'broadcast_id' => $broadcast->id,
+                    'item_id' => $item->id,
+                    'event_id' => $item->event_id,
+                ]);
+            }
+
+            return $event;
+        });
     }
 
     /**

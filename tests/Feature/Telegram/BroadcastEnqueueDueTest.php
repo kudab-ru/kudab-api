@@ -487,6 +487,32 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertSame($item->id, $tasks[0]['item_id']);
     }
 
+    public function test_post_of_merged_event_goes_out_with_the_survivor(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $merged = $this->createEvent($city->id, $community->id, 'Science Talks', now()->addDay());
+        $survivor = $this->createEvent($city->id, $community->id, 'Science Talks. Дети', now()->addDay());
+
+        $chat = $this->createChannelChat($city->id, -1030, 556999);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $merged->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = now()->subMinutes(5);
+        $item->save();
+
+        $merged->delete();
+        DB::table('event_duplicate_links')->insert([
+            'keep_event_id' => $survivor->id, 'drop_event_id' => $merged->id, 'score_total' => 1, 'verdict' => 'auto',
+            'merged_at' => now(), 'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks, 'пост не снят');
+        $this->assertSame($survivor->id, $tasks[0]['event_id']);
+        $this->assertSame($survivor->id, (int) $item->fresh()->event_id);
+    }
+
     /**
      * Текст, собранный под другой день, пересобирается перед отправкой.
      *
