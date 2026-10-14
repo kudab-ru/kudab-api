@@ -417,7 +417,8 @@ final class BroadcastDigestComposer
         $named = $this->namedFromLinks($item, $publishAt);
         $taken = array_map(static fn ($e) => (int) $e->id, $named);
 
-        $pool = $this->poolForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $item->id);
+        // Скрытое для канала автомат не берёт, а человеку показываем с пометкой: решает он.
+        $pool = $this->poolForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $item->id, keepHidden: true);
         $rows = $pool['rows'] ?? collect();
 
         $minDescription = (int) config('broadcast_digest.min_description', 120);
@@ -450,8 +451,17 @@ final class BroadcastDigestComposer
             $venue = $row->venue_id !== null ? (int) $row->venue_id : null;
             $day = Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
             $length = mb_strlen(trim((string) $row->description));
+            $hidden = (bool) $row->channel_hidden;
 
             $notes = [];
+            if ($hidden) {
+                $notes[] = match ($row->content_kind) {
+                    'official' => 'официоз',
+                    'religious' => 'религия',
+                    'patriotic_ceremony' => 'памятная церемония',
+                    default => 'памятная дата',
+                }.' — автомат такое в канал не ставит';
+            }
             // Единственное жёсткое правило автосборки — см. pickNamed.
             if ($venue === null) {
                 $notes[] = 'без площадки — автомат такое не называет';
@@ -476,7 +486,7 @@ final class BroadcastDigestComposer
                 'venue_id' => $venue,
                 'description_length' => $length,
                 'has_own_text' => trim((string) $row->tg_description) !== '',
-                'clash' => $venue !== null && isset($venueAt[$venue]) || isset($dayAt[$day]) || $venue === null,
+                'clash' => $hidden || $venue !== null && isset($venueAt[$venue]) || isset($dayAt[$day]) || $venue === null,
                 'notes' => $notes,
             ];
         }
@@ -499,7 +509,7 @@ final class BroadcastDigestComposer
         // постом. Назвать такое в подборке — дубль, поэтому в обычные
         // кандидаты они не попадают. Но обмен осмыслен: событие переезжает в
         // подборку, а пост снимается. Цена разная — значит и список отдельный.
-        $withShown = $this->poolForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $item->id, true);
+        $withShown = $this->poolForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $item->id, true, keepHidden: true);
         $fresh = array_map(static fn (array $r) => $r['id'], $out);
 
         $inFeed = [];
@@ -570,6 +580,7 @@ final class BroadcastDigestComposer
         Carbon $publishAt,
         ?int $exceptItemId = null,
         bool $keepShown = false,
+        bool $keepHidden = false,
     ): ?array {
         // РУБРИКА ОТБИРАЕТ НЕ ТОЛЬКО ПО ТЕМЕ. «Спектакли» — это интерес, а
         // «Бесплатно» и «Дешевле 500» — цена, «Вечером» — час начала. Признак
@@ -602,6 +613,7 @@ final class BroadcastDigestComposer
         // объявляют поздно: замер 25.09.2026 — 35 событий в ближайшую неделю и
         // 4 в следующую, поэтому недельное окно для него почти пустое.
         [$since, $until] = $this->themeWindow((array) $theme, $publishAt);
+        [$hiddenSql, $hiddenBindings] = Event::channelHiddenSql('e');
 
         $rows = DB::table('events as e')
             ->when($pick === 'interest', fn ($q) => $q->join('event_interest as ei', 'ei.event_id', '=', 'e.id'))
@@ -651,12 +663,9 @@ final class BroadcastDigestComposer
             ->where(function ($q) {
                 $q->whereNull('e.tickets_status')->orWhere('e.tickets_status', '<>', 'sold_out');
             })
-            ->where(function ($q) {
-                $q->whereNull('e.content_kind')
-                    ->orWhereNotIn('e.content_kind', Event::CHANNEL_HIDDEN_KINDS);
-            })
+            ->when(! $keepHidden, fn ($q) => $q->whereRaw('not '.$hiddenSql, $hiddenBindings))
             ->orderBy('e.start_time')
-            ->get([
+            ->select([
                 'e.id', 'e.title', 'e.start_time', 'e.event_group_id', 'e.venue_id',
                 'e.description', 'e.tg_description', 'e.price_min', 'e.price_max', 'e.price_status',
                 // price_text — ради «по регистрации»: отдельного поля под это нет,
@@ -664,7 +673,9 @@ final class BroadcastDigestComposer
                 // без времени: у них в start_time полночь, и «сб 00:00» это враньё.
                 'e.price_text', 'e.time_precision', 'e.content_kind',
                 'v.name as venue_name',
-            ]);
+            ])
+            ->selectRaw($hiddenSql.' as channel_hidden', $hiddenBindings)
+            ->get();
 
         $rows = $this->rejectStopList($rows);
 
@@ -686,7 +697,15 @@ final class BroadcastDigestComposer
             $rows = $this->rejectAlreadyShown($broadcast, $rows, $exceptItemId);
         }
 
-        return ['rows' => $this->collapseRepeats($rows)];
+        if (! $keepHidden) {
+            return ['rows' => $this->collapseRepeats($rows)];
+        }
+
+        // Из повторов остаётся первый, поэтому открытые ставим вперёд: иначе скрытый
+        // двойник вытеснил бы из списка событие, которое автомат взял бы сам.
+        [$hidden, $open] = $rows->partition(fn ($r) => (bool) $r->channel_hidden);
+
+        return ['rows' => $this->collapseRepeats($open->concat($hidden))->sortBy('start_time')->values()];
     }
 
     /** Дерево интересов темы — тем же рекурсивным обходом, что и лендинг. */

@@ -151,28 +151,38 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertSame(0, TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->count());
     }
 
-    /** @return array<string, array{string}> */
-    public static function hiddenKinds(): array
+    /** @return array<string, array{string, ?string, ?string, bool}> */
+    public static function channelCases(): array
     {
-        return ['официоз' => ['official'], 'религия' => ['religious'], 'гражданское' => ['civic']];
+        return [
+            'официоз' => ['Приём у губернатора', null, 'official', false],
+            'религия' => ['Литургия', null, 'religious', false],
+            'памятная церемония' => ['Церемония', null, 'patriotic_ceremony', false],
+            'дата в названии' => ['День воссоединения ДНР, ЛНР, Запорожской и Херсонской областей с Россией', null, 'civic', false],
+            'концерт к дате' => ['Праздничный концерт, посвящённый Дню воссоединения', null, 'civic', false],
+            'дата в описании' => ['Концерт «Мелодии страны единой»', 'Программа ко Дню народного единства.', 'culture', false],
+            'ярмарка' => ['Уездная ярмарка в русском стиле', null, 'civic', true],
+            'вечер памяти' => ['Вечер памяти Виктора Цоя', null, 'culture', true],
+            'церемония в описании прогулки' => ['Прогулка по центру', 'Маршрут проходит мимо Вечного огня.', 'education', true],
+        ];
     }
 
-    /** @dataProvider hiddenKinds */
-    public function test_does_not_pick_hidden_content_kind(string $kind): void
+    /** @dataProvider channelCases */
+    public function test_channel_skips_hidden_kinds_and_state_dates(string $title, ?string $description, ?string $kind, bool $picked): void
     {
         $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $community = $this->createCommunity($city->id, 'Организатор');
-        $e = $this->createEvent($city->id, $community->id, 'Скрытое', now()->addDay());
+        $e = $this->createEvent($city->id, $community->id, $title, now()->addDay());
+        $e->description = $description;
         $e->content_kind = $kind;
         $e->save();
 
         $chat = $this->createChannelChat($city->id, -1008);
-        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $this->createBroadcast($chat->id, 'daily_10');
 
         $summary = $this->service()->enqueueDueForAllChannels(now());
 
-        $this->assertSame(1, $summary['no_candidate']);
-        $this->assertSame(0, $summary['enqueued']);
+        $this->assertSame($picked ? 1 : 0, $summary['enqueued']);
     }
 
     public function test_does_not_pick_event_from_already_used_group(): void

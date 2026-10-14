@@ -1744,6 +1744,7 @@ class TelegramChatBroadcastService
         // отклонённое — только на REJECTED_COOLDOWN_DAYS, иначе каждый отказ навсегда отъедал бы пул
         $rejectedSince = Carbon::now()->subDays(self::REJECTED_COOLDOWN_DAYS);
         $removedSince = Carbon::now()->subDays(self::REMOVED_SERIES_PAUSE_DAYS);
+        [$hiddenSql, $hiddenBindings] = Event::channelHiddenSql();
 
         return Event::query()
             ->active()
@@ -1788,15 +1789,12 @@ class TelegramChatBroadcastService
             ->whereHas('community', function ($q) use ($chat) {
                 $q->where('city_id', $chat->city_id);
             })
-            // Жёсткие фильтры (NULL-safe): не распроданное, не скрытый для канала вид.
+            // Жёсткие фильтры (NULL-safe): не распроданное, не скрытое для канала.
             ->where(function ($q) {
                 $q->whereNull('tickets_status')
                     ->orWhere('tickets_status', '!=', 'sold_out');
             })
-            ->where(function ($q) {
-                $q->whereNull('content_kind')
-                    ->orWhereNotIn('content_kind', Event::CHANNEL_HIDDEN_KINDS);
-            })
+            ->whereRaw('not '.$hiddenSql, $hiddenBindings)
             // Анти-дубль по группе (Layer 2): не предлагать событие, чья event_group
             // уже занята в этом канале (другой источник того же события).
             ->where(function ($q) use ($broadcastId, $usedStatuses, $exceptItemId) {

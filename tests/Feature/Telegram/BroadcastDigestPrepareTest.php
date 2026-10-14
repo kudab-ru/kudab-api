@@ -242,6 +242,46 @@ class BroadcastDigestPrepareTest extends TestCase
         $this->assertNotSame($twinId, (int) $rows[0]['id'], 'спорный лежит ниже бесспорных');
     }
 
+    public function test_hidden_from_channel_is_offered_by_hand_but_not_by_the_automat(): void
+    {
+        $this->actingAsSuperadmin();
+
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+        // Описание длиннее всех: не будь правила, автомат назвал бы его первым.
+        $holidayId = $this->themedEvent('Праздничный спектакль ко Дню народного единства', 7);
+
+        $item = $this->digestItem($broadcast, Carbon::now()->addHours(12));
+        $this->artisan('broadcast:prepare-digests')->assertSuccessful();
+
+        $this->assertNotContains($holidayId, $this->rosterOf($item), 'автомат скрытое не называет');
+
+        $rows = $this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->assertOk()->json('data.candidates');
+
+        $holiday = collect($rows)->firstWhere('id', $holidayId);
+        $this->assertNotNull($holiday, 'а в ручном выборе оно есть');
+        $this->assertTrue($holiday['clash'], 'и лежит ниже бесспорных');
+    }
+
+    public function test_hidden_twin_does_not_push_the_open_event_out_of_the_list(): void
+    {
+        [$item] = $this->composedDigestWithSpare();
+
+        // Одно событие двумя строками: ранняя скрытого вида, поздняя открытого.
+        $hiddenId = $this->themedEvent('Двойник', 1);
+        $openId = $this->themedEvent('Двойник', 2);
+        DB::table('events')->where('id', $hiddenId)->update(['content_kind' => 'official']);
+
+        $ids = array_column($this->getJson("/api/admin/broadcast/items/{$item->id}/digest-candidates")
+            ->assertOk()->json('data.candidates'), 'id');
+
+        $this->assertContains($openId, $ids, 'открытое событие, которое взял бы и автомат, на месте');
+        $this->assertNotContains($hiddenId, $ids, 'а скрытый двойник схлопнут с ним');
+    }
+
     /** Без состава кандидатов не бывает: не с чем сравнивать и нечего заменять. */
     public function test_candidates_require_a_composed_roster(): void
     {

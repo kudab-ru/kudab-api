@@ -114,7 +114,7 @@ class WebEventDetailResource extends JsonResource
             // детальное для страницы
             'description' => $this->description,
 
-            'original_text' => $this->relationLoaded('originalPost')
+            'original_text' => $this->relationLoaded('originalPost') && ! $this->originalIsSitePage()
                 ? ($this->originalPost?->text ?? null)
                 : null,
 
@@ -148,5 +148,16 @@ class WebEventDetailResource extends JsonResource
         }
 
         return $out;
+    }
+
+    /**
+     * Исходник события — страница сайта, которую разбирала модель: меню, афиша на месяц, контакты.
+     * Событию такая страница не принадлежит, поэтому «Читать полностью» её не показывает.
+     */
+    private function originalIsSitePage(): bool
+    {
+        $meta = json_decode((string) ($this->originalPost?->structured_meta ?? ''), true);
+
+        return is_array($meta) && ($meta['mode'] ?? null) === 'llm_text';
     }
 }
