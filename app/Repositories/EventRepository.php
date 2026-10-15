@@ -836,6 +836,7 @@ class EventRepository
                     'fe'
                 )
                 ->leftJoin('event_sources as es', 'es.event_id', '=', 'fe.event_id')
+                ->distinct()
                 ->select([
                     'fe.event_id',
                     'fe.start_time',
@@ -844,25 +845,15 @@ class EventRepository
                     'es.post_external_id',
                 ]);
 
-            // Step 2: cluster sizes (только для не-null пар)
-            $cs = DB::query()
-                ->fromSub($ep, 'cs_ep')
-                ->whereNotNull('cs_ep.source')
-                ->whereNotNull('cs_ep.post_external_id')
-                ->groupBy('cs_ep.source', 'cs_ep.post_external_id')
-                ->selectRaw('cs_ep.source, cs_ep.post_external_id, COUNT(DISTINCT cs_ep.event_id) AS cnt');
-
-            // Step 3: ep + cluster_cnt (0 если не в кластере или null pair)
+            // Step 2–3: размер кластера окном за один проход. Отдельный подсчёт с соединением обратно
+            // Postgres пересчитывал на каждое событие, и запрос по всему городу шёл минуту.
             $epSize = DB::query()
                 ->fromSub($ep, 'ep2')
-                ->leftJoinSub($cs, 'cs2', function ($j) {
-                    $j->on('cs2.source', '=', 'ep2.source')
-                        ->on('cs2.post_external_id', '=', 'ep2.post_external_id');
-                })
                 ->selectRaw('
                     ep2.event_id, ep2.start_time, ep2.start_date,
                     ep2.source, ep2.post_external_id,
-                    COALESCE(cs2.cnt, 0) AS cluster_cnt
+                    CASE WHEN ep2.source IS NULL OR ep2.post_external_id IS NULL THEN 0
+                         ELSE COUNT(*) OVER (PARTITION BY ep2.source, ep2.post_external_id) END AS cluster_cnt
                 ');
 
             // Step 4: canonical cluster per event (max cnt wins для cross-post)
