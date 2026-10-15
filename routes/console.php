@@ -88,3 +88,9 @@ Schedule::command('analytics:warm --requested-only')
     ->everyMinute()
     ->onOneServer()
     ->withoutOverlapping(10);
+
+// «Что сейчас в афише» в админке; кнопка «Обновить» пересчитывает сразу.
+Schedule::command('afisha:now')
+    ->everyThirtyMinutes()
+    ->onOneServer()
+    ->withoutOverlapping(10);

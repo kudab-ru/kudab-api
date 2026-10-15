@@ -145,6 +145,9 @@ Route::prefix('admin')
 
         // Аналитика роста: поиск, индекс и живые карточки одним ответом.
         Route::get('/analytics/growth', [\App\Http\Controllers\Api\Admin\AdminAnalyticsController::class, 'growth']);
+
+        Route::get('/afisha-now', [\App\Http\Controllers\Api\Admin\AdminAfishaNowController::class, 'show']);
+        Route::post('/afisha-now/refresh', [\App\Http\Controllers\Api\Admin\AdminAfishaNowController::class, 'refresh']);
     });
 
 // Управление источником Я.Афиша — ТОЛЬКО суперадмин (отдельная группа, НЕ
