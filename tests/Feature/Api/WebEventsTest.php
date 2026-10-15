@@ -205,6 +205,22 @@ class WebEventsTest extends TestCase
         ]);
     }
 
+    public function test_feed_answer_is_reused_but_search_is_not(): void
+    {
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор Москва');
+        $this->createEvent($msk->id, $community->id, 'Большой джазовый концерт', now()->addDay());
+
+        $first = $this->getJson('/api/web/events?city=moskva')->assertJsonPath('meta.total', 1);
+        $this->getJson('/api/web/events?city=moskva&q=джаз')->assertJsonPath('meta.total', 1);
+
+        $this->createEvent($msk->id, $community->id, 'Малый джазовый концерт', now()->addDays(2));
+
+        $again = $this->getJson('/api/web/events?city=moskva')->assertOk();
+        $this->assertSame($first->getContent(), $again->getContent());
+        $this->getJson('/api/web/events?city=moskva&q=джаз')->assertJsonPath('meta.total', 2);
+    }
+
     public static function searchCases(): array
     {
         return [

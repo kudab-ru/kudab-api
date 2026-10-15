@@ -13,10 +13,16 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use App\Http\Resources\WebEventDetailResource;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Validation\Rule;
 
 class EventsController extends Controller
 {
+    /** Свежий ответ ленты; дальше до `CACHE_STALE_SECONDS` отдаём прежний и пересчитываем после ответа. */
+    private const CACHE_FRESH_SECONDS = 60;
+
+    private const CACHE_STALE_SECONDS = 300;
+
     public function __construct(
         private readonly EventService $service
     ) {}
@@ -89,8 +95,14 @@ class EventsController extends Controller
             }
         }
 
+        // Сайт шлёт «не начавшееся» текущим моментом до секунды. Минута точности хватает,
+        // зато одинаковые запросы этой минуты получают один ответ из кэша.
+        if (isset($v['date_from'])) {
+            $v['date_from'] = preg_replace('/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}):\d{2}(\.\d+)?$/', '$1:00', (string) $v['date_from']);
+        }
+
         if (!empty($v['when']) && empty($v['date_from']) && empty($v['date_to'])) {
-            $now = Carbon::now('Europe/Moscow');
+            $now = Carbon::now('Europe/Moscow')->startOfMinute();
 
             if ($v['when'] === 'today') {
                 $v['date_from'] = $now->copy()->startOfDay()->toDateTimeString();
@@ -133,6 +145,25 @@ class EventsController extends Controller
             unset($v['city']);
         }
 
+        // поиск идёт мимо кэша: разных слов слишком много, и каждый запрос пишется в журнал поиска
+        if (($v['q'] ?? '') !== '') {
+            return $this->listResponse($request, $v, $perPage, $pageNum, $searchFilters);
+        }
+
+        ksort($v);
+        $json = Cache::flexible(
+            'web:events:'.md5(json_encode([$v, $perPage, $pageNum])),
+            [self::CACHE_FRESH_SECONDS, self::CACHE_STALE_SECONDS],
+            // сжимаем, чтобы кэш занимал меньше; base64 нужен хранилищу кэша в базе, двоичное оно не примет
+            fn () => base64_encode(gzcompress($this->listResponse($request, $v, $perPage, $pageNum, $searchFilters)->getContent())),
+            ['seconds' => 30],
+        );
+
+        return new JsonResponse(gzuncompress(base64_decode($json)), 200, [], 0, true);
+    }
+
+    private function listResponse(Request $request, array $v, int $perPage, int $pageNum, array $searchFilters): JsonResponse
+    {
         $result = $this->service->listWeb($v, $perPage);
         // ничего не нашлось, а запрос набран латиницей: пробуем его же в русской раскладке
         $corrected = null;
