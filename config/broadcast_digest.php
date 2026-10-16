@@ -200,6 +200,8 @@ return [
             'min_venues' => 2,
             // квиз и мастер-класс на Хэллоуин — тоже Хэллоуин; общий список исключений их бы снял
             'stop_list' => false,
+            // у части вечеринок место только в адресе, без карточки площадки
+            'address_as_place' => true,
             'cheap_line' => false,
             'keeps_own_post' => true,
             'line' => 'compact',

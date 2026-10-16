@@ -1241,12 +1241,16 @@ class BroadcastDigestRubricsTest extends TestCase
         $rock = $this->event('Кошмар на улице Кирова', 46, free: false, priceMin: 600, hour: 21,
             description: 'Хэллоуин в рок-баре: пять групп и конкурс костюмов. '.str_repeat('описание события достаточной длины. ', 4));
         $quiz = $this->event('Квиз: Halloween', 44, free: false, priceMin: 500);
+        // у части вечеринок место только в адресе: называем, но один адрес — одна строка
+        $bar = $this->event('Вечеринка в стиле Хэллоуин', 46, free: false, priceMin: 800, hour: 22, address: 'г Воронеж, пр-кт Революции, д 53');
+        $club = $this->event('Хэллоуин в клубе', 45, free: false, priceMin: 800, hour: 23, address: 'Клуб Aura, г Воронеж, пр-кт Революции, д 56');
+        $this->event('Ещё Хэллоуин в том же баре', 46, free: false, priceMin: 800, hour: 23, address: 'г Воронеж, пр-кт Революции, д 53');
         $this->event('Хэллоуин через месяц', 76, free: false, priceMin: 500);
         $this->event('Обычный концерт', 46, free: false, priceMin: 500, hour: 17);
 
         $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::parse('2026-10-24 12:00', 'Europe/Moscow'), null, 'povod-halloween');
 
-        $this->assertEqualsCanonicalizing([$party, $rock, $quiz], $out['event_ids']);
+        $this->assertEqualsCanonicalizing([$party, $rock, $quiz, $bar, $club], $out['event_ids']);
         $this->assertStringContainsString('Хэллоуин в Воронеже: где отмечать', $out['caption']);
     }
 
@@ -1579,13 +1583,15 @@ class BroadcastDigestRubricsTest extends TestCase
         bool $donation = false,
         ?int $groupId = null,
         int $minute = 0,
+        ?string $address = null,
     ): int {
         $community = \App\Models\Community::create([
             'name' => 'Организатор '.uniqid(),
             'city_id' => $this->cityId,
         ]);
 
-        $venueId = DB::table('venues')->insertGetId([
+        // с адресом — событие без карточки площадки
+        $venueId = $address !== null ? null : DB::table('venues')->insertGetId([
             'city_id' => $this->cityId,
             'name' => 'Площадка '.uniqid(),
             'slug' => 'venue-'.uniqid(),
@@ -1599,6 +1605,7 @@ class BroadcastDigestRubricsTest extends TestCase
         $event->status = 'active';
         $event->city_id = $this->cityId;
         $event->venue_id = $venueId;
+        $event->address = $address;
         // Час задаём ПО МОСКВЕ и переводим в UTC ЯВНО. Приложение живёт в UTC,
         // а запись даты идёт форматированием без смены пояса: 21:00 по Москве
         // ложилось в базу как 21:00 UTC, то есть полночь по Москве, и рубрика

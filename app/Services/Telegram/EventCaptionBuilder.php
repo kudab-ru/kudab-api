@@ -142,7 +142,7 @@ final class EventCaptionBuilder
     ): array {
         $city = $this->firstNonEmpty($raw, ['city', 'city_name']);
         $addressRaw = trim((string) ($raw['address'] ?? ''));
-        $address = $this->normalizeAddress($city, $addressRaw);
+        $address = self::normalizeAddress($city, $addressRaw);
         $placeShort = $this->placeShort($raw, $city, $address);
 
         // город НЕ убирать: в city населённый пункт (Рамонь, Костёнки), а не город канала
@@ -430,7 +430,7 @@ final class EventCaptionBuilder
      * «394036, Воронежская обл, г Воронеж, пр-кт Революции, д 46»
      * → «г Воронеж, пр-кт Революции, д 46».
      */
-    private function normalizeAddress(string $city, string $addressRaw): string
+    private static function normalizeAddress(string $city, string $addressRaw): string
     {
         $addressRaw = trim($addressRaw);
         if ($addressRaw === '') {
@@ -499,10 +499,21 @@ final class EventCaptionBuilder
             return $name;
         }
 
+        return self::placeFromAddress((string) ($raw['address'] ?? ''), $city, $address);
+    }
+
+    /**
+     * Место события без площадки — из адреса: имя места первым сегментом или «улица, дом».
+     * Им же пользуется подборка повода (`BroadcastDigestComposer::compactLine`).
+     */
+    public static function placeFromAddress(string $addressRaw, string $city, ?string $address = null): string
+    {
+        $address ??= self::normalizeAddress($city, $addressRaw);
+
         // без площадки парсер ставит имя места первым: «Атмосферный бар Понеслось, г Воронеж, …»;
         // normalizeAddress его срезает, поэтому смотрим сырой адрес
         // запятая внутри скобок имя не рвёт: «сквер ДК Карла Маркса (Никитинская, 1), ул. …»
-        preg_match('/^(?:[^,(«"]+|\([^)]*\)?|«[^»]*»?|"[^"]*"?)*/u', (string) ($raw['address'] ?? ''), $m);
+        preg_match('/^(?:[^,(«"]+|\([^)]*\)?|«[^»]*»?|"[^"]*"?)*/u', $addressRaw, $m);
         $first = trim($m[0] ?? '');
         $bare = trim((string) preg_replace('/\([^)]*\)/u', '', $first));
         if ($bare !== '' && mb_strtolower($bare) !== mb_strtolower(trim($city)) && preg_match(self::NOT_PLACE, $bare) !== 1) {

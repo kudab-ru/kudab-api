@@ -346,7 +346,7 @@ final class BroadcastDigestComposer
                 // price_text — ради «по регистрации»: отдельного поля под это нет,
                 // слово живёт только в тексте цены. time_precision — ради событий
                 // без времени: у них в start_time полночь, и «сб 00:00» это враньё.
-                'e.price_text', 'e.time_precision', 'e.content_kind',
+                'e.price_text', 'e.time_precision', 'e.content_kind', 'e.address',
                 'v.name as venue_name',
             ])
             ->keyBy(fn ($r) => (int) $r->id);
@@ -813,6 +813,8 @@ final class BroadcastDigestComposer
                 'e.price_text', 'e.time_precision', 'e.content_kind',
                 // для оценки интереса в pickNamed: прокат или разовое, детское ли
                 'e.end_time', 'e.audience',
+                // место события без площадки — у повода, см. `address_as_place`
+                'e.address',
                 'v.name as venue_name',
             ])
             ->selectRaw($hiddenSql.' as channel_hidden', $hiddenBindings)
@@ -1134,8 +1136,12 @@ final class BroadcastDigestComposer
         $bothDays = ($theme['window'] ?? '') === 'weekend';
 
         // Без площадки не называем: строка «название · дата» без места говорит половину нужного,
-        // а правило «одна площадка — одна строка» её не держит.
-        $ranked = $this->scorer->rankRows($rows->filter(fn ($r) => $r->venue_id !== null)->values()->all());
+        // а правило «одна площадка — одна строка» её не держит. Повод берёт и адрес: вечеринку в баре
+        // без карточки площадки тоже ищут.
+        $byAddress = ! empty($theme['address_as_place']);
+        $ranked = $this->scorer->rankRows($rows->filter(
+            fn ($r) => $r->venue_id !== null || ($byAddress && trim((string) ($r->address ?? '')) !== ''),
+        )->values()->all());
         if (! empty($theme['ties_by_price'])) {
             usort($ranked, fn ($a, $b) => [$this->scorer->interest($b), (int) ($b->price_min ?? 0)]
                 <=> [$this->scorer->interest($a), (int) ($a->price_min ?? 0)]);
@@ -1198,7 +1204,7 @@ final class BroadcastDigestComposer
 
         $kind = $this->scorer->explain($row)['kind'];
         foreach ($named as $other) {
-            if ((int) $other->venue_id === (int) $row->venue_id) {
+            if (self::samePlace($other, $row)) {
                 return false;
             }
             // «одна строка на день» — для недельной подборки; на двух днях выходных это потолок в две строки
@@ -1266,6 +1272,16 @@ final class BroadcastDigestComposer
         }
 
         return array_values($named);
+    }
+
+    /** Одна площадка — одна строка; у события без площадки место — его адрес. */
+    private static function samePlace(object $a, object $b): bool
+    {
+        if ($a->venue_id !== null || $b->venue_id !== null) {
+            return (int) $a->venue_id === (int) $b->venue_id;
+        }
+
+        return mb_strtolower(trim((string) ($a->address ?? ''))) === mb_strtolower(trim((string) ($b->address ?? '')));
     }
 
     private static function dayOf(object $row): string
@@ -1402,7 +1418,7 @@ final class BroadcastDigestComposer
             };
 
             if ($compact) {
-                $lines[] = $this->compactLine($row, $shortDates, $sessions[(int) $row->id] ?? [], $emoji[(int) $row->id] ?? '', $item);
+                $lines[] = $this->compactLine($row, $shortDates, $sessions[(int) $row->id] ?? [], $emoji[(int) $row->id] ?? '', $item, (string) ($broadcast->chat?->city?->name ?? ''));
                 $rich[] = $hook === '' ? end($lines) : end($lines).' '.$this->escape($hook);
 
                 continue;
@@ -1513,9 +1529,12 @@ final class BroadcastDigestComposer
      *
      * @param  list<Carbon>  $times
      */
-    private function compactLine(object $row, bool $shortDates, array $times, string $mark, ?TelegramChatBroadcastItem $item): string
+    private function compactLine(object $row, bool $shortDates, array $times, string $mark, ?TelegramChatBroadcastItem $item, string $city): string
     {
         $venue = $this->venueLabel($row);
+        if ($venue === '' && trim((string) ($row->address ?? '')) !== '') {
+            $venue = EventCaptionBuilder::placeFromAddress((string) $row->address, $city);
+        }
         if ($venue !== '' && mb_stripos((string) $row->title, $venue) !== false) {
             $venue = '';
         }
