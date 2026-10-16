@@ -88,9 +88,13 @@ final class BroadcastEventPicker
         $topics = $this->topics($ids);
         $repeats = $this->repeats($events);
 
+        // звать на то, что начнётся в первый час после поста, поздно: в списке такое идёт в конце дня
+        $soonUntil = $at->copy()->addHour();
         $rows = [];
         foreach ($events as $e) {
-            $rows[] = $this->row($e, $at, $topics[$e->id] ?? [null, null], $repeats[(int) $e->event_group_id] ?? 1)
+            $soon = $e->start_time !== null && $e->start_time->gte($at) && $e->start_time->lt($soonUntil);
+            $rows[] = ['soon' => $soon]
+                + $this->row($e, $at, $topics[$e->id] ?? [null, null], $repeats[(int) $e->event_group_id] ?? 1)
                 + $this->slotVerdict($e, $at, $occupant, $taken[$e->id] ?? null, $related[$e->id] ?? null, $removed[$e->id] ?? null);
         }
 
@@ -168,7 +172,7 @@ final class BroadcastEventPicker
                 $verdict['note'] = implode(' · ', array_filter([$verdict['note'], ...$more])) ?: null;
                 $verdict['tone'] ??= $more !== [] ? 'muted' : null;
             }
-            $rows[] = $this->row($e, $publishAt, $topics[$e->id] ?? [null, null], $repeats[(int) $e->event_group_id] ?? 1) + $verdict;
+            $rows[] = ['soon' => false] + $this->row($e, $publishAt, $topics[$e->id] ?? [null, null], $repeats[(int) $e->event_group_id] ?? 1) + $verdict;
         }
 
         return ['rows' => $rows, 'meta' => ['search' => $search, 'total' => count($rows)]];
