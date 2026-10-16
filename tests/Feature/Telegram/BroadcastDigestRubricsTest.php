@@ -510,14 +510,40 @@ class BroadcastDigestRubricsTest extends TestCase
     {
         $this->onlyRubric('besplatno');
         $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
-        $this->event('Ярмарка весь день', 1, free: true, hour: 0, description: $long,
+        $fair = $this->event('Ярмарка весь день', 1, free: true, hour: 0, description: $long,
             timePrecision: 'date');
+        $this->poster($fair);
         $this->fill('Бесплатное', free: true);
 
         $caption = $this->caption();
 
         $this->assertStringContainsString('Ярмарка весь день', $caption);
         $this->assertStringNotContainsString('00:00', $caption);
+    }
+
+    #[Test]
+    public function the_digest_names_a_concert_before_long_talks(): void
+    {
+        $this->onlyRubric('besplatno');
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 12);
+        foreach ([1, 2, 3, 4] as $day) {
+            $this->retag($this->event('Беседа о городе '.$day, $day, free: true, description: $long), 'education');
+        }
+        $this->retag($this->event('Концерт во дворе', 3, free: true), 'music');
+
+        $this->assertStringContainsString('Концерт во дворе', $this->caption());
+    }
+
+    #[Test]
+    public function the_weekend_digest_names_both_days(): void
+    {
+        $this->onlyRubric('na-vyhodnyh');
+        foreach (range(1, 5) as $i) {
+            $this->poster($this->event('Субботний спектакль '.$i, 4, free: false, priceMin: 1500, hour: 12 + $i));
+        }
+        $this->event('Воскресный спектакль', 5, free: false, priceMin: 1500);
+
+        $this->assertStringContainsString('Воскресный спектакль', $this->caption(Carbon::parse('2026-09-18 12:00', 'Europe/Moscow')));
     }
 
     /* ──────────────── счёт: число и ссылка из одного фильтра ──────────────── */
@@ -1034,8 +1060,8 @@ class BroadcastDigestRubricsTest extends TestCase
         $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
         $group = $this->group();
 
-        $this->event('Зин-фестиваль', 1, free: true, hour: 12, description: $long, groupId: $group);
-        $this->event('Зин-фестиваль', 2, free: true, hour: 12, description: $long, groupId: $group);
+        $this->poster($this->event('Зин-фестиваль', 1, free: true, hour: 12, description: $long, groupId: $group));
+        $this->poster($this->event('Зин-фестиваль', 2, free: true, hour: 12, description: $long, groupId: $group));
         $this->fill('Бесплатное', free: true);
 
         $this->assertMatchesRegularExpression('/(пн|вт|ср|чт|пт|сб|вс) и (пн|вт|ср|чт|пт|сб|вс) с 12:00/u', $this->caption());
@@ -1049,8 +1075,8 @@ class BroadcastDigestRubricsTest extends TestCase
         $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
         $group = $this->group();
 
-        $this->event('Раскоп', 1, free: true, hour: 11, description: $long, groupId: $group, minute: 30);
-        $this->event('Раскоп', 1, free: true, hour: 14, description: $long, groupId: $group, minute: 30);
+        $this->poster($this->event('Раскоп', 1, free: true, hour: 11, description: $long, groupId: $group, minute: 30));
+        $this->poster($this->event('Раскоп', 1, free: true, hour: 14, description: $long, groupId: $group, minute: 30));
         $this->fill('Бесплатное', free: true);
 
         $this->assertMatchesRegularExpression('/(пн|вт|ср|чт|пт|сб|вс) 11:30 и 14:30/u', $this->caption());
@@ -1088,6 +1114,41 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->fill('Бесплатное', free: true);
 
         $this->assertStringNotContainsString('12:00 и', $this->caption());
+    }
+
+    /** Первичная тема события вместо театра из фикстуры. */
+    private function retag(int $eventId, string $slug): void
+    {
+        $interestId = DB::table('interests')->where('slug', $slug)->value('id')
+            ?? DB::table('interests')->insertGetId([
+                'name' => $slug, 'slug' => $slug, 'created_at' => now(), 'updated_at' => now(),
+            ]);
+        DB::table('event_interest')->where('event_id', $eventId)->update(['interest_id' => $interestId]);
+    }
+
+    /** Афиша у события: у остальных её нет, и подборка назовёт его первым. */
+    private function poster(int $eventId): void
+    {
+        $networkId = DB::table('social_networks')->value('id')
+            ?? DB::table('social_networks')->insertGetId([
+                'name' => 'VK', 'slug' => 'vk', 'created_at' => now(), 'updated_at' => now(),
+            ]);
+        $linkId = DB::table('community_social_links')->insertGetId([
+            'community_id' => DB::table('events')->where('id', $eventId)->value('community_id'),
+            'social_network_id' => $networkId,
+            'url' => 'https://vk.com/'.uniqid(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('event_sources')->insert([
+            'event_id' => $eventId,
+            'social_link_id' => $linkId,
+            'source' => 'vk',
+            'post_external_id' => 'post-'.uniqid(),
+            'images' => json_encode(['https://example.test/poster-'.$eventId.'.jpg']),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     private function group(): int

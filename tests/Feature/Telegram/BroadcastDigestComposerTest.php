@@ -347,8 +347,9 @@ class BroadcastDigestComposerTest extends TestCase
     public function test_named_events_are_ordered_by_date(): void
     {
         $broadcast = $this->makeChannel();
+        // поздние с афишей интереснее: без сортировки по датам они встали бы первыми
         foreach (range(1, 6) as $n) {
-            $this->themedEvent("Спектакль {$n}", $n);
+            $this->themedEvent("Спектакль {$n}", $n, withImage: $n > 3);
         }
 
         $out = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now());
@@ -361,6 +362,20 @@ class BroadcastDigestComposerTest extends TestCase
         $sorted = $starts;
         sort($sorted);
         $this->assertSame($sorted, $starts, 'порядок в тексте — хронологический');
+    }
+
+    public function test_a_cheap_play_gets_a_line(): void
+    {
+        $broadcast = $this->makeChannel();
+        $cheap = $this->themedEvent('Спектакль за 500', 1);
+        foreach (range(2, 6) as $n) {
+            $this->themedEvent("Дорогой спектакль {$n}", $n, withImage: true);
+        }
+
+        $out = app(BroadcastDigestComposer::class)->compose($broadcast, Carbon::now());
+
+        $this->assertNotNull($out);
+        $this->assertContains($cheap, $out['event_ids'], 'без афиши он ниже всех, но дешёвого среди названных больше нет');
     }
 
     /** Заголовок не по теме в подборку не идёт, даже с нужным тегом. */
@@ -1005,9 +1020,6 @@ class BroadcastDigestComposerTest extends TestCase
         $event->start_time = Carbon::now()->addDays($n)->setTime(19, 0);
         $event->start_date = Carbon::now()->addDays($n)->toDateString();
         $event->end_time = Carbon::now()->addDays($n)->setTime(21, 0);
-        // Длина описания РАСТЁТ с номером дня: отбор идёт по полноте карточки,
-        // значит без сортировки на выходе получится обратный хронологии
-        // порядок — иначе тест на порядок проходил бы сам собой.
         $event->description = str_repeat('описание события достаточной длины. ', 4 + $n);
         $event->price_min = 500 * $n;
         $event->save();

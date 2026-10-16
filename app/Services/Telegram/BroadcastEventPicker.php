@@ -8,6 +8,7 @@ use App\Models\Event;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Repositories\EventRepository;
+use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Support\Telegram\VenueName;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
@@ -29,9 +30,6 @@ final class BroadcastEventPicker
 
     private const SEARCH_LIMIT = 40;
 
-    /** Столько дат за месяц — это каждую неделю и чаще: квесты, еженедельный стендап, экскурсии по расписанию. */
-    private const REPEATS_FOLD = 4;
-
     /** Повтор серии и двойник ищутся среди постов за этот срок и тех, что ещё в ленте. */
     private const RELATED_DAYS = 30;
 
@@ -43,7 +41,7 @@ final class BroadcastEventPicker
         TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
     ];
 
-    /** Вид для фильтров панели: по первичной теме или её родителю. */
+    /** Вид для фильтров панели по корню первичной темы. */
     private const KINDS = [
         'music' => 'concert',
         'theatre' => 'theatre',
@@ -58,6 +56,7 @@ final class BroadcastEventPicker
     public function __construct(
         private readonly EventRepository $events,
         private readonly BroadcastDigestComposer $composer,
+        private readonly EventBroadcastScorer $scorer,
     ) {}
 
     /**
@@ -85,8 +84,6 @@ final class BroadcastEventPicker
         $taken = $this->takenBy((int) $broadcast->id, $ids, null);
         $related = $this->relatedShown((int) $broadcast->id, $events, null);
         $removed = $this->removedAt((int) $broadcast->id, $ids);
-        $topics = $this->topics($ids);
-        $repeats = $this->repeats($events);
 
         // звать на то, что начнётся в первый час после поста, поздно: в списке такое идёт в конце дня
         $soonUntil = $at->copy()->addHour();
@@ -94,7 +91,7 @@ final class BroadcastEventPicker
         foreach ($events as $e) {
             $soon = $e->start_time !== null && $e->start_time->gte($at) && $e->start_time->lt($soonUntil);
             $rows[] = ['soon' => $soon]
-                + $this->row($e, $at, $topics[$e->id] ?? [null, null], $repeats[(int) $e->event_group_id] ?? 1)
+                + $this->row($e, $at)
                 + $this->slotVerdict($e, $at, $occupant, $taken[$e->id] ?? null, $related[$e->id] ?? null, $removed[$e->id] ?? null);
         }
 
@@ -151,8 +148,6 @@ final class BroadcastEventPicker
         $ids = $events->modelKeys();
         $taken = $this->takenBy((int) $broadcast->id, $ids, (int) $item->id);
         $notes = $this->composer->notesForEvents($item, $publishAt, $ids, $replacing);
-        $topics = $this->topics($ids);
-        $repeats = $this->repeats($events);
         [$since, $until] = $window;
 
         $rows = [];
@@ -172,7 +167,7 @@ final class BroadcastEventPicker
                 $verdict['note'] = implode(' · ', array_filter([$verdict['note'], ...$more])) ?: null;
                 $verdict['tone'] ??= $more !== [] ? 'muted' : null;
             }
-            $rows[] = ['soon' => false] + $this->row($e, $publishAt, $topics[$e->id] ?? [null, null], $repeats[(int) $e->event_group_id] ?? 1) + $verdict;
+            $rows[] = ['soon' => false] + $this->row($e, $publishAt) + $verdict;
         }
 
         return ['rows' => $rows, 'meta' => ['search' => $search, 'total' => count($rows)]];
@@ -219,17 +214,17 @@ final class BroadcastEventPicker
     {
         $events = $q->get();
         $this->events->hydrateImagesFor($events);
+        $this->scorer->prepare($events);
 
         return $events;
     }
 
-    /**
-     * @param  array{0: string|null, 1: string|null}  $topic  первичная тема и её родитель
-     * @return array<string, mixed>
-     */
-    private function row(Event $e, Carbon $at, array $topic, int $repeats): array
+    /** @return array<string, mixed> */
+    private function row(Event $e, Carbon $at): array
     {
-        [$slug, $parent] = $topic;
+        $facts = $this->scorer->explain($e);
+        $kind = $facts['kind'];
+        $repeats = $facts['repeats'];
         $start = $e->start_time?->copy()->setTimezone(self::TZ);
         $runsUntil = PostTiming::runningUntil($e, $at)?->setTimezone(self::TZ);
         $images = $e->getAttribute('images');
@@ -244,17 +239,20 @@ final class BroadcastEventPicker
             'venue' => VenueName::label($e->venue?->name) ?: null,
             'price' => $this->price($e),
             'cover' => is_array($images) ? ($images[0] ?? null) : null,
-            'kind' => self::KINDS[$slug] ?? self::KINDS[$parent] ?? null,
+            'kind' => self::KINDS[$kind ?? ''] ?? null,
             'free' => in_array($e->price_status, ['free', 'donation'], true),
-            'kids' => in_array($e->audience, ['kids', 'family'], true) || $slug === 'kids',
-            'low' => in_array($slug, self::LOW, true) || in_array($parent, self::LOW, true),
-            'folded' => $runsUntil !== null || $repeats >= self::REPEATS_FOLD,
+            'kids' => in_array($e->audience, ['kids', 'family'], true) || $kind === 'kids',
+            'low' => in_array($kind, self::LOW, true),
+            'folded' => $runsUntil !== null || $repeats >= EventBroadcastScorer::WEEKLY_FROM,
             'tag' => match (true) {
                 $runsUntil !== null => 'идёт до '.$runsUntil->locale('ru')->isoFormat('D MMMM'),
-                $repeats >= self::REPEATS_FOLD => $repeats.' '.PickReason::plural($repeats, 'дата', 'даты', 'дат').' за месяц',
+                $repeats >= EventBroadcastScorer::WEEKLY_FROM => $repeats.' '.PickReason::plural($repeats, 'дата', 'даты', 'дат').' за месяц',
                 $repeats <= 1 => 'разовое',
                 default => null,
             },
+            // по ней панель ставит интересное выше в своём дне
+            'interest' => $this->scorer->interest($e),
+            'rating' => $facts['rating'] >= EventBroadcastScorer::RATED_FROM ? $facts['rating'] : null,
         ];
     }
 
@@ -484,51 +482,5 @@ final class BroadcastEventPicker
         }
 
         return $out;
-    }
-
-    /**
-     * Первичная тема с меньшим id, как и во всей рассылке, и её родитель.
-     *
-     * @param  list<int>  $eventIds
-     * @return array<int, array{0: string, 1: string|null}>
-     */
-    private function topics(array $eventIds): array
-    {
-        if ($eventIds === []) {
-            return [];
-        }
-
-        $out = [];
-        foreach (DB::table('event_interest as ei')
-            ->join('interests as i', 'i.id', '=', 'ei.interest_id')
-            ->leftJoin('interests as p', 'p.id', '=', 'i.parent_id')
-            ->whereIn('ei.event_id', $eventIds)
-            ->where('ei.rank', 0)
-            ->orderBy('i.id')
-            ->get(['ei.event_id', 'i.slug', 'p.slug as parent']) as $row) {
-            $out[(int) $row->event_id] ??= [(string) $row->slug, $row->parent !== null ? (string) $row->parent : null];
-        }
-
-        return $out;
-    }
-
-    /** @return array<int, int> серия → сколько у неё дат в ближайший месяц */
-    private function repeats(EloquentCollection $events): array
-    {
-        $groups = $events->pluck('event_group_id')->filter()->unique()->values()->all();
-        if ($groups === []) {
-            return [];
-        }
-
-        return DB::table('events')
-            ->whereIn('event_group_id', $groups)
-            ->where('status', 'active')
-            ->whereNull('deleted_at')
-            ->whereBetween('start_time', [Carbon::now()->utc(), Carbon::now()->addDays(30)->utc()])
-            ->groupBy('event_group_id')
-            ->selectRaw('event_group_id, count(*) as n')
-            ->pluck('n', 'event_group_id')
-            ->map(fn ($n) => (int) $n)
-            ->all();
     }
 }

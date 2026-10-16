@@ -80,7 +80,10 @@ final class BroadcastDigestComposer
      * отсечки, вычет показанного и схлопывание повторов, и к числу на странице
      * отношения не имеет.
      */
-    public function __construct(private readonly \App\Services\EventService $events) {}
+    public function __construct(
+        private readonly \App\Services\EventService $events,
+        private readonly Scoring\EventBroadcastScorer $scorer,
+    ) {}
 
     /**
      * Собрать подборку для канала на момент публикации.
@@ -363,7 +366,12 @@ final class BroadcastDigestComposer
 
         return [
             'theme' => $theme,
-            'named' => $this->pickNamed($rows, self::namedRange($theme), (bool) ($theme['one_per_day'] ?? true)),
+            'named' => $this->pickNamed(
+                $rows,
+                self::namedRange($theme),
+                (bool) ($theme['one_per_day'] ?? true),
+                ($theme['window'] ?? '') === 'weekend',
+            ),
             'total' => $total,
             'venues' => $venues,
         ];
@@ -762,6 +770,8 @@ final class BroadcastDigestComposer
                 // слово живёт только в тексте цены. time_precision — ради событий
                 // без времени: у них в start_time полночь, и «сб 00:00» это враньё.
                 'e.price_text', 'e.time_precision', 'e.content_kind',
+                // для оценки интереса в pickNamed: прокат или разовое, детское ли
+                'e.end_time', 'e.audience',
                 'v.name as venue_name',
             ])
             ->selectRaw($hiddenSql.' as channel_hidden', $hiddenBindings)
@@ -1035,108 +1045,141 @@ final class BroadcastDigestComposer
     }
 
     /**
-     * Три события, которые назовём поимённо.
+     * Кого назвать поимённо: самых интересных по оценке ленты (`EventBroadcastScorer::rankRows`), с
+     * разными площадками, у недельных рубрик — и с разными днями. Вид, который уже назван, ждёт, пока не
+     * кончатся другие; на выходных называем оба дня; бесплатное или дешёвое встаёт, если его не набралось.
      *
-     * Одна строка на площадку и одна на день: подборка о разнообразии недели, и
-     * три спектакля одного театра подряд — это афиша театра.
-     *
-     * Внутри — по длине описания. Честно: это мера ПОЛНОТЫ карточки, а не
-     * качества события, и вдобавок мера источника — у импорта Яндекс.Афиши
-     * описания в разы длиннее (684 символа против 46 у Никитинки), поэтому
-     * длинные строки систематически приводят его.
-     *
-     * Скорер ленты вместо неё НЕ берём, но не потому, что он «раздаёт всем
-     * одинаковые баллы» — это было неверно и переоткрывало вопрос. Замер
-     * 2026-09-15: на очищенном пуле он даёт 7 разных баллов в концертах
-     * (70..115) и 8 в спектаклях (65..120), то есть разделяет. Не берём
-     * потому, ЧТО он складывает: фото, ФИАС, площадку, цену — ту же полноту
-     * карточки, — и в его топе оказываются вечеринки и квест-комнаты. Плюс
-     * штраф за близость даты топит выходные: 59% кандидатов недели приходятся
-     * на пт-вс и получают минус пять.
-     *
-     * Поведенческого сигнала в базе нет ВООБЩЕ: event_attendees, interest_user
-     * и context_interactions пусты, просмотров и лайков схема не хранит.
-     * Значит «лучшее» тут измерить нечем, и притворяться, что умеем
-     * ранжировать качество, не надо.
-     *
+     * @param  array{0:int,1:int}  $range  сколько назвать: минимум и максимум
      * @return list<object>
      */
-    /**
-     * @param  array{0:int,1:int}  $range  сколько назвать: минимум и максимум
-     */
-    private function pickNamed(\Illuminate\Support\Collection $rows, array $range = [3, 3], bool $onePerDay = true): array
+    private function pickNamed(\Illuminate\Support\Collection $rows, array $range = [3, 3], bool $onePerDay = true, bool $bothDays = false): array
     {
         [$min, $max] = $range;
-        $minDescription = (int) config('broadcast_digest.min_description', 120);
 
-        $ranked = $rows
-            ->filter(fn ($r) => mb_strlen(trim((string) $r->description)) >= $minDescription)
-            ->sortByDesc(fn ($r) => mb_strlen(trim((string) $r->description)))
-            ->values();
+        // Без площадки не называем: строка «название · дата» без места говорит половину нужного,
+        // а правило «одна площадка — одна строка» её не держит.
+        $ranked = $this->scorer->rankRows($rows->filter(fn ($r) => $r->venue_id !== null)->values()->all());
 
-        // Полных карточек может не хватить — добираем остальными, иначе тема с
-        // хорошим составом отваливалась бы из-за коротких описаний.
-        $pool = $ranked->concat($rows->reject(
-            fn ($r) => $ranked->contains(fn ($x) => $x->id === $r->id)
-        ));
-
+        /** @var array<int, object> $named */
         $named = [];
-        $venues = [];
-        $days = [];
 
-        foreach ($pool as $row) {
-            $venue = $row->venue_id !== null ? (int) $row->venue_id : null;
-            $day = Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
+        if ($bothDays) {
+            foreach (array_unique(array_map(fn ($r) => self::dayOf($r), $ranked)) as $day) {
+                foreach ($ranked as $row) {
+                    // день важнее разнообразия вида: воскресенье без строки хуже двух спектаклей
+                    if (self::dayOf($row) === $day && $this->fitsNamed($row, $named, $min, $max, $onePerDay, false)) {
+                        $named[(int) $row->id] = $row;
+                        break;
+                    }
+                }
+            }
+        }
 
-            // Без площадки не называем вовсе. Такая строка никогда не
-            // блокировалась правилом «одна площадка — одна строка» и никогда
-            // не занимала площадку: три события без места прошли бы все три
-            // отсечки и встали рядом. А читателю строка «название · дата» без
-            // места говорит ровно половину нужного.
-            if ($venue === null) {
+        foreach ([true, false] as $strictKind) {
+            foreach ($ranked as $row) {
+                if ($this->fitsNamed($row, $named, $min, $max, $onePerDay, $strictKind)) {
+                    $named[(int) $row->id] = $row;
+                }
+            }
+        }
+
+        $named = $this->withCheapLine($named, $ranked, $min, $max, $onePerDay, $bothDays);
+
+        // по датам: подборка отвечает на вопрос «что впереди», и читать её удобно по порядку недели
+        usort($named, fn ($a, $b) => strcmp((string) $a->start_time, (string) $b->start_time));
+
+        return $named;
+    }
+
+    /** Цена, до которой событие в подборке считается дешёвым. */
+    private const CHEAP_MAX = 500;
+
+    /**
+     * Встанет ли строка рядом с уже названными.
+     *
+     * @param  array<int, object>  $named
+     */
+    private function fitsNamed(object $row, array $named, int $min, int $max, bool $onePerDay, bool $strictKind): bool
+    {
+        if (isset($named[(int) $row->id]) || count($named) >= $max) {
+            return false;
+        }
+
+        $kind = $this->scorer->explain($row)['kind'];
+        foreach ($named as $other) {
+            if ((int) $other->venue_id === (int) $row->venue_id) {
+                return false;
+            }
+            // «одна строка на день» — для недельной подборки; на двух днях выходных это потолок в две строки
+            if ($onePerDay && self::dayOf($other) === self::dayOf($row)) {
+                return false;
+            }
+            if ($strictKind && $kind !== null && $this->scorer->explain($other)['kind'] === $kind) {
+                return false;
+            }
+        }
+
+        // сверх минимума — только с описанием на строку, иначе встанет голое «название · дата · место»
+        return count($named) < $min
+            || mb_strlen(trim((string) $row->description)) >= (int) config('broadcast_digest.min_description', 120);
+    }
+
+    /**
+     * Если среди названных нет бесплатного или дешёвого, лучшее такое встаёт в свободное место или
+     * вместо самой слабой строки. Единственную строку дня на выходных не трогаем.
+     *
+     * @param  array<int, object>  $named
+     * @param  list<object>  $ranked
+     * @return list<object>
+     */
+    private function withCheapLine(array $named, array $ranked, int $min, int $max, bool $onePerDay, bool $bothDays): array
+    {
+        $cheap = fn (object $r) => in_array($r->price_status, ['free', 'donation'], true)
+            || ((int) ($r->price_min ?? 0) > 0 && (int) $r->price_min <= self::CHEAP_MAX);
+
+        if ($named === [] || array_filter($named, $cheap) !== []) {
+            return array_values($named);
+        }
+
+        $position = array_flip(array_map(fn ($r) => (int) $r->id, $ranked));
+        foreach ($ranked as $row) {
+            if (! $cheap($row) || isset($named[(int) $row->id])) {
                 continue;
             }
-            if (isset($venues[$venue])) {
-                continue;
-            }
-            // «Одна строка на день» существует ради НЕДЕЛЬНОЙ подборки: она
-            // раскладывает пост по дням вперёд. На двухдневном окне это же
-            // правило превращается в потолок из двух строк — то есть рубрика
-            // «На выходных» физически не может назвать больше двух событий.
-            // Поэтому правило снимаемое, а не вечное.
-            if ($onePerDay && isset($days[$day])) {
-                continue;
+            if ($this->fitsNamed($row, $named, $min, $max, $onePerDay, false)) {
+                $named[(int) $row->id] = $row;
+                break;
             }
 
-            // ЧИСЛО НАЗВАННЫХ ПЛАВАЕТ, но не наугад. Сверх минимума берём
-            // только того, кому есть что сказать: у события должно хватать
-            // описания на строку-изюм. Иначе четвёртым встанет голое
-            // «название · дата · место» — и пост выглядит недоделанным, а не
-            // щедрым. Подпись это тоже бережёт: замер на живой подборке —
-            // шапка с подвалом 147 знаков, каждое названное с фразой около
-            // 176, при пороге 950 пятое уже не влезает.
-            $full = mb_strlen(trim((string) $row->description)) >= $minDescription;
-            if (count($named) >= $min && ! $full) {
-                continue;
+            $weakest = null;
+            foreach ($named as $id => $other) {
+                $dayMates = array_filter($named, fn ($n) => self::dayOf($n) === self::dayOf($other));
+                if ($bothDays && count($dayMates) === 1) {
+                    continue;
+                }
+                if ($weakest === null || $position[$id] > $position[(int) $weakest->id]) {
+                    $weakest = $other;
+                }
+            }
+            if ($weakest === null) {
+                break;
             }
 
-            $named[] = $row;
-            if ($venue !== null) {
-                $venues[$venue] = true;
-            }
-            $days[$day] = true;
-
-            if (count($named) >= $max) {
+            $without = $named;
+            unset($without[(int) $weakest->id]);
+            if ($this->fitsNamed($row, $without, $min, $max, $onePerDay, false)) {
+                $without[(int) $row->id] = $row;
+                $named = $without;
                 break;
             }
         }
 
-        // По датам: подборка отвечает на вопрос «что впереди», и читать её
-        // удобно по порядку недели. Отбор шёл по полноте карточки, поэтому
-        // порядок на выходе был случайным — сначала суббота, потом среда.
-        usort($named, fn ($a, $b) => strcmp((string) $a->start_time, (string) $b->start_time));
+        return array_values($named);
+    }
 
-        return $named;
+    private static function dayOf(object $row): string
+    {
+        return Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
     }
 
     /**

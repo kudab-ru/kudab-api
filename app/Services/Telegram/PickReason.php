@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Telegram;
 
+use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use Carbon\Carbon;
 
 /**
@@ -41,6 +42,33 @@ final class PickReason
         'price' => 'цены',
         'time' => 'точного времени',
         'theme' => 'темы',
+    ];
+
+    /** Вид события в объяснении выбора; ключ — первичная тема или её родитель. */
+    private const KIND_WORDS = [
+        'music' => 'концерт',
+        'theatre' => 'спектакль',
+        'standup' => 'стендап',
+        'festival' => 'фестиваль',
+        'circus-show' => 'шоу',
+        'parties' => 'вечеринка',
+        'exhibitions' => 'выставка',
+        'cinema' => 'кино',
+        'education' => 'лекция или мастер-класс',
+        'excursions' => 'экскурсия',
+        'quiz-games' => 'игра',
+        'kids' => 'детское',
+        'city' => 'городское событие',
+        'sport' => 'спорт',
+        'literature' => 'литература',
+    ];
+
+    /** Чего не хватает посту — по штрафам балла. */
+    private const WEAK_PARTS = [
+        'photo' => 'без афиши',
+        'text' => 'короткое описание',
+        'time' => 'без точного времени',
+        'venue' => 'без площадки',
     ];
 
     /** Что нарушено и как в нужном роде сказать «другой не нашлось». */
@@ -125,6 +153,10 @@ final class PickReason
         if (! is_array($score)) {
             return 'Выбрано автоматически';
         }
+        // выбор по интересу пишет facts; у записей, выбранных раньше, их нет
+        if (is_array($meta['facts'] ?? null)) {
+            return self::interest($meta['facts'], $score);
+        }
 
         $missing = [];
         foreach (self::CARD_PARTS as $part => $word) {
@@ -144,6 +176,45 @@ final class PickReason
         }
 
         return $tickets ? 'Ближайшее с полной карточкой и билетами в продаже' : 'Ближайшее с полной карточкой';
+    }
+
+    /**
+     * Чем событие интересно: вид, сколько дат, касса, оценки; после точки с запятой — чего не хватает.
+     *
+     * @param  array<string, mixed>  $facts  EventBroadcastScorer::explain()
+     * @param  array<string, mixed>  $score
+     */
+    private static function interest(array $facts, array $score): string
+    {
+        $repeats = (int) ($facts['repeats'] ?? 1);
+        $rating = (int) ($facts['rating'] ?? 0);
+
+        $good = [self::KIND_WORDS[(string) ($facts['kind'] ?? '')] ?? 'событие'];
+        if (empty($facts['multi_day'])) {
+            $good[] = match (true) {
+                $repeats <= 1 => 'разовое',
+                $repeats < EventBroadcastScorer::WEEKLY_FROM => 'несколько дат',
+                default => 'идёт каждую неделю',
+            };
+        }
+        if (! empty($facts['ticketed'])) {
+            $good[] = 'билеты в кассе';
+        }
+        if ($rating >= EventBroadcastScorer::RATED_FROM) {
+            $good[] = $rating.' '.self::plural($rating, 'оценка', 'оценки', 'оценок').' на Яндекс Афише';
+        }
+        if ((int) ($score['free'] ?? 0) > 0) {
+            $good[] = 'бесплатное, а на неделе такого ещё нет';
+        }
+
+        $weak = [];
+        foreach (self::WEAK_PARTS as $part => $word) {
+            if ((int) ($score[$part] ?? 0) < 0) {
+                $weak[] = $word;
+            }
+        }
+
+        return self::upperFirst(implode(', ', $good)).($weak === [] ? '' : '; '.implode(', ', $weak));
     }
 
     private static function run(int $daysLeft): string

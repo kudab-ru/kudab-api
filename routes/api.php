@@ -95,6 +95,8 @@ Route::prefix('admin')
         Route::post('/broadcast/channels/{id}/enqueue-venue', [AdminBroadcastController::class, 'enqueueVenue']);
         Route::post('/broadcast/channels/{id}/publish-suggestion', [AdminBroadcastController::class, 'publishSuggestion']);
         Route::post('/broadcast/channels/{id}/rebuild', [AdminBroadcastController::class, 'rebuild']);
+        Route::post('/broadcast/channels/{id}/clear', [AdminBroadcastController::class, 'clearFeed']);
+        Route::post('/broadcast/channels/{id}/autofill', [AdminBroadcastController::class, 'setAutofill']);
         // Подборка вне очереди: ещё одна, дополнительно к недельной рубрике.
         // Вне сетки — слот дня и очередная недельная остаются нетронутыми.
         Route::post('/broadcast/channels/{id}/digest-now', [AdminBroadcastController::class, 'digestNow']);

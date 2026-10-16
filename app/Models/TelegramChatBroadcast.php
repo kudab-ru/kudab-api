@@ -246,6 +246,28 @@ class TelegramChatBroadcast extends Model
         $this->settings = $settings;
     }
 
+    /**
+     * Автомат на паузе: фоновые задания не ставят посты в свободные слоты, неделю собирает человек.
+     * Подборки по расписанию собираются как обычно, кнопки админки работают.
+     */
+    public function getAutofillPausedAttribute(): bool
+    {
+        return (bool) (($this->settings ?? [])['autofill_paused'] ?? false);
+    }
+
+    public function setAutofillPausedAttribute(bool $paused): void
+    {
+        $settings = $this->settings ?? [];
+
+        if ($paused) {
+            $settings['autofill_paused'] = true;
+        } else {
+            unset($settings['autofill_paused']);
+        }
+
+        $this->settings = $settings;
+    }
+
     public const PICK_MODE_WEEK = 'week';
 
     public const PICK_MODE_EVE = 'eve';

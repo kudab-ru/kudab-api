@@ -64,11 +64,17 @@ class TelegramVenuePortraitService
             'checked' => 0, 'due' => 0, 'enqueued' => 0,
             'skipped_no_city' => 0, 'skipped_queue_busy' => 0,
             'no_candidate' => 0, 'skipped_no_reviewer' => 0,
-            'skipped_not_allowed' => 0, 'skipped_no_slot' => 0,
+            'skipped_not_allowed' => 0, 'skipped_no_slot' => 0, 'skipped_paused' => 0,
         ];
 
         foreach ($this->broadcastRepository->listEnabledWithSchedule() as $broadcast) {
             $summary['checked']++;
+
+            if ($broadcast->autofill_paused) {
+                $summary['skipped_paused']++;
+
+                continue;
+            }
 
             // запрет стенда здесь, а не в enqueueDuePortrait: у наполнителя он свой, как и для событий
             $chat = $broadcast->chat;

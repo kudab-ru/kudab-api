@@ -88,13 +88,19 @@ class FillFeedCommand extends Command
             $query->where('id', (int) $this->option('broadcast'));
         }
 
-        $summary = ['checked' => 0, 'filled' => 0, 'channels' => 0, 'not_allowed' => 0, 'off' => 0];
+        $summary = ['checked' => 0, 'filled' => 0, 'channels' => 0, 'not_allowed' => 0, 'off' => 0, 'paused' => 0];
 
         foreach ($query->get() as $broadcast) {
             $summary['checked']++;
 
             if (! $broadcast->enabled || $broadcast->period === 'off') {
                 $summary['off']++;
+
+                continue;
+            }
+            // подборки каналу на паузе соберёт broadcast:prepare-digests, у него своё окно
+            if ($broadcast->autofill_paused) {
+                $summary['paused']++;
 
                 continue;
             }
@@ -158,11 +164,11 @@ class FillFeedCommand extends Command
         }
 
         $this->info(sprintf(
-            'fill-feed: каналов %d, %s %d в %d каналах, выключено %d, стенд не пустил %d%s',
+            'fill-feed: каналов %d, %s %d в %d каналах, выключено %d, на паузе %d, стенд не пустил %d%s',
             $summary['checked'],
             $dryRun ? 'заполнил бы' : 'заполнено',
             $summary['filled'], $summary['channels'],
-            $summary['off'], $summary['not_allowed'],
+            $summary['off'], $summary['paused'], $summary['not_allowed'],
             $dryRun ? ' [DRY-RUN, ничего не записано]' : '',
         ));
 

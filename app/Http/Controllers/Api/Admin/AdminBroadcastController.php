@@ -1292,7 +1292,7 @@ class AdminBroadcastController extends Controller
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->find($item->broadcast_id);
         $chatId = $broadcast?->chat?->telegram_chat_id;
-        if (! $broadcast || ! $broadcast->enabled || $broadcast->period === 'off'
+        if (! $broadcast || ! $broadcast->enabled || $broadcast->period === 'off' || $broadcast->autofill_paused
             || ! $chatId || ! BroadcastSafety::postingAllowed((int) $chatId)) {
             return 0;
         }
@@ -2565,6 +2565,82 @@ class AdminBroadcastController extends Controller
         return $when
             ? "Это событие уже называет {$what} на {$when} — в канале оно выйдет дважды."
             : 'Это событие уже стоит в ленте канала.';
+    }
+
+    /**
+     * Очистить ленту, чтобы собрать неделю заново. По умолчанию снимаем только поставленное автоматом,
+     * с `all` — и ручные, и закреплённые. Подборки, портреты и взятое ботом на отправку не трогаем.
+     * `pause` ставит автомат на паузу, иначе он сразу заполнит пустое заново.
+     */
+    public function clearFeed(Request $request, int $broadcastId): JsonResponse
+    {
+        $data = $request->validate([
+            'all' => ['sometimes', 'boolean'],
+            'pause' => ['sometimes', 'boolean'],
+        ]);
+        $all = (bool) ($data['all'] ?? false);
+        $pause = (bool) ($data['pause'] ?? true);
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
+
+        return DB::transaction(function () use ($broadcast, $all, $pause) {
+            TelegramChatBroadcast::lockFeed((int) $broadcast->id);
+
+            $items = TelegramChatBroadcastItem::query()
+                ->where('broadcast_id', $broadcast->id)
+                ->where('kind', TelegramChatBroadcastItem::KIND_EVENT)
+                ->whereIn('status', $this->openStatuses())
+                ->whereNull('posted_at')
+                ->where(fn ($q) => $q->whereNull('claimed_at')
+                    ->orWhere('claimed_at', '<', Carbon::now()->subSeconds(TelegramChatBroadcastService::CLAIM_LEASE_SECONDS)))
+                ->get();
+
+            $removed = 0;
+            foreach ($items as $item) {
+                if (! $all && ($item->is_pinned || ! $item->pickedByMachine())) {
+                    continue;
+                }
+                // не «снято руками»: такое автомат не берёт больше никогда, а здесь событие ничем не плохо
+                $item->status = TelegramChatBroadcastItem::STATUS_SKIPPED;
+                $item->error_message = 'снято при очистке ленты';
+                $item->publish_at = null;
+                $item->claimed_at = null;
+                $item->claim_token = null;
+                $item->save();
+                $removed++;
+            }
+
+            if ($pause) {
+                $broadcast->autofill_paused = true;
+                $broadcast->save();
+            }
+            $filled = $broadcast->autofill_paused
+                ? 0
+                : (int) ($this->broadcasts->fillFeedDays($broadcast->fresh('chat'), Carbon::now())['filled'] ?? 0);
+
+            return response()->json(['data' => [
+                'removed' => $removed,
+                'kept' => $items->count() - $removed,
+                'paused' => $broadcast->autofill_paused,
+                'filled' => $filled,
+            ]]);
+        });
+    }
+
+    /** Поставить автомат на паузу или включить; включённый сразу заполняет пустые слоты. */
+    public function setAutofill(Request $request, int $broadcastId): JsonResponse
+    {
+        $data = $request->validate(['paused' => ['required', 'boolean']]);
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
+        $broadcast->autofill_paused = (bool) $data['paused'];
+        $broadcast->save();
+
+        $filled = $broadcast->autofill_paused
+            ? 0
+            : (int) ($this->broadcasts->fillFeedDays($broadcast->fresh('chat'), Carbon::now())['filled'] ?? 0);
+
+        return response()->json(['data' => ['paused' => $broadcast->autofill_paused, 'filled' => $filled]]);
     }
 
     /**
@@ -4319,6 +4395,7 @@ class AdminBroadcastController extends Controller
             'horizon_days' => $b->horizon_days,
             'fill_lead_days' => $b->fill_lead_days,
             'pick_mode' => $b->pick_mode,
+            'autofill_paused' => $b->autofill_paused,
             // Каденс портретов. Сверять его есть с чем: portrait_pool ниже,
             // потолок — TelegramVenuePortraitService::POOL_PER_WEEKLY_POST.
             'portrait_every_days' => $b->portrait_every_days,

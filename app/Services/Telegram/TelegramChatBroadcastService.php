@@ -835,6 +835,7 @@ class TelegramChatBroadcastService
             'no_candidate' => 0,
             'skipped_no_reviewer' => 0,
             'skipped_not_allowed' => 0,
+            'skipped_paused' => 0,
         ];
 
         $broadcasts = $this->broadcastRepository->listEnabledWithSchedule();
@@ -846,6 +847,12 @@ class TelegramChatBroadcastService
             // отсюда без дня ушла бы лишним постом посреди дня
             if ($broadcast->slots !== []) {
                 $summary['skipped_slots']++;
+
+                continue;
+            }
+            // на паузе канал ждёт, пока посты поставит человек
+            if ($broadcast->autofill_paused) {
+                $summary['skipped_paused']++;
 
                 continue;
             }
@@ -1635,13 +1642,17 @@ class TelegramChatBroadcastService
             return [];
         }
 
-        // тема соседнего слота, только по первичному интересу (rank = 0): вторичных у события
-        // пачка, и «та же тема» совпала бы почти у всех
-        $sameTheme = $avoidInterestId === null ? [] : array_flip(DB::table('event_interest')
-            ->whereIn('event_id', $candidates->modelKeys())
-            ->where('rank', 0)
-            ->where('interest_id', $avoidInterestId)
-            ->pluck('event_id')
+        $this->scorer->prepare($candidates);
+        $freeWanted = ! $this->feedHasFree($broadcastId, $notBefore ?? Carbon::now(), $replacedItemId);
+
+        // тема соседнего слота по первичному интересу (rank = 0) и её корню: рок и джаз — оба концерт.
+        // Вторичных тем у события пачка, по ним «та же тема» совпала бы почти у всех
+        $sameTheme = $avoidInterestId === null ? [] : array_flip(DB::table('event_interest as ei')
+            ->join('interests as i', 'i.id', '=', 'ei.interest_id')
+            ->whereIn('ei.event_id', $candidates->modelKeys())
+            ->where('ei.rank', 0)
+            ->whereRaw('coalesce(i.parent_id, i.id) = ?', [$avoidInterestId])
+            ->pluck('ei.event_id')
             ->map(fn ($id) => (int) $id)
             ->all());
 
@@ -1676,10 +1687,11 @@ class TelegramChatBroadcastService
             if ($optional && $tier !== '') {
                 continue;
             }
-            foreach ($this->scorer->rank($events, $at) as $e) {
+            foreach ($this->scorer->rank($events, $at, $freeWanted) as $e) {
                 $ranked[] = [
                     'event' => $e,
-                    'score' => $this->scorer->breakdown($e, $at),
+                    'score' => $this->scorer->breakdown($e, $at, $freeWanted),
+                    'facts' => $this->scorer->explain($e),
                     'dropped' => $tier === '' ? [] : explode(',', $tier),
                 ];
                 if (count($ranked) >= $limit) {
@@ -1705,7 +1717,7 @@ class TelegramChatBroadcastService
     /**
      * pick_meta выбора автоподбора; у вариантов «Заменить» та же форма.
      *
-     * @param  array{event: Event, score: array<string, int>, dropped: list<string>}  $candidate
+     * @param  array{event: Event, score: array<string, int>, facts?: array<string, mixed>, dropped: list<string>}  $candidate
      * @return array<string, mixed>
      */
     private function autoPickMeta(array $candidate, Carbon $publishAt): array
@@ -1717,10 +1729,37 @@ class TelegramChatBroadcastService
             in_array(PickReason::LAYER_THEME, $candidate['dropped'], true) ? 'theme_repeat' : 'best',
             array_filter([
                 'score' => $candidate['score'],
+                'facts' => $candidate['facts'] ?? null,
                 'dropped' => $candidate['dropped'],
                 'closes_in' => $daysLeft,
             ], fn ($v) => $v !== null && $v !== []),
         );
+    }
+
+    /** Есть ли бесплатное в ленте за неделю вокруг момента: вышедшее до него или стоящее рядом. */
+    private function feedHasFree(int $broadcastId, Carbon $at, ?int $exceptItemId): bool
+    {
+        $from = $at->copy()->subDays(7)->utc();
+
+        return DB::table('telegram.chat_broadcast_items as i')
+            ->join('telegram.chat_broadcast_item_events as l', 'l.item_id', '=', 'i.id')
+            ->join('events as e', 'e.id', '=', 'l.event_id')
+            ->where('i.broadcast_id', $broadcastId)
+            ->when($exceptItemId !== null, fn ($q) => $q->where('i.id', '<>', $exceptItemId))
+            ->whereIn('e.price_status', ['free', 'donation'])
+            ->where(fn ($q) => $q
+                ->whereBetween('i.posted_at', [$from, $at->copy()->utc()])
+                ->orWhere(fn ($x) => $x
+                    ->whereNull('i.posted_at')
+                    ->whereIn('i.status', [
+                        TelegramChatBroadcastItem::STATUS_PENDING,
+                        TelegramChatBroadcastItem::STATUS_PLANNED,
+                        TelegramChatBroadcastItem::STATUS_PENDING_REVIEW,
+                        TelegramChatBroadcastItem::STATUS_APPROVED,
+                        TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
+                    ])
+                    ->whereBetween('i.publish_at', [$from, $at->copy()->addDays(7)->utc()])))
+            ->exists();
     }
 
     /**
@@ -2672,8 +2711,8 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * Кэш первичной темы события на прогон. Первичных интересов бывает несколько, берём
-     * наименьший id: нужна не «правильная» тема, а устойчивое сравнение соседей.
+     * Кэш первичной темы события на прогон, её корнем: рок и джаз — оба концерт. Первичных интересов
+     * бывает несколько, берём наименьший id: нужна не «правильная» тема, а устойчивое сравнение соседей.
      *
      * @var array<int, int|null>
      */
@@ -2689,11 +2728,12 @@ class TelegramChatBroadcastService
             return $this->primaryInterestCache[$eventId];
         }
 
-        $id = DB::table('event_interest')
-            ->where('event_id', $eventId)
-            ->where('rank', 0)
-            ->orderBy('interest_id')
-            ->value('interest_id');
+        $id = DB::table('event_interest as ei')
+            ->join('interests as i', 'i.id', '=', 'ei.interest_id')
+            ->where('ei.event_id', $eventId)
+            ->where('ei.rank', 0)
+            ->orderBy('ei.interest_id')
+            ->value(DB::raw('coalesce(i.parent_id, i.id)'));
 
         return $this->primaryInterestCache[$eventId] = $id !== null ? (int) $id : null;
     }
