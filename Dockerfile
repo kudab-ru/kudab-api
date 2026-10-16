@@ -8,11 +8,12 @@ RUN apk update && apk add --no-cache \
     bash git unzip icu-libs libzip libpq \
  && apk add --no-cache --virtual .build-deps \
     $PHPIZE_DEPS postgresql-dev libzip-dev icu-dev oniguruma-dev libxml2-dev \
- # --- phpredis (именно PECL)
- && pecl install -o -f redis \
- && docker-php-ext-enable redis \
- # --- остальные расширения
- && docker-php-ext-install pdo pdo_pgsql zip intl bcmath pcntl \
+ # --- phpredis с GitHub: pecl.php.net с сервера отвечает не всегда. Версию менять и в Dockerfile парсера
+ && mkdir -p /usr/src/php/ext/redis \
+ && curl -fsSL https://github.com/phpredis/phpredis/archive/refs/tags/6.3.0.tar.gz \
+    | tar -xz -C /usr/src/php/ext/redis --strip-components=1 \
+ && docker-php-ext-install redis pdo pdo_pgsql zip intl bcmath pcntl \
+ && docker-php-source delete \
  # --- чистим dev-пакеты
  && apk del .build-deps
 
