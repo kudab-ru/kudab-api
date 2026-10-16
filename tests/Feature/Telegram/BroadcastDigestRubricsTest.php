@@ -1255,6 +1255,30 @@ class BroadcastDigestRubricsTest extends TestCase
     }
 
     #[Test]
+    public function repicking_an_occasion_keeps_its_rubric(): void
+    {
+        $this->actingAsSuperadmin();
+        $this->onlyRubric('povod-halloween', 'besplatno');
+        // по ротации собралась бы «Бесплатно»
+        $this->fill('Бесплатное', free: true);
+        foreach (['Хэллоуинская вечеринка', 'Хэллоуин в баре', 'Квиз: Halloween'] as $i => $title) {
+            $this->event($title, 44 + $i, free: false, priceMin: 700);
+        }
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $this->channel()->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->is_off_grid = true;
+        $item->digest_meta = ['theme' => 'povod-halloween'];
+        $item->save();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/compose")->assertOk();
+
+        $this->assertSame('povod-halloween', $item->fresh()->digestTheme());
+    }
+
+    #[Test]
     public function a_booked_occasion_is_not_replaced_by_another_rubric(): void
     {
         $this->onlyRubric('povod-halloween', 'besplatno');

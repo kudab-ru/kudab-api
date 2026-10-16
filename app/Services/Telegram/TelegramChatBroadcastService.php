@@ -1207,10 +1207,7 @@ class TelegramChatBroadcastService
             : null;
 
         // повод и «Что смотрят» другой рубрикой не подменяем: вместо Хэллоуина вышли бы спектакли недели
-        $ownSchedule = $wanted !== null && collect((array) config('broadcast_digest.themes', []))
-            ->contains(fn ($t) => ($t['slug'] ?? null) === $wanted && ($t['auto'] ?? true) === false);
-
-        if (! $ownSchedule) {
+        if (! BroadcastDigestComposer::ownSchedule($wanted)) {
             $draft ??= $this->digestComposer->compose($broadcast, $now, $item);
         }
 

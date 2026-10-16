@@ -1514,12 +1514,20 @@ class AdminBroadcastController extends Controller
         $keep = (bool) ($data['keep_roster'] ?? false)
             && DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->exists();
 
+        // перевыбор оставляет рубрику записи: у Хэллоуина иначе вышли бы спектакли недели
+        $slug = $item->digestTheme() ?? (trim((string) (($item->digest_meta ?? [])['theme_wanted'] ?? '')) ?: null);
+
         $draft = $keep
             ? $this->digestComposer->recompose($item, $broadcast, $at)
             // $item третьим аргументом: иначе повторное нажатие выбирает ДРУГУЮ
             // тройку — состав, записанный первым нажатием, вычитается как «канал
             // это уже показывает».
-            : $this->digestComposer->compose($broadcast, $at, $item);
+            : ($slug !== null ? $this->digestComposer->compose($broadcast, $at, $item, $slug) : null);
+
+        // обычная рубрика не набралась — ротацией, как раньше; рубрику по расписанию не подменяем
+        if (! $keep && $draft === null && ! BroadcastDigestComposer::ownSchedule($slug)) {
+            $draft = $this->digestComposer->compose($broadcast, $at, $item);
+        }
 
         if ($draft === null) {
             return response()->json(['ok' => false, 'error' => $keep

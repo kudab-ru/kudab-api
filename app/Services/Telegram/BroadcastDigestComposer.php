@@ -1870,6 +1870,13 @@ final class BroadcastDigestComposer
         return rtrim($cut, ' ,;:—–-').'…';
     }
 
+    /** Рубрика по своему расписанию (`auto` false): не набралась — другой рубрикой её не подменяют. */
+    public static function ownSchedule(?string $slug): bool
+    {
+        return $slug !== null && collect((array) config('broadcast_digest.themes', []))
+            ->contains(fn ($t) => ($t['slug'] ?? null) === $slug && ($t['auto'] ?? true) === false);
+    }
+
     /**
      * Ближайший день повода (`occasion` — «месяц-день»), окно которого ещё не кончилось.
      *
