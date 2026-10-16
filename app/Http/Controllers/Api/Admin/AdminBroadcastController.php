@@ -449,6 +449,7 @@ class AdminBroadcastController extends Controller
             // теперь заслон именно здесь, по связи.
             ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcast) {
                 $q->where('broadcast_id', $broadcast->id)->whereNotNull('posted_at');
+                TelegramChatBroadcastItem::whereClaimsEvents($q, 'telegram.chat_broadcast_items');
             })
             // Отклонённое и снятое остывает 30 дней — тот же срок, что у
             // автоподбора (REJECTED_COOLDOWN_DAYS), иначе пул и предложения
@@ -2538,6 +2539,7 @@ class AdminBroadcastController extends Controller
                 $q->whereNotNull('i.posted_at')
                     ->orWhereIn('i.status', $this->openStatuses());
             })
+            ->tap(fn ($q) => TelegramChatBroadcastItem::whereClaimsEvents($q, 'i'))
             // Полными именами: created_at есть и у записи, и у строки связи —
             // короткое имя даёт «column reference is ambiguous». Ровно та
             // ловушка, о которой предупреждает докблок Event::broadcastPosts().

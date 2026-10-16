@@ -395,6 +395,7 @@ final class BroadcastEventPicker
             ->whereIn('l.event_id', $eventIds)
             ->when($exceptItemId !== null, fn ($q) => $q->where('i.id', '<>', $exceptItemId))
             ->where(fn ($q) => $q->whereNotNull('i.posted_at')->orWhereIn('i.status', self::OPEN))
+            ->tap(fn ($q) => TelegramChatBroadcastItem::whereClaimsEvents($q, 'i'))
             ->orderByRaw('COALESCE(i.posted_at, i.publish_at, i.created_at) DESC')
             ->get(['l.event_id', 'i.id', 'i.kind', 'i.posted_at', 'i.publish_at', 'i.is_pinned', 'i.claimed_at']) as $row) {
             $out[(int) $row->event_id] ??= $row;

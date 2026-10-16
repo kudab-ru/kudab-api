@@ -28,8 +28,8 @@ class EnqueueDigestsCommand extends Command
         $s = $booking->bookDue(Carbon::now(), $dryRun);
 
         $this->info(sprintf(
-            'digests: checked=%d booked=%d already=%d off=%d failed=%d%s',
-            $s['checked'], $s['booked'], $s['already'], $s['off'], $s['failed'] ?? 0,
+            'digests: checked=%d booked=%d already=%d off=%d resting=%d failed=%d%s',
+            $s['checked'], $s['booked'], $s['already'], $s['off'], $s['resting'] ?? 0, $s['failed'] ?? 0,
             $dryRun ? ' [DRY-RUN]' : '',
         ));
 

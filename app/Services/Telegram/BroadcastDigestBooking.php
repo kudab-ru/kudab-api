@@ -25,11 +25,11 @@ final class BroadcastDigestBooking
     /**
      * Поставить брони всем каналам, где рубрика включена.
      *
-     * @return array{checked: int, booked: int, already: int, off: int, failed: int}
+     * @return array{checked: int, booked: int, already: int, off: int, resting: int, failed: int}
      */
     public function bookDue(Carbon $now, bool $dryRun = false): array
     {
-        $summary = ['checked' => 0, 'booked' => 0, 'already' => 0, 'off' => 0, 'failed' => 0];
+        $summary = ['checked' => 0, 'booked' => 0, 'already' => 0, 'off' => 0, 'resting' => 0, 'failed' => 0];
 
         $broadcasts = TelegramChatBroadcast::query()->with('chat')->get();
 
@@ -56,7 +56,7 @@ final class BroadcastDigestBooking
     }
 
     /**
-     * @param  array{checked: int, booked: int, already: int, off: int, failed: int}  $summary
+     * @param  array{checked: int, booked: int, already: int, off: int, resting: int, failed: int}  $summary
      */
     private function bookOne(
         TelegramChatBroadcast $broadcast,
@@ -83,6 +83,15 @@ final class BroadcastDigestBooking
 
             $at = $this->slotAt($broadcast, $now, (int) $slot['weekday'], (int) $slot['hour']);
             if ($at === null) {
+                continue;
+            }
+
+            // рубрика раз в две недели: слот с ней пропускает неделю, пока рядом такая же подборка
+            $theme = collect((array) config('broadcast_digest.themes', []))
+                ->first(fn ($t) => ($t['slug'] ?? null) === ($slot['theme'] ?? null));
+            if ($theme !== null && ! DigestCadence::due((int) $broadcast->id, (array) $theme, $at)) {
+                $summary['resting']++;
+
                 continue;
             }
 

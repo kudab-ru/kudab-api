@@ -129,6 +129,10 @@ final class BroadcastDigestComposer
                 continue;
             }
 
+            if ($themeSlug === null && ! DigestCadence::due((int) $broadcast->id, (array) $theme, $publishAt, $forItem?->id)) {
+                continue;
+            }
+
             $picked = $this->pickForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $forItem?->id);
             if ($picked !== null) {
                 $gathered[(string) ($theme['slug'] ?? '')] = [$theme, $picked];
@@ -149,6 +153,8 @@ final class BroadcastDigestComposer
             // число РАЗНЫХ площадок — пять концертов в одном баре это афиша
             // бара, а не тема недели.
             $rank = [
+                // у рубрики раз в две недели подошёл срок: иначе ротация отложит её на неопределённое время
+                empty($theme['every_days']) ? 1 : 0,
                 array_search($slug, $recent, true) === false ? 0 : 1,
                 -$picked['venues'],
             ];
@@ -174,7 +180,7 @@ final class BroadcastDigestComposer
             'event_ids' => $this->postOrder,
             'total' => $best['total'],
             'venues' => $best['venues'],
-        ];
+        ] + $this->windowMeta((array) $best['theme'], $publishAt);
     }
 
     /**
@@ -279,7 +285,25 @@ final class BroadcastDigestComposer
             'event_ids' => $this->postOrder,
             'total' => $picked['total'],
             'venues' => $picked['venues'],
-        ];
+        ] + $this->windowMeta((array) $theme, $publishAt);
+    }
+
+    /**
+     * Даты окна для текста модели — только у рубрики, чьё окно начинается не с выхода:
+     * неделю от выхода парсер считает сам.
+     *
+     * @param  array<string, mixed>  $theme
+     * @return array{window?: array{from: string, to: string}}
+     */
+    private function windowMeta(array $theme, Carbon $publishAt): array
+    {
+        if ((int) ($theme['window_from_days'] ?? 0) <= 0) {
+            return [];
+        }
+
+        [$since, $until] = $this->themeWindow($theme, $publishAt);
+
+        return ['window' => ['from' => $since->toDateString(), 'to' => $until->toDateString()]];
     }
 
     /**
@@ -371,6 +395,8 @@ final class BroadcastDigestComposer
                 self::namedRange($theme),
                 (bool) ($theme['one_per_day'] ?? true),
                 ($theme['window'] ?? '') === 'weekend',
+                (bool) ($theme['cheap_line'] ?? true),
+                (bool) ($theme['ties_by_price'] ?? false),
             ),
             'total' => $total,
             'venues' => $venues,
@@ -691,7 +717,7 @@ final class BroadcastDigestComposer
         // конфиге («fre» вместо «free») тихо превращала бы рубрику про деньги
         // в подборку всего подряд, и заметить это можно было бы только в
         // канале.
-        if (! in_array($pick, ['interest', 'free', 'price_max', 'tod', 'all'], true)) {
+        if (! in_array($pick, ['interest', 'free', 'price_max', 'tod', 'all', 'ahead'], true)) {
             Log::warning('broadcast.digest.unknown_pick', [
                 'theme' => $theme['slug'] ?? null, 'pick' => $pick,
             ]);
@@ -700,12 +726,14 @@ final class BroadcastDigestComposer
         }
 
         $ids = [];
-        if ($pick === 'interest') {
-            $ids = $this->interestTree((string) $theme['interest']);
+        if ($pick === 'interest' || $pick === 'ahead') {
+            $roots = $pick === 'interest' ? [(string) $theme['interest']] : array_map('strval', (array) ($theme['kinds'] ?? []));
+            $ids = array_values(array_unique(array_merge(...array_map(fn ($slug) => $this->interestTree($slug), $roots))));
             if ($ids === []) {
                 return null;
             }
         }
+        $byInterest = $ids !== [];
 
         // Окно у рубрики может быть своё — и по длине, и по виду. Бесплатное
         // объявляют поздно: замер 25.09.2026 — 35 событий в ближайшую неделю и
@@ -714,7 +742,7 @@ final class BroadcastDigestComposer
         [$hiddenSql, $hiddenBindings] = Event::channelHiddenSql('e');
 
         $rows = DB::table('events as e')
-            ->when($pick === 'interest', fn ($q) => $q->join('event_interest as ei', 'ei.event_id', '=', 'e.id'))
+            ->when($byInterest, fn ($q) => $q->join('event_interest as ei', 'ei.event_id', '=', 'e.id'))
             ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
             ->join('communities as c', 'c.id', '=', 'e.community_id')
             ->whereNull('e.deleted_at')
@@ -731,7 +759,7 @@ final class BroadcastDigestComposer
             // выставку, открывшуюся на прошлой неделе и висящую месяц, — то
             // есть ровно ту, ради которой тема и заведена.
             ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, PostTiming::MIN_LEAD_HOURS, 'e'))
-            ->when($pick === 'interest', fn ($q) => $q
+            ->when($byInterest, fn ($q) => $q
                 // ПЕРВИЧНЫЙ интерес внутри дерева темы. Без rank = 0 в спектакли
                 // попадает концерт, которому театр проставлен вторым тегом.
                 ->where('ei.rank', 0)
@@ -752,6 +780,14 @@ final class BroadcastDigestComposer
                     "EXTRACT(HOUR FROM e.start_time AT TIME ZONE 'Europe/Moscow') >= ?",
                     [(int) ($theme['hour_from'] ?? 20)],
                 ))
+            // бесплатное заранее не покупают; платное — это цена, продажа на чужом сайте или касса среди источников
+            ->when($pick === 'ahead', fn ($q) => $q
+                ->whereNotIn('e.price_status', ['free', 'donation'])
+                ->where(fn ($w) => $w->where('e.price_min', '>', 0)
+                    ->orWhere('e.price_status', 'external')
+                    ->orWhereExists(fn ($s) => $s->selectRaw('1')->from('event_sources as es')
+                        ->whereColumn('es.event_id', 'e.id')
+                        ->whereIn('es.source', Scoring\EventInterestSignals::TICKET_SOURCES))))
             // РУБРИКЕ ПО ПОВОДУ НУЖНО НАЧАЛО ВПЕРЕДИ, а не «идёт до сих пор».
             // Общее правило срока пропускает многодневку, пока она не
             // закрылась, — выставке так и надо. А «Вечером» с таким правилом
@@ -794,7 +830,7 @@ final class BroadcastDigestComposer
         // $keepShown — для выдачи «уже в ленте»: там нужны как раз те события,
         // которые эта отсечка и снимает. Автосборка её не отключает никогда.
         if (! $keepShown) {
-            $rows = $this->rejectAlreadyShown($broadcast, $rows, $exceptItemId);
+            $rows = $this->rejectAlreadyShown($broadcast, $rows, $exceptItemId, $theme);
         }
 
         if (! $keepHidden) {
@@ -984,7 +1020,12 @@ final class BroadcastDigestComposer
         TelegramChatBroadcast $broadcast,
         \Illuminate\Support\Collection $rows,
         ?int $exceptItemId = null,
+        array $theme = [],
     ): \Illuminate\Support\Collection {
+        // рубрика раз в две недели не повторяет своё: окна соседних выпусков перекрываются
+        $ownSlug = empty($theme['every_days']) ? null : (string) $theme['slug'];
+        $ownDays = (int) ($theme['window_days'] ?? self::SHOWN_WINDOW_DAYS);
+
         $shown = DB::table('telegram.chat_broadcast_item_events as l')
             ->join('telegram.chat_broadcast_items as i', 'i.id', '=', 'l.item_id')
             ->join('events as e', 'e.id', '=', 'l.event_id')
@@ -993,7 +1034,7 @@ final class BroadcastDigestComposer
             // повторная сборка той же подборки НИКОГДА не выбирает ту же
             // тройку: она только что сама её и закрыла.
             ->when($exceptItemId !== null, fn ($q) => $q->where('i.id', '<>', $exceptItemId))
-            ->where(function ($q) {
+            ->where(function ($q) use ($ownSlug, $ownDays) {
                 $q->whereIn('i.status', [
                     TelegramChatBroadcastItem::STATUS_PENDING,
                     TelegramChatBroadcastItem::STATUS_PLANNED,
@@ -1003,7 +1044,10 @@ final class BroadcastDigestComposer
                 ])->orWhere(function ($w) {
                     $w->where('i.status', TelegramChatBroadcastItem::STATUS_POSTED)
                         ->where('i.posted_at', '>=', Carbon::now()->subDays(self::SHOWN_WINDOW_DAYS));
-                });
+                })->when($ownSlug !== null, fn ($q) => $q->orWhere(fn ($w) => $w
+                    ->where('i.status', TelegramChatBroadcastItem::STATUS_POSTED)
+                    ->where('i.posted_at', '>=', Carbon::now()->subDays($ownDays))
+                    ->whereRaw("i.digest_meta->>'theme' = ?", [$ownSlug])));
             })
             ->get(['e.id', 'e.event_group_id', 'e.title']);
 
@@ -1052,13 +1096,17 @@ final class BroadcastDigestComposer
      * @param  array{0:int,1:int}  $range  сколько назвать: минимум и максимум
      * @return list<object>
      */
-    private function pickNamed(\Illuminate\Support\Collection $rows, array $range = [3, 3], bool $onePerDay = true, bool $bothDays = false): array
+    private function pickNamed(\Illuminate\Support\Collection $rows, array $range = [3, 3], bool $onePerDay = true, bool $bothDays = false, bool $cheapLine = true, bool $tiesByPrice = false): array
     {
         [$min, $max] = $range;
 
         // Без площадки не называем: строка «название · дата» без места говорит половину нужного,
         // а правило «одна площадка — одна строка» её не держит.
         $ranked = $this->scorer->rankRows($rows->filter(fn ($r) => $r->venue_id !== null)->values()->all());
+        if ($tiesByPrice) {
+            usort($ranked, fn ($a, $b) => [$this->scorer->interest($b), (int) ($b->price_min ?? 0)]
+                <=> [$this->scorer->interest($a), (int) ($a->price_min ?? 0)]);
+        }
 
         /** @var array<int, object> $named */
         $named = [];
@@ -1083,7 +1131,9 @@ final class BroadcastDigestComposer
             }
         }
 
-        $named = $this->withCheapLine($named, $ranked, $min, $max, $onePerDay, $bothDays);
+        $named = $cheapLine
+            ? $this->withCheapLine($named, $ranked, $min, $max, $onePerDay, $bothDays)
+            : array_values($named);
 
         // по датам: подборка отвечает на вопрос «что впереди», и читать её удобно по порядку недели
         usort($named, fn ($a, $b) => strcmp((string) $a->start_time, (string) $b->start_time));
@@ -1241,7 +1291,7 @@ final class BroadcastDigestComposer
         // Число — из той же выборки, на которую ведёт подвал. У рубрик без
         // фильтра ленты (тематических) его нет, и шапка остаётся как была.
         $feed = $this->feedSpec((array) $theme, $broadcast, $from, $to);
-        $total = $this->feedTotal($feed['count'] ?? null);
+        $total = ($theme['count'] ?? true) ? $this->feedTotal($feed['count'] ?? null) : null;
 
         // Со счётом шапка — одно предложение, срок из неё уходит: «на выходных»
         // уже сказало когда. Без счёта — как было, с диапазоном дат.
@@ -1288,7 +1338,8 @@ final class BroadcastDigestComposer
         // Нижняя граница — $from, а не $since: у недельного окна $since пуст, и
         // склейка тянула ПРОШЕДШИЕ сеансы («сб 12 сентября и сб 3 октября»).
         $sessions = $this->sessionsFor($picked['named'], $from, $to);
-        $shortDates = $this->weekdaysAreDistinct($picked['named'], $sessions);
+        // день недели без числа понятен только в пределах недели: «вс 18:00» через месяц читают как ближайшее
+        $shortDates = $from->diffInDays($to) <= 8 && $this->weekdaysAreDistinct($picked['named'], $sessions);
         // Значок у строки — только там, где строки РАЗНЫЕ по теме. В подборке
         // одной темы столбец выходит из одинаковых значков, а иногда и
         // противоречит рубрике: «🎵 Танцевальное шоу» в спектаклях.
@@ -1332,7 +1383,7 @@ final class BroadcastDigestComposer
         // афишу. Обещать «ещё 36 на этой неделе» и привести на страницу, где
         // события другие, — обмануть в мелочи, которую читатель проверит первым
         // же нажатием.
-        $label = 'Вся афиша '.($forms[2] ?? mb_strtolower((string) $theme['title']));
+        $label = (string) ($theme['footer'] ?? 'Вся афиша '.($forms[2] ?? mb_strtolower((string) $theme['title'])));
         $link = $this->link(
             $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id, $theme, $feed['link'] ?? null),
             $label,
@@ -1711,6 +1762,14 @@ final class BroadcastDigestComposer
             return WeekendWindow::for($at);
         }
 
+        $skip = (int) ($theme['window_from_days'] ?? 0);
+        if ($skip > 0) {
+            return [
+                $at->copy()->addDays($skip)->startOfDay(),
+                $at->copy()->addDays((int) ($theme['window_days'] ?? $skip))->endOfDay(),
+            ];
+        }
+
         return [null, $at->copy()->addDays(
             (int) ($theme['window_days'] ?? config('broadcast_digest.window_days', 7)),
         )];
@@ -2008,7 +2067,7 @@ final class BroadcastDigestComposer
     private function feedSpec(array $theme, TelegramChatBroadcast $broadcast, Carbon $from, Carbon $to): ?array
     {
         $feed = $theme['feed'] ?? null;
-        if (! is_array($feed) || $feed === []) {
+        if (! is_array($feed)) {
             return null;
         }
 

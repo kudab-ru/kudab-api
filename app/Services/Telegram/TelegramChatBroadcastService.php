@@ -390,6 +390,7 @@ class TelegramChatBroadcastService
             ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcast, $usedStatuses) {
                 $q->where('broadcast_id', $broadcast->id)
                     ->whereIn('status', $usedStatuses);
+                TelegramChatBroadcastItem::whereClaimsEvents($q, 'telegram.chat_broadcast_items');
             });
 
         // Исключить конкретные id (для кнопки "следующее")
@@ -1383,6 +1384,13 @@ class TelegramChatBroadcastService
             if (isset($draft['hook_budget'])) {
                 $meta['hook_budget'] = (int) $draft['hook_budget'];
             }
+
+            // даты для парсера, если окно рубрики не «неделя от выхода», которую он считает сам
+            if (isset($draft['window'])) {
+                $meta['window'] = $draft['window'];
+            } else {
+                unset($meta['window']);
+            }
         }
 
         $item->caption = $draft['caption'];
@@ -1797,6 +1805,7 @@ class TelegramChatBroadcastService
             ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId, $usedStatuses) {
                 $q->where('broadcast_id', $broadcastId)
                     ->whereIn('status', $usedStatuses);
+                TelegramChatBroadcastItem::whereClaimsEvents($q, 'telegram.chat_broadcast_items');
             })
             ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId, $rejectedSince) {
                 $q->where('broadcast_id', $broadcastId)
@@ -1854,6 +1863,7 @@ class TelegramChatBroadcastService
                             ->join('events as e2', 'e2.id', '=', 'l.event_id')
                             ->where('i.broadcast_id', $broadcastId)
                             ->whereIn('i.status', $usedStatuses)
+                            ->tap(fn ($w) => TelegramChatBroadcastItem::whereClaimsEvents($w, 'i'))
                             ->when($exceptItemId !== null, fn ($w) => $w->where('i.id', '<>', $exceptItemId))
                             ->whereColumn('e2.event_group_id', 'events.event_group_id');
                     });
@@ -1872,7 +1882,8 @@ class TelegramChatBroadcastService
                             // снятое руками и отклонённое держат двойника столько же, сколько себя:
                             // иначе убранный концерт вернулся бы другой карточкой
                             ->where(function ($w) use ($usedStatuses, $rejectedSince) {
-                                $w->whereIn('i.status', $usedStatuses)
+                                $w->where(fn ($u) => $u->whereIn('i.status', $usedStatuses)
+                                    ->tap(fn ($u) => TelegramChatBroadcastItem::whereClaimsEvents($u, 'i')))
                                     ->orWhere(fn ($x) => $x->where('i.status', TelegramChatBroadcastItem::STATUS_SKIPPED)
                                         ->where('i.error_message', TelegramChatBroadcastItem::REMOVED_BY_HAND))
                                     ->orWhere(fn ($x) => $x->where('i.status', TelegramChatBroadcastItem::STATUS_REJECTED)
@@ -1915,6 +1926,8 @@ class TelegramChatBroadcastService
                         ->where('i.posted_at', '>=', now()->subDays(7));
                 });
             })
+            // подборка, не занимающая свои события (см. `whereClaimsEvents`), площадки этой недели тоже не занимает
+            ->tap(fn ($q) => TelegramChatBroadcastItem::whereClaimsEvents($q, 'i'))
             // i.id в выборке обязателен: без него distinct схлопнул бы разные записи одной площадки
             ->get(['i.id as item_id', 'e.venue_id as venue_id', 'v.name as venue_name']);
 

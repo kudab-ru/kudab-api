@@ -210,6 +210,30 @@ class TelegramChatBroadcastItem extends Model
     }
 
     /**
+     * Записи, после которых их события не идут отдельным постом: все, кроме подборок рубрик
+     * с `keeps_own_post` (config/broadcast_digest.php) — те называют событие за недели до даты.
+     *
+     * @param  \Illuminate\Database\Query\Builder|\Illuminate\Database\Eloquent\Builder  $q
+     */
+    public static function whereClaimsEvents($q, string $table): void
+    {
+        $keep = collect((array) config('broadcast_digest.themes', []))
+            ->filter(fn ($t) => ! empty($t['keeps_own_post']))
+            ->map(fn ($t) => (string) $t['slug'])
+            ->values()
+            ->all();
+        if ($keep === []) {
+            return;
+        }
+
+        $q->where(fn ($w) => $w->where($table.'.kind', '<>', self::KIND_DIGEST)
+            ->orWhereRaw(
+                'coalesce('.$table.".digest_meta->>'theme', '') not in (".implode(', ', array_fill(0, count($keep), '?')).')',
+                $keep,
+            ));
+    }
+
+    /**
      * Тема состава подборки («koncerty»). Хранится: из событий её не вывести,
      * у части из них несколько первичных интересов.
      */

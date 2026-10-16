@@ -10,6 +10,7 @@ use App\Services\Telegram\BroadcastDigestComposer;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Test;
 use Tests\TestCase;
 
@@ -1116,6 +1117,127 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertStringNotContainsString('12:00 и', $this->caption());
     }
 
+    #[Test]
+    public function the_tickets_rubric_takes_paid_events_two_to_six_weeks_ahead(): void
+    {
+        $this->onlyRubric('bilety-zaranee');
+        $inside = $this->ticketed([15, 18, 22, 26, 30]);
+        $this->event('Бесплатный концерт', 20, free: true);
+        $this->event('Концерт через неделю', 7, free: false, priceMin: 1500);
+        $this->event('Концерт через два месяца', 60, free: false, priceMin: 1500);
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::now());
+
+        $this->assertSame('bilety-zaranee', $out['theme_slug']);
+        $this->assertSame([], array_diff($out['event_ids'], $inside));
+    }
+
+    #[Test]
+    public function the_tickets_rubric_prefers_the_dearer_ticket_among_equals(): void
+    {
+        $this->onlyRubric('bilety-zaranee');
+        $this->ticketed([15, 16, 17, 18, 19, 20]);
+        $show = $this->event('Шоу во дворце спорта', 30, free: false, priceMin: 5000);
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::now());
+
+        $this->assertContains($show, $out['event_ids']);
+    }
+
+    #[Test]
+    public function the_tickets_rubric_prints_the_date_next_to_the_weekday(): void
+    {
+        $this->onlyRubric('bilety-zaranee');
+        // пять дней подряд: дни недели не повторяются, и неделя от выхода напечатала бы «ср 19:00»
+        $this->ticketed([15, 16, 17, 18, 19]);
+
+        $this->assertMatchesRegularExpression('/(пн|вт|ср|чт|пт|сб|вс) \d{1,2} (сентября|октября), \d{2}:\d{2}/u', $this->caption());
+    }
+
+    #[Test]
+    #[DataProvider('ticketsRubricCadence')]
+    public function the_tickets_rubric_comes_out_once_in_two_weeks(int $lastDaysAgo, bool $composed): void
+    {
+        $this->onlyRubric('bilety-zaranee');
+        $this->ticketed([15, 18, 22, 26, 30]);
+        $this->postedDigest($this->channel(), 'bilety-zaranee', $lastDaysAgo);
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::now());
+
+        $this->assertSame($composed, $out !== null);
+    }
+
+    public static function ticketsRubricCadence(): array
+    {
+        return ['неделю назад' => [7, false], 'две недели назад' => [14, true]];
+    }
+
+    #[Test]
+    public function the_tickets_rubric_goes_first_when_its_turn_comes(): void
+    {
+        $this->onlyRubric('bilety-zaranee', 'spektakli');
+        // у спектаклей недели площадок больше, по ротации выиграли бы они
+        foreach ([1, 2, 3, 4, 5, 6] as $day) {
+            $this->event('Спектакль недели '.$day, $day, free: false, priceMin: 700);
+        }
+        $this->ticketed([15, 18, 22, 26, 30]);
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::now());
+
+        $this->assertSame('bilety-zaranee', $out['theme_slug']);
+    }
+
+    #[Test]
+    #[DataProvider('ticketsSlotCadence')]
+    public function a_slot_with_the_tickets_rubric_rests_every_other_week(int $lastDaysAgo, int $booked): void
+    {
+        $channel = $this->channel();
+        $channel->period = 'daily_19';
+        // ближайший понедельник — 21 сентября
+        $channel->digest_slots = [['weekday' => 1, 'hour' => 12, 'theme' => 'bilety-zaranee']];
+        $channel->save();
+        $this->postedDigest($channel, 'bilety-zaranee', $lastDaysAgo);
+
+        app(\App\Services\Telegram\BroadcastDigestBooking::class)->bookDue(Carbon::now());
+
+        $this->assertSame($booked, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $channel->id)
+            ->where('status', TelegramChatBroadcastItem::STATUS_PENDING)
+            ->count());
+    }
+
+    public static function ticketsSlotCadence(): array
+    {
+        return ['вчера' => [1, 0], 'за две недели до слота' => [8, 1]];
+    }
+
+    #[Test]
+    #[DataProvider('digestThatNamedTheEvent')]
+    public function an_event_named_in_the_tickets_rubric_still_gets_its_own_post(string $rubric, bool $available): void
+    {
+        $channel = $this->channel();
+        $event = $this->event('Большой концерт', 20, free: false, priceMin: 2000);
+        $this->postedDigest($channel, $rubric, 1, [$event]);
+
+        $candidates = app(\App\Services\Telegram\TelegramChatBroadcastService::class)
+            ->channelCandidates($channel->chat, (int) $channel->id)
+            ->pluck('id')
+            ->all();
+
+        $this->assertSame($available, in_array($event, $candidates, true));
+    }
+
+    public static function digestThatNamedTheEvent(): array
+    {
+        return ['подборка недели' => ['spektakli', false], 'билеты заранее' => ['bilety-zaranee', true]];
+    }
+
+    /** @return list<int> */
+    private function ticketed(array $days): array
+    {
+        return array_map(fn (int $day) => $this->event('Концерт '.$day, $day, free: false, priceMin: 1500), $days);
+    }
+
     /** Первичная тема события вместо театра из фикстуры. */
     private function retag(int $eventId, string $slug): void
     {
@@ -1361,17 +1483,24 @@ class BroadcastDigestRubricsTest extends TestCase
     /** @var list<array<string, mixed>>|null */
     private ?array $allThemes = null;
 
-    private function postedDigest(TelegramChatBroadcast $channel, string $themeSlug): void
+    /** @param  list<int>  $named */
+    private function postedDigest(TelegramChatBroadcast $channel, string $themeSlug, int $daysAgo = 7, array $named = []): void
     {
-        DB::table('telegram.chat_broadcast_items')->insert([
+        $id = DB::table('telegram.chat_broadcast_items')->insertGetId([
             'broadcast_id' => $channel->id,
             'kind' => TelegramChatBroadcastItem::KIND_DIGEST,
             'status' => TelegramChatBroadcastItem::STATUS_POSTED,
-            'posted_at' => now()->subDays(7),
+            'posted_at' => now()->subDays($daysAgo),
             'digest_meta' => json_encode(['theme' => $themeSlug], JSON_UNESCAPED_UNICODE),
-            'created_at' => now()->subDays(7),
-            'updated_at' => now()->subDays(7),
+            'created_at' => now()->subDays($daysAgo),
+            'updated_at' => now()->subDays($daysAgo),
         ]);
+
+        foreach ($named as $i => $eventId) {
+            DB::table('telegram.chat_broadcast_item_events')->insert([
+                'item_id' => $id, 'event_id' => $eventId, 'position' => $i + 1, 'created_at' => now(),
+            ]);
+        }
     }
 
     private function event(
