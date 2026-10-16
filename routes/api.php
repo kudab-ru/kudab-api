@@ -255,6 +255,9 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('events/{id}/related', [WebEventsController::class, 'related'])->whereNumber('id');
     Route::get('events/{id}/companions', [WebEventsController::class, 'companions'])->whereNumber('id');
     Route::get('events/{id}/next', [WebEventsController::class, 'next'])->whereNumber('id');
+    Route::post('events/{id}/view', \App\Http\Controllers\Api\Web\EventViewController::class)
+        ->whereNumber('id')
+        ->middleware('throttle:30,1');
 
     // Приём заявок от организаторов: «подключите мой источник» / «хочу
     // поддержать». Публично и без авторизации, поэтому отдельный жёсткий

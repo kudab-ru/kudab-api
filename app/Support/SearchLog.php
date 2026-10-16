@@ -12,13 +12,10 @@ use Throwable;
  */
 final class SearchLog
 {
-    /** Поисковые роботы и снимки страниц, которые делаем мы сами. */
-    private const NOT_A_PERSON = '/bot|crawl|spider|slurp|headless|lighthouse|preview/i';
-
     public static function record(Request $request, string $q, ?int $cityId, int $found, array $filters): void
     {
         $agent = (string) $request->userAgent();
-        if ($agent === '' || preg_match(self::NOT_A_PERSON, $agent)) {
+        if (! HumanAgent::looksLikePerson($agent)) {
             return;
         }
 

@@ -1539,6 +1539,40 @@ class WebEventsTest extends TestCase
         $this->getJson("/api/web/events/{$hidden->id}")->assertNotFound()->assertJsonMissingPath('moved_to');
     }
 
+    public function test_an_event_view_counts_a_person_once_a_day(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2, 51.66);
+        $event = $this->createEvent($city->id, $this->createCommunity($city->id, 'Театр')->id, 'Спектакль', now()->addDays(3));
+        // встроенный браузер Телеграма: так открывают ссылки из канала, это живые люди
+        $agent = ['User-Agent' => 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/129.0 Mobile Safari/537.36 Telegram-Android/11.2.3'];
+
+        $this->postJson("/api/web/events/{$event->id}/view", ['v' => 'first-visitor-1'], $agent)->assertOk();
+        $this->postJson("/api/web/events/{$event->id}/view", ['v' => 'first-visitor-1'], $agent)->assertOk();
+        $this->postJson("/api/web/events/{$event->id}/view", ['v' => 'second-visitor-2'], $agent)->assertOk();
+
+        $this->assertSame(2, DB::table('event_views')->where('event_id', $event->id)->count());
+    }
+
+    #[DataProvider('robotAgents')]
+    public function test_a_robot_view_is_not_counted(string $agent): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2, 51.66);
+        $event = $this->createEvent($city->id, $this->createCommunity($city->id, 'Театр')->id, 'Спектакль', now()->addDays(3));
+
+        $this->postJson("/api/web/events/{$event->id}/view", ['v' => 'first-visitor-1'], ['User-Agent' => $agent])->assertOk();
+
+        $this->assertSame(0, DB::table('event_views')->count());
+    }
+
+    public static function robotAgents(): array
+    {
+        return [
+            'поисковый робот' => ['Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'],
+            'наш снимок страницы' => ['Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 HeadlessChrome/129.0 Safari/537.36'],
+            'без подписи' => [''],
+        ];
+    }
+
     /* ===================== helpers ===================== */
 
     private function mergeJournal(Event $keep, Event $drop): void
