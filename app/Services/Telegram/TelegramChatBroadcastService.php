@@ -1833,8 +1833,10 @@ class TelegramChatBroadcastService
             })
             // Снятое крестиком обратно не ставим: по тому же баллу оно вернулось бы в тот же слот.
             // Подборка повторяет это и паузу серии: см. `BroadcastDigestComposer::rejectRecentlyRejected`
+            // Только пост события: подборку снимают целиком, чтобы собрать заново, а не из-за её событий.
             ->whereDoesntHave('broadcastPosts', function ($q) use ($broadcastId) {
                 $q->where('broadcast_id', $broadcastId)
+                    ->where('telegram.chat_broadcast_items.kind', TelegramChatBroadcastItem::KIND_EVENT)
                     ->where('status', TelegramChatBroadcastItem::STATUS_SKIPPED)
                     ->where('error_message', TelegramChatBroadcastItem::REMOVED_BY_HAND);
             })
@@ -1901,6 +1903,7 @@ class TelegramChatBroadcastService
                                 $w->where(fn ($u) => $u->whereIn('i.status', $usedStatuses)
                                     ->tap(fn ($u) => TelegramChatBroadcastItem::whereClaimsEvents($u, 'i')))
                                     ->orWhere(fn ($x) => $x->where('i.status', TelegramChatBroadcastItem::STATUS_SKIPPED)
+                                        ->where('i.kind', TelegramChatBroadcastItem::KIND_EVENT)
                                         ->where('i.error_message', TelegramChatBroadcastItem::REMOVED_BY_HAND))
                                     ->orWhere(fn ($x) => $x->where('i.status', TelegramChatBroadcastItem::STATUS_REJECTED)
                                         ->where('i.updated_at', '>=', $rejectedSince));

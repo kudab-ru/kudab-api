@@ -1255,6 +1255,40 @@ class BroadcastDigestRubricsTest extends TestCase
     }
 
     #[Test]
+    #[DataProvider('removedByHand')]
+    public function only_a_removed_event_post_holds_its_event_back(string $kind, int $pool): void
+    {
+        $this->onlyRubric('besplatno');
+        $this->fill('Бесплатное', free: true);
+        $event = $this->event('Снятое руками', 2, free: true, hour: 8);
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $this->channel()->id;
+        $item->kind = $kind;
+        $item->event_id = $kind === TelegramChatBroadcastItem::KIND_EVENT ? $event : null;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->save();
+        DB::table('telegram.chat_broadcast_item_events')->insertOrIgnore([
+            'item_id' => $item->id, 'event_id' => $event, 'position' => 1, 'created_at' => now(),
+        ]);
+        $item->removeByHand();
+        $item->save();
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::now());
+
+        $this->assertSame($pool, $out['total']);
+    }
+
+    public static function removedByHand(): array
+    {
+        // шесть событий набивки и снятое: подборку снимают, чтобы собрать заново, а пост — когда событие не нужно
+        return [
+            'снятая подборка' => [TelegramChatBroadcastItem::KIND_DIGEST, 7],
+            'снятый пост события' => [TelegramChatBroadcastItem::KIND_EVENT, 6],
+        ];
+    }
+
+    #[Test]
     public function repicking_an_occasion_keeps_its_rubric(): void
     {
         $this->actingAsSuperadmin();

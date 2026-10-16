@@ -1004,6 +1004,7 @@ final class BroadcastDigestComposer
         $removedIds = DB::table('telegram.chat_broadcast_item_events as l')
             ->join('telegram.chat_broadcast_items as i', 'i.id', '=', 'l.item_id')
             ->where('i.broadcast_id', $broadcast->id)
+            ->where('i.kind', TelegramChatBroadcastItem::KIND_EVENT)
             ->where('i.status', TelegramChatBroadcastItem::STATUS_SKIPPED)
             ->where('i.error_message', TelegramChatBroadcastItem::REMOVED_BY_HAND)
             ->pluck('l.event_id')->map(fn ($v) => (int) $v)->all();
