@@ -88,6 +88,7 @@ Route::prefix('admin')
         Route::get('/broadcast/channels/{id}/feed', [AdminBroadcastController::class, 'feed']);
         Route::get('/broadcast/channels/{id}/suggestions', [AdminBroadcastController::class, 'suggestions']);
         Route::get('/broadcast/channels/{id}/slot-candidates', [AdminBroadcastController::class, 'slotCandidates']);
+        Route::get('/broadcast/channels/{id}/picker', [AdminBroadcastController::class, 'slotPicker']);
         Route::get('/broadcast/channels/{id}/digest-preview', [AdminBroadcastController::class, 'digestPreview']);
         Route::patch('/broadcast/channels/{id}', [AdminBroadcastController::class, 'updateChannel']);
         Route::post('/broadcast/channels/{id}/enqueue', [AdminBroadcastController::class, 'enqueue']);
@@ -108,6 +109,7 @@ Route::prefix('admin')
         // Чем заменить позицию в подборке. Только чтение: ручка ничего не
         // меняет, она отвечает на вопрос «есть ли вообще чем заменять».
         Route::get('/broadcast/items/{id}/digest-candidates', [AdminBroadcastController::class, 'digestCandidates']);
+        Route::get('/broadcast/items/{id}/picker', [AdminBroadcastController::class, 'digestPicker']);
         // Замена одного события в составе подборки. Подпись пересобирается в
         // той же транзакции: альбом доставка берёт по составу, и разойтись им
         // нельзя.

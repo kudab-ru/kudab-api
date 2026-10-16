@@ -14,6 +14,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Repositories\EventRepository;
 use App\Services\Telegram\BroadcastDigestComposer;
+use App\Services\Telegram\BroadcastEventPicker;
 use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\PickReason;
 use App\Services\Telegram\PostTiming;
@@ -103,6 +104,7 @@ class AdminBroadcastController extends Controller
         // Портреты площадок: у них свой сборщик текста и свои картинки — у
         // записи нет события, из которого их берут событийные посты.
         private readonly \App\Services\Telegram\TelegramVenuePortraitService $venuePortraits,
+        private readonly BroadcastEventPicker $picker,
     ) {}
 
     /** Каналы со сводкой: что в ленте, когда последний пост, молчит ли. */
@@ -612,6 +614,83 @@ class AdminBroadcastController extends Controller
         }, $this->broadcasts->slotCandidates($broadcast, $at, $occupant?->id));
 
         return response()->json(['data' => $rows, 'meta' => $meta + ['occupant_item_id' => $occupant?->id]]);
+    }
+
+    /**
+     * Панель «Заменить» и «Выбрать самому»: все события ближайших дней или найденные поиском.
+     * Почему событие нельзя поставить, написано у него заранее.
+     */
+    public function slotPicker(Request $request, int $broadcastId): JsonResponse
+    {
+        $data = $request->validate([
+            'at' => ['required', 'date'],
+            'q' => ['nullable', 'string', 'max:300'],
+            'days' => ['nullable', 'integer', 'min:1', 'max:'.BroadcastEventPicker::MAX_DAYS],
+        ]);
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
+        $at = $this->toUtc($data['at']);
+
+        if ($at->lte(Carbon::now())) {
+            return response()->json(['data' => [], 'meta' => ['reason' => 'слот уже прошёл']]);
+        }
+        if (! $broadcast->chat?->city_id) {
+            return response()->json(['data' => [], 'meta' => ['reason' => 'у канала не задан город']]);
+        }
+
+        $out = $this->picker->forSlot(
+            $broadcast,
+            $at,
+            $this->dayOccupant((int) $broadcast->id, $at, bySlot: $broadcast->slots !== []),
+            $data['q'] ?? null,
+            (int) ($data['days'] ?? BroadcastEventPicker::DAYS),
+        );
+
+        return response()->json(['data' => $this->withEventLinks($out['rows']), 'meta' => $out['meta']]);
+    }
+
+    /** Та же панель для строки подборки; out — заменяемая строка, без неё это добавление. */
+    public function digestPicker(Request $request, int $itemId): JsonResponse
+    {
+        $data = $request->validate([
+            'q' => ['nullable', 'string', 'max:300'],
+            'out' => ['nullable', 'integer'],
+        ]);
+
+        $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
+        if ($item->kind !== TelegramChatBroadcastItem::KIND_DIGEST) {
+            return response()->json(['ok' => false, 'error' => 'Состав есть только у подборки.'], 422);
+        }
+        if ($item->digestTheme() === null) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Состав ещё не собран — сначала «Собрать и править», потом выбирать замену.',
+            ], 422);
+        }
+
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($item->broadcast_id);
+        $out = $this->picker->forDigest(
+            $item,
+            $broadcast,
+            $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now(),
+            isset($data['out']) ? (int) $data['out'] : null,
+            $data['q'] ?? null,
+        );
+
+        if ($out === null) {
+            return response()->json(['ok' => false, 'error' => 'Тема записи неизвестна — пересоберите подборку.'], 422);
+        }
+
+        return response()->json(['data' => $this->withEventLinks($out['rows']), 'meta' => $out['meta']]);
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $rows
+     * @return list<array<string, mixed>>
+     */
+    private function withEventLinks(array $rows): array
+    {
+        return array_map(fn (array $row) => $row + ['url' => $this->siteUrl().'/events/'.$row['id']], $rows);
     }
 
     /**

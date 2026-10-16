@@ -401,13 +401,8 @@ final class BroadcastDigestComposer
     ): ?array {
         $slug = $item->digestTheme();
         $cityId = $broadcast->chat?->city_id;
-        if ($slug === null || ! $cityId) {
-            return null;
-        }
-
-        $theme = collect((array) config('broadcast_digest.themes', []))
-            ->first(fn ($t) => (string) ($t['slug'] ?? '') === $slug);
-        if ($theme === null) {
+        $theme = $this->themeOf($item);
+        if ($theme === null || ! $cityId) {
             return null;
         }
 
@@ -418,29 +413,10 @@ final class BroadcastDigestComposer
         $taken = array_map(static fn ($e) => (int) $e->id, $named);
 
         // Скрытое для канала автомат не берёт, а человеку показываем с пометкой: решает он.
-        $pool = $this->poolForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $item->id, keepHidden: true);
+        $pool = $this->poolForTheme($broadcast, (int) $cityId, $theme, $publishAt, $item->id, keepHidden: true);
         $rows = $pool['rows'] ?? collect();
 
-        $minDescription = (int) config('broadcast_digest.min_description', 120);
-
-        // Площадки и дни занятых строк — с НОМЕРОМ строки: «та же площадка, что
-        // во второй» полезнее, чем «площадка занята».
-        // Заменяемая строка в споре не участвует: она уходит. Без этого самые
-        // естественные замены — другой спектакль того же театра вместо этого —
-        // помечались ложным «та же площадка, что в строке 2» при замене как раз
-        // второй строки и утопали вниз списка.
-        $venueAt = [];
-        $dayAt = [];
-        foreach ($named as $i => $row) {
-            if ($replacing !== null && (int) $row->id === $replacing) {
-                continue;
-            }
-            if ($row->venue_id !== null) {
-                $venueAt[(int) $row->venue_id] ??= $i + 1;
-            }
-            $day = Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
-            $dayAt[$day] ??= $i + 1;
-        }
+        [$venueAt, $dayAt] = $this->rosterSpots($named, $replacing);
 
         $out = [];
         foreach ($rows as $row) {
@@ -448,47 +424,7 @@ final class BroadcastDigestComposer
                 continue;
             }
 
-            $venue = $row->venue_id !== null ? (int) $row->venue_id : null;
-            $day = Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
-            $length = mb_strlen(trim((string) $row->description));
-            $hidden = (bool) $row->channel_hidden;
-
-            $notes = [];
-            if ($hidden) {
-                $notes[] = match ($row->content_kind) {
-                    'official' => 'официоз',
-                    'religious' => 'религия',
-                    'patriotic_ceremony' => 'памятная церемония',
-                    default => 'памятная дата',
-                }.' — автомат такое в канал не ставит';
-            }
-            // Единственное жёсткое правило автосборки — см. pickNamed.
-            if ($venue === null) {
-                $notes[] = 'без площадки — автомат такое не называет';
-            }
-            if ($venue !== null && isset($venueAt[$venue])) {
-                $notes[] = 'та же площадка, что в строке '.$venueAt[$venue];
-            }
-            if (isset($dayAt[$day])) {
-                $notes[] = 'тот же день, что в строке '.$dayAt[$day];
-            }
-            if (trim((string) $row->tg_description) !== '') {
-                $notes[] = 'есть свой анонс';
-            } elseif ($length < $minDescription) {
-                $notes[] = 'короткая карточка — строка выйдет сухой';
-            }
-
-            $out[] = [
-                'id' => (int) $row->id,
-                'title' => (string) $row->title,
-                'start_time' => $row->start_time ? Carbon::parse($row->start_time)->toIso8601String() : null,
-                'venue' => $row->venue_name,
-                'venue_id' => $venue,
-                'description_length' => $length,
-                'has_own_text' => trim((string) $row->tg_description) !== '',
-                'clash' => $hidden || $venue !== null && isset($venueAt[$venue]) || isset($dayAt[$day]) || $venue === null,
-                'notes' => $notes,
-            ];
+            $out[] = $this->candidateRow($row, $venueAt, $dayAt);
         }
 
         // Порядок тот же, которым думает автосборка: сначала то, что встанет в
@@ -509,7 +445,7 @@ final class BroadcastDigestComposer
         // постом. Назвать такое в подборке — дубль, поэтому в обычные
         // кандидаты они не попадают. Но обмен осмыслен: событие переезжает в
         // подборку, а пост снимается. Цена разная — значит и список отдельный.
-        $withShown = $this->poolForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $item->id, true, keepHidden: true);
+        $withShown = $this->poolForTheme($broadcast, (int) $cityId, $theme, $publishAt, $item->id, true, keepHidden: true);
         $fresh = array_map(static fn (array $r) => $r['id'], $out);
 
         $inFeed = [];
@@ -563,6 +499,160 @@ final class BroadcastDigestComposer
         }
 
         return ['theme_slug' => $slug, 'named' => $named, 'rows' => $out, 'in_feed' => $inFeed];
+    }
+
+    /**
+     * События рубрики записи вместе с теми, что канал уже показывает, — для панели выбора в админке.
+     *
+     * @return \Illuminate\Support\Collection<int, object>|null
+     */
+    public function poolForItem(TelegramChatBroadcastItem $item, TelegramChatBroadcast $broadcast, Carbon $publishAt): ?\Illuminate\Support\Collection
+    {
+        $theme = $this->themeOf($item);
+        $cityId = $broadcast->chat?->city_id;
+        if ($theme === null || ! $cityId) {
+            return null;
+        }
+
+        return $this->poolForTheme($broadcast, (int) $cityId, $theme, $publishAt, $item->id, true, keepHidden: true)['rows'] ?? collect();
+    }
+
+    /**
+     * Пометки кандидатов для любых событий, не только из пула: поиск в админке находит и чужое рубрике.
+     *
+     * @param  list<int>  $eventIds
+     * @return array<int, list<string>>
+     */
+    public function notesForEvents(TelegramChatBroadcastItem $item, Carbon $publishAt, array $eventIds, ?int $replacing = null): array
+    {
+        if ($eventIds === []) {
+            return [];
+        }
+
+        [$venueAt, $dayAt] = $this->rosterSpots($this->namedFromLinks($item, $publishAt), $replacing);
+        [$hiddenSql, $hiddenBindings] = Event::channelHiddenSql('e');
+
+        $out = [];
+        foreach (DB::table('events as e')
+            ->whereIn('e.id', $eventIds)
+            ->select(['e.id', 'e.title', 'e.start_time', 'e.venue_id', 'e.description', 'e.tg_description', 'e.content_kind'])
+            ->selectRaw('null as venue_name')
+            ->selectRaw($hiddenSql.' as channel_hidden', $hiddenBindings)
+            ->get() as $row) {
+            $out[(int) $row->id] = $this->candidateRow($row, $venueAt, $dayAt)['notes'];
+        }
+
+        return $out;
+    }
+
+    /**
+     * Окно дат рубрики записи; null у начала — окно от момента выхода.
+     *
+     * @return array{0: Carbon|null, 1: Carbon}|null
+     */
+    public function windowForItem(TelegramChatBroadcastItem $item, Carbon $publishAt): ?array
+    {
+        $theme = $this->themeOf($item);
+
+        return $theme === null ? null : $this->themeWindow($theme, $publishAt);
+    }
+
+    /** Почему автомат не ставит скрытое для канала событие (`Event::channelHiddenSql`). */
+    public static function hiddenNote(?string $contentKind): string
+    {
+        return match ($contentKind) {
+            'official' => 'официоз',
+            'religious' => 'религия',
+            'patriotic_ceremony' => 'памятная церемония',
+            default => 'памятная дата',
+        }.' — автомат такое в канал не ставит';
+    }
+
+    /** @return array<string, mixed>|null рубрика записи из конфига */
+    private function themeOf(TelegramChatBroadcastItem $item): ?array
+    {
+        $slug = $item->digestTheme();
+        if ($slug === null) {
+            return null;
+        }
+
+        $theme = collect((array) config('broadcast_digest.themes', []))
+            ->first(fn ($t) => (string) ($t['slug'] ?? '') === $slug);
+
+        return $theme === null ? null : (array) $theme;
+    }
+
+    /**
+     * Площадки и дни занятых строк — с номером строки: «та же площадка, что во второй» полезнее, чем
+     * «площадка занята». Заменяемая строка в споре не участвует, она уходит: иначе другой спектакль
+     * того же театра вместо этого получал бы ложное «та же площадка».
+     *
+     * @param  list<object>  $named
+     * @return array{0: array<int, int>, 1: array<string, int>}
+     */
+    private function rosterSpots(array $named, ?int $replacing): array
+    {
+        $venueAt = [];
+        $dayAt = [];
+        foreach ($named as $i => $row) {
+            if ($replacing !== null && (int) $row->id === $replacing) {
+                continue;
+            }
+            if ($row->venue_id !== null) {
+                $venueAt[(int) $row->venue_id] ??= $i + 1;
+            }
+            $day = Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
+            $dayAt[$day] ??= $i + 1;
+        }
+
+        return [$venueAt, $dayAt];
+    }
+
+    /**
+     * Кандидат в строку подборки с пометками: чем он спорит с оставшимися строками.
+     *
+     * @param  array<int, int>  $venueAt
+     * @param  array<string, int>  $dayAt
+     * @return array<string, mixed>
+     */
+    private function candidateRow(object $row, array $venueAt, array $dayAt): array
+    {
+        $venue = $row->venue_id !== null ? (int) $row->venue_id : null;
+        $day = Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
+        $length = mb_strlen(trim((string) $row->description));
+        $hidden = (bool) $row->channel_hidden;
+
+        $notes = [];
+        if ($hidden) {
+            $notes[] = self::hiddenNote($row->content_kind);
+        }
+        // Единственное жёсткое правило автосборки — см. pickNamed.
+        if ($venue === null) {
+            $notes[] = 'без площадки — автомат такое не называет';
+        }
+        if ($venue !== null && isset($venueAt[$venue])) {
+            $notes[] = 'та же площадка, что в строке '.$venueAt[$venue];
+        }
+        if (isset($dayAt[$day])) {
+            $notes[] = 'тот же день, что в строке '.$dayAt[$day];
+        }
+        if (trim((string) $row->tg_description) !== '') {
+            $notes[] = 'есть свой анонс';
+        } elseif ($length < (int) config('broadcast_digest.min_description', 120)) {
+            $notes[] = 'короткая карточка — строка выйдет сухой';
+        }
+
+        return [
+            'id' => (int) $row->id,
+            'title' => (string) $row->title,
+            'start_time' => $row->start_time ? Carbon::parse($row->start_time)->toIso8601String() : null,
+            'venue' => $row->venue_name,
+            'venue_id' => $venue,
+            'description_length' => $length,
+            'has_own_text' => trim((string) $row->tg_description) !== '',
+            'clash' => $hidden || $venue !== null && isset($venueAt[$venue]) || isset($dayAt[$day]) || $venue === null,
+            'notes' => $notes,
+        ];
     }
 
     /**

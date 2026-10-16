@@ -2505,7 +2505,7 @@ class EventRepository
      * @param  list<int>  $topicIds
      * @return array{0: string, 1: array<int, mixed>}|null [sql, параметры]; null — запроса нет
      */
-    private function applyTextSearch($q, ?string $query, array $topicIds = []): ?array
+    public function applyTextSearch($q, ?string $query, array $topicIds = []): ?array
     {
         $match = SearchMatch::from($query);
         if ($match === null) {

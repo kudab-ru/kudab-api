@@ -199,7 +199,7 @@ final class PickReason
         return self::plural($n, 'день', 'дня', 'дней');
     }
 
-    private static function plural(int $n, string $one, string $few, string $many): string
+    public static function plural(int $n, string $one, string $few, string $many): string
     {
         $mod100 = $n % 100;
         $mod10 = $n % 10;
