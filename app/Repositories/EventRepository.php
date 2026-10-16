@@ -441,7 +441,7 @@ class EventRepository
     }
 
     /**
-     * @return array{page: LengthAwarePaginator, totalEvents: int|null, preferredTotal: int|null, topic: array{slug: string, name: string, total: int|null}|null}
+     * @return array{page: LengthAwarePaginator, totalEvents: int|null, eventIds: list<int>|null, preferredTotal: int|null, topic: array{slug: string, name: string, total: int|null}|null}
      *                                                                  - page: пагинатор reps (используется для hasMore-логики на фронте)
      *                                                                  - totalEvents: количество events до схлопывания (для display-счётчика),
      *                                                                  либо null если ни grouped, ни grouped_by_post не были запрошены
@@ -1004,6 +1004,8 @@ class EventRepository
         return [
             'page' => $page,
             'totalEvents' => $totalEvents,
+            // те же записи, что посчитаны в totalEvents; «Что сейчас в афише» разбирает их по дням и площадкам
+            'eventIds' => $eligibleEventIds,
             'preferredTotal' => $preferredTotal,
             'topic' => $topic === null ? null : ['slug' => $topic['slug'], 'name' => $topic['name'], 'total' => $topicTotal],
             'place' => $kind === null ? null : ['kind' => $kind, 'where' => VenueKindLabel::where($kind), 'total' => $placeTotal],

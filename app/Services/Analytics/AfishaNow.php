@@ -4,27 +4,34 @@ declare(strict_types=1);
 
 namespace App\Services\Analytics;
 
-use App\Http\Controllers\Api\Web\CommunitiesController;
-use App\Http\Controllers\Api\Web\InterestsController;
-use App\Http\Controllers\Api\Web\VenuesController;
+use App\Http\Resources\WebEventResource;
 use App\Models\City;
+use App\Models\Event;
+use App\Repositories\EventRepository;
 use App\Services\EventService;
-use Illuminate\Http\JsonResponse;
+use App\Services\Telegram\Scoring\EventBroadcastScorer;
+use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 
 /**
- * «Что сейчас в афише» для админки: события впереди, публикации, темы, источники и площадки.
- * Площадки, источники и темы берём у тех же ручек, что кормят сайт, иначе числа разойдутся
- * с его страницами. События считаем мимо кэша ленты: после «Обновить» нужно свежее число.
+ * «Что сейчас в афише» для админки. Записи берём у ленты сайта, мимо её кэша: после «Обновить»
+ * нужно свежее число. Общая лента прячет детские события, поэтому к ней добавляем «С детьми».
  */
 final class AfishaNow
 {
-    public const KEY = 'admin:afisha-now';
+    /** Меняется вместе с формой снимка: иначе страница получит из кэша старую форму. */
+    public const KEY = 'admin:afisha-now:v2';
 
-    private const THEMES = 12;
+    /** По одному событию на день недели вперёд. */
+    private const TOP_DAYS = 7;
 
-    public function __construct(private readonly EventService $events) {}
+    public function __construct(
+        private readonly EventService $events,
+        private readonly EventRepository $repository,
+        private readonly EventBroadcastScorer $scorer,
+    ) {}
 
     /** @return array<string, mixed> */
     public function get(): array
@@ -50,67 +57,72 @@ final class AfishaNow
             ->orderBy('id')
             ->first(['id', 'slug', 'name']);
 
-        $snapshot = [
+        $now = CarbonImmutable::now('Europe/Moscow')->startOfMinute();
+        $ids = $city ? $this->visibleIds((int) $city->id, $now) : [];
+
+        return [
             'generated_at' => now()->toIso8601String(),
             'city' => $city ? ['slug' => $city->slug, 'name' => $city->name] : null,
-            'events_ahead' => 0,
-            'posts' => 0,
-            'added_24h' => 0,
-            'sources' => $this->total(app(CommunitiesController::class)->index(self::request(['per_page' => 1]))),
-            'venues' => 0,
-            'themes' => [],
-        ];
-        if ($city === null) {
-            return $snapshot;
-        }
+            'top' => $this->top($ids, $now),
+        ] + (new AfishaBreakdown($ids, $now))->toArray();
+    }
 
-        $notStarted = now('Europe/Moscow')->startOfMinute()->toDateTimeString();
-        $ahead = $this->events->listWeb(['city_id' => $city->id, 'grouped_by_post' => true, 'date_from' => $notStarted], 1);
-        $added = $this->events->listWeb([
-            'city_id' => $city->id,
-            'date_from' => $notStarted,
-            'created_from' => now()->subDay()->startOfHour()->toDateTimeString(),
-        ], 1);
+    /** @return list<int> */
+    private function visibleIds(int $cityId, CarbonImmutable $now): array
+    {
+        $filters = ['city_id' => $cityId, 'grouped_by_post' => true, 'date_from' => $now->toDateTimeString()];
+        $main = $this->events->listWeb($filters, 1)['eventIds'] ?? [];
+        $kids = $this->events->listWeb($filters + ['kids' => true], 1)['eventIds'] ?? [];
 
-        $snapshot['events_ahead'] = $ahead['totalEvents'] ?? $ahead['page']->total();
-        $snapshot['posts'] = $ahead['page']->total();
-        $snapshot['added_24h'] = $added['page']->total();
-        $snapshot['venues'] = $this->total(app(VenuesController::class)->index(self::request(['city' => $city->slug, 'per_page' => 1])));
-        $snapshot['themes'] = $this->themes(app(InterestsController::class)->index(self::request(['city' => $city->slug])));
-
-        return $snapshot;
+        return array_values(array_unique(array_merge($main, $kids)));
     }
 
     /**
-     * Число темы — она сама плюс её жанры: часть событий висит только на жанре («рок» внутри «музыки»).
+     * Самое интересное событие каждого из семи дней по той же оценке, которой автомат выбирает посты канала.
+     * Оценка ленты сайта сюда не годится: она мерит полноту карточки, а не интерес.
      *
-     * @return list<array{slug: string, name: string, count: int}>
+     * @param  list<int>  $ids
+     * @return list<array{id: int, title: string, date: string, start_at: ?string, place: ?string, image: ?string}>
      */
-    private function themes(JsonResponse $response): array
+    private function top(array $ids, CarbonImmutable $now): array
     {
-        $all = collect($response->getData(true)['data'] ?? []);
-        $leaves = $all->whereNotNull('parent_slug')->groupBy('parent_slug');
+        $days = array_map(fn (int $i) => $now->addDays($i)->toDateString(), range(0, self::TOP_DAYS - 1));
+        $events = Event::query()
+            ->whereIn('id', $ids)
+            ->whereIn('start_date', $days)
+            ->with('venue:id,slug,name,kind')
+            ->get();
+        if ($events->isEmpty()) {
+            return [];
+        }
 
-        return $all->whereNull('parent_id')
-            ->map(fn (array $t) => [
-                'slug' => (string) $t['slug'],
-                'name' => (string) $t['name'],
-                'count' => (int) $t['events_count'] + (int) collect($leaves->get($t['slug'], []))->sum('events_count'),
-            ])
-            ->filter(fn (array $t) => $t['count'] > 0)
-            ->sortByDesc('count')
-            ->take(self::THEMES)
-            ->values()
-            ->all();
-    }
+        $this->scorer->prepare($events);
+        $ranked = $events
+            ->map(fn (Event $e) => ['event' => $e, 'interest' => $this->scorer->interest($e)])
+            ->sort(fn (array $a, array $b) => [$b['interest'], $a['event']->start_time?->getTimestamp() ?? PHP_INT_MAX, $a['event']->id]
+                <=> [$a['interest'], $b['event']->start_time?->getTimestamp() ?? PHP_INT_MAX, $b['event']->id]);
 
-    private function total(JsonResponse $response): int
-    {
-        return (int) ($response->getData(true)['meta']['total'] ?? 0);
-    }
+        // спектакль, который идёт и в субботу, и в воскресенье, показываем один раз
+        $picked = new EloquentCollection;
+        $seen = [];
+        foreach ($days as $day) {
+            $best = $ranked->first(fn (array $r) => $r['event']->start_date?->toDateString() === $day
+                && ! isset($seen[$r['event']->event_group_id ?? -$r['event']->id]));
+            if ($best !== null) {
+                $seen[$best['event']->event_group_id ?? -$best['event']->id] = true;
+                $picked->push($best['event']);
+            }
+        }
 
-    private static function request(array $query): Request
-    {
-        return Request::create('/', 'GET', $query);
+        $this->repository->hydrateImagesFor($picked);
+
+        return array_map(fn (array $e) => [
+            'id' => (int) $e['id'],
+            'title' => (string) $e['title'],
+            'date' => (string) $e['start_date'],
+            'start_at' => $e['start_at'] ?? null,
+            'place' => $e['venue']['name'] ?? null,
+            'image' => $e['images'][0] ?? $e['poster'] ?? null,
+        ], WebEventResource::collection($picked)->toArray(Request::create('/')));
     }
 }

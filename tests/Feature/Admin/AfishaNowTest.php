@@ -48,25 +48,46 @@ class AfishaNowTest extends TestCase
 
         $this->getJson('/api/admin/afisha-now')
             ->assertOk()
-            ->assertJsonPath('data.events_ahead', 1)
+            ->assertJsonPath('data.events', 1)
             ->assertJsonPath('data.themes.0.slug', 'music')
             ->assertJsonPath('data.themes.0.count', 1);
 
         $this->futureEvent('Спектакль');
 
-        $this->getJson('/api/admin/afisha-now')->assertJsonPath('data.events_ahead', 1);
-        $this->postJson('/api/admin/afisha-now/refresh')->assertOk()->assertJsonPath('data.events_ahead', 2);
+        $this->getJson('/api/admin/afisha-now')->assertJsonPath('data.events', 1);
+        $this->postJson('/api/admin/afisha-now/refresh')->assertOk()->assertJsonPath('data.events', 2);
     }
 
-    private function futureEvent(string $title): int
+    public function test_daily_series_counts_once_and_kids_events_are_counted(): void
     {
-        return (int) DB::table('events')->insertGetId([
+        $groupId = (int) DB::table('event_groups')->insertGetId([
+            'community_id' => $this->communityId, 'city_id' => $this->cityId,
+            'group_key' => 'vystavka', 'title_norm' => 'выставка', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        foreach (range(3, 9) as $day) {
+            $this->futureEvent('Выставка', $day, ['event_group_id' => $groupId]);
+        }
+        $this->futureEvent('Концерт');
+        // детское лента сайта прячет из общей выдачи, а в афише оно есть
+        $this->futureEvent('Кукольный спектакль', 4, ['audience' => 'kids']);
+
+        $this->postJson('/api/admin/afisha-now/refresh')
+            ->assertOk()
+            ->assertJsonPath('data.events', 3)
+            ->assertJsonPath('data.sessions', 9)
+            ->assertJsonPath('data.shapes.daily', 1)
+            ->assertJsonPath('data.shapes.once', 2);
+    }
+
+    private function futureEvent(string $title, int $inDays = 10, array $extra = []): int
+    {
+        return (int) DB::table('events')->insertGetId($extra + [
             'community_id' => $this->communityId,
             'city_id' => $this->cityId,
             'title' => $title,
             'status' => 'active',
-            'start_time' => DB::raw("now() + interval '10 days'"),
-            'start_date' => DB::raw("(now() + interval '10 days')::date"),
+            'start_time' => DB::raw("now() + interval '{$inDays} days'"),
+            'start_date' => DB::raw("(now() + interval '{$inDays} days')::date"),
             'created_at' => now(),
             'updated_at' => now(),
         ]);
