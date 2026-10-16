@@ -1516,7 +1516,43 @@ class WebEventsTest extends TestCase
             ->assertJsonCount(0, 'data.similar');
     }
 
+    public function test_a_merged_event_points_to_its_survivor(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2, 51.66);
+        $community = $this->createCommunity($city->id, 'Театр');
+        $keep = $this->createEvent($city->id, $community->id, 'Спектакль', now()->addDays(3));
+        $drop = $this->createEvent($city->id, $community->id, 'Спектакль, копия', now()->addDays(3));
+        $drop->delete();
+        $this->mergeJournal($keep, $drop);
+
+        $this->getJson("/api/web/events/{$drop->id}")->assertNotFound()->assertJsonPath('moved_to', $keep->id);
+    }
+
+    public function test_a_hidden_live_event_is_not_sent_to_a_survivor(): void
+    {
+        $active = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2, 51.66);
+        $off = $this->insertCity('Липецк', 'lipetsk', 'inactive', 39.6, 52.6);
+        $keep = $this->createEvent($active->id, $this->createCommunity($active->id, 'Театр')->id, 'Спектакль', now()->addDays(3));
+        $hidden = $this->createEvent($off->id, $this->createCommunity($off->id, 'Театр')->id, 'Спектакль, копия', now()->addDays(3));
+        $this->mergeJournal($keep, $hidden);
+
+        $this->getJson("/api/web/events/{$hidden->id}")->assertNotFound()->assertJsonMissingPath('moved_to');
+    }
+
     /* ===================== helpers ===================== */
+
+    private function mergeJournal(Event $keep, Event $drop): void
+    {
+        DB::table('event_duplicate_links')->insert([
+            'keep_event_id' => $keep->id,
+            'drop_event_id' => $drop->id,
+            'score_total' => 1,
+            'verdict' => 'llm_yes',
+            'merged_at' => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
 
     private function createInterest(string $name, string $slug, ?int $parentId = null): Interest
     {

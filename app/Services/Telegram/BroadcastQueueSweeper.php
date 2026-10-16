@@ -6,10 +6,10 @@ namespace App\Services\Telegram;
 
 use App\Contracts\Telegram\TelegramChatBroadcastItemRepositoryInterface;
 use App\Models\Event;
-use App\Models\EventSource;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
+use App\Services\EventSurvivor;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -24,12 +24,10 @@ final class BroadcastQueueSweeper
 
     public const MOVED = 'moved';
 
-    /** Выжившее могли потом слить ещё раз: идём по журналу склеек, пока не найдём живое. */
-    private const SURVIVOR_STEPS = 5;
-
     public function __construct(
         private readonly TelegramChatBroadcastService $broadcasts,
         private readonly TelegramChatBroadcastItemRepositoryInterface $items,
+        private readonly EventSurvivor $survivors,
     ) {}
 
     /**
@@ -123,83 +121,13 @@ final class BroadcastQueueSweeper
      */
     public function moveToSurvivor(TelegramChatBroadcast $broadcast, TelegramChatBroadcastItem $item, Carbon $now): ?array
     {
-        $survivor = $item->event_id ? $this->survivorOf((int) $item->event_id) : null;
+        $survivor = $item->event_id ? $this->survivors->find((int) $item->event_id) : null;
         // доставка приходит, когда час записи уже наступил: выжившее должно успеть к самой отправке
         $at = Carbon::parse($item->publish_at)->max($now);
 
         return $survivor !== null && $this->canMoveTo($broadcast, $item, $survivor[0], $at)
             ? $this->moveTo($item, $survivor[0], $survivor[1], $now)
             : null;
-    }
-
-    /**
-     * Живое событие, в которое слили удалённое. Без записи в журнале склеек — живое с тем же
-     * `dedup_key` (ночная пересборка ключей ссылки не оставляет), затем см. `postHolderOf`.
-     *
-     * @return array{0: Event, 1: string}|null событие и откуда оно: link, dedup_key или source
-     */
-    private function survivorOf(int $eventId): ?array
-    {
-        $seen = [$eventId => true];
-        $drops = [$eventId];
-
-        for ($step = 0; $step < self::SURVIVOR_STEPS && $drops !== []; $step++) {
-            $keeps = DB::table('event_duplicate_links')
-                ->whereIn('drop_event_id', $drops)
-                ->whereNotNull('merged_at')
-                ->whereNull('reverted_at')
-                ->orderByDesc('merged_at')
-                ->orderByDesc('id')
-                ->pluck('keep_event_id')
-                ->map(fn ($id) => (int) $id)
-                ->reject(fn (int $id) => isset($seen[$id]))
-                ->unique()
-                ->values()
-                ->all();
-            if ($keeps === []) {
-                break;
-            }
-
-            $alive = Event::query()->whereIn('id', $keeps)->get()->keyBy('id');
-            foreach ($keeps as $id) {
-                if ($alive->has($id)) {
-                    return [$alive->get($id), 'link'];
-                }
-                $seen[$id] = true;
-            }
-            $drops = $keeps;
-        }
-
-        $dead = Event::withTrashed()->find($eventId);
-        $twin = $dead?->dedup_key ? Event::query()->where('dedup_key', $dead->dedup_key)->whereKeyNot($eventId)->first() : null;
-        if ($twin !== null) {
-            return [$twin, 'dedup_key'];
-        }
-
-        $holder = $dead ? $this->postHolderOf($dead) : null;
-
-        return $holder ? [$holder, 'source'] : null;
-    }
-
-    /**
-     * Журнал пишет только перекрёстная склейка. Остальные переносят источники удалённого на выжившее,
-     * и его исходный пост оказывается у выжившего. Остались свои источники — удалили не склейкой.
-     * День сверяем, потому что один пост бывает афишей на неделю.
-     */
-    private function postHolderOf(Event $dead): ?Event
-    {
-        if ($dead->original_post_id === null || $dead->start_date === null
-            || EventSource::query()->where('event_id', $dead->id)->exists()) {
-            return null;
-        }
-
-        $holders = Event::query()
-            ->where('start_date', $dead->start_date->toDateString())
-            ->whereIn('id', EventSource::query()->select('event_id')->where('context_post_id', $dead->original_post_id))
-            ->limit(2)
-            ->get();
-
-        return $holders->count() === 1 ? $holders->first() : null;
     }
 
     /**

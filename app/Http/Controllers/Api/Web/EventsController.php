@@ -7,6 +7,8 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\WebEventResource;
 use App\Models\City;
 use App\Services\EventService;
+use App\Services\EventSurvivor;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use App\Support\KeyboardLayout;
 use App\Support\SearchLog;
 use Illuminate\Http\JsonResponse;
@@ -417,13 +419,34 @@ class EventsController extends Controller
         ]);
     }
 
-    public function show(int $id): JsonResponse
+    public function show(int $id, EventSurvivor $survivors): JsonResponse
     {
-        $event = $this->service->getWeb($id);
+        try {
+            $event = $this->service->getWeb($id);
+        } catch (ModelNotFoundException $missing) {
+            // ссылки на склеенное событие живут в постах канала и закладках: говорим, куда оно переехало
+            $survivor = $survivors->find($id)[0] ?? null;
+            if ($survivor !== null && $this->visibleOnWeb((int) $survivor->id)) {
+                return response()->json(['message' => 'Событие переехало.', 'moved_to' => (int) $survivor->id], 404);
+            }
+
+            throw $missing;
+        }
 
         return response()->json([
             'data' => (new WebEventDetailResource($event))->toArray(request()),
         ]);
+    }
+
+    private function visibleOnWeb(int $id): bool
+    {
+        try {
+            $this->service->getWeb($id);
+
+            return true;
+        } catch (ModelNotFoundException) {
+            return false;
+        }
     }
 
     /**
