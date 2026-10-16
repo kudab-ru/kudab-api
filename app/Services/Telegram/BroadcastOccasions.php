@@ -69,12 +69,26 @@ final class BroadcastOccasions
             return false;
         }
 
-        // снятую или отклонённую человеком бронь не возвращаем
-        if ($this->occasionItems($broadcast, $theme, $day)->exists()) {
-            return false;
+        $at = $planned->max($msk->copy()->addMinutes(30));
+
+        // снятую или отклонённую человеком бронь не возвращаем, а черновик без срока, собранный
+        // руками, и есть этот пост: ставим на время повода его, а не второй
+        $existing = $this->occasionItems($broadcast, $theme, $day)->get();
+        if ($existing->isNotEmpty()) {
+            $draft = $existing->first(fn (TelegramChatBroadcastItem $i) => $i->publish_at === null
+                && $i->status === TelegramChatBroadcastItem::STATUS_PENDING);
+            if ($draft === null || $existing->contains(fn (TelegramChatBroadcastItem $i) => $i->publish_at !== null)) {
+                return false;
+            }
+            if (! $dryRun) {
+                $draft->publish_at = $at->copy()->utc();
+                $draft->save();
+                Log::info('broadcast.occasion.draft_scheduled', ['item_id' => $draft->id, 'publish_at' => $at->toIso8601String()]);
+            }
+
+            return true;
         }
 
-        $at = $planned->max($msk->copy()->addMinutes(30));
         if ($dryRun) {
             return true;
         }
@@ -190,10 +204,10 @@ final class BroadcastOccasions
         return htmlspecialchars($lead, ENT_NOQUOTES).'. '.mb_strtoupper(mb_substr($list, 0, 1)).mb_substr($list, 1).'.';
     }
 
-    /** Подборки этого повода в канале: бронь, вышедшая и напоминание. */
+    /** Подборки этого повода в канале: бронь, черновик, вышедшая и напоминание. Месяц назад — запас на черновик. */
     private function occasionItems(TelegramChatBroadcast $broadcast, array $theme, Carbon $day): \Illuminate\Database\Eloquent\Builder
     {
-        $from = $day->copy()->subDays((int) ($theme['lead_days'] ?? 7) + self::BOOK_AHEAD_DAYS)->utc();
+        $from = $day->copy()->subDays(30)->utc();
         $to = $day->copy()->addDays((int) ($theme['window_after'] ?? 0) + 1)->utc();
 
         return TelegramChatBroadcastItem::query()

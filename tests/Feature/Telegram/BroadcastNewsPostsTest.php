@@ -72,6 +72,23 @@ class BroadcastNewsPostsTest extends TestCase
     }
 
     #[Test]
+    public function a_hand_made_occasion_draft_is_scheduled_instead_of_a_second_post(): void
+    {
+        $draft = new TelegramChatBroadcastItem;
+        $draft->broadcast_id = $this->channel()->id;
+        $draft->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $draft->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $draft->is_off_grid = true;
+        $draft->digest_meta = ['theme' => 'povod-halloween'];
+        $draft->save();
+
+        app(BroadcastOccasions::class)->run(Carbon::now());
+
+        $this->assertSame(1, $this->items()->count());
+        $this->assertSame('2026-10-24 12:00', Carbon::parse($draft->fresh()->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H:i'));
+    }
+
+    #[Test]
     public function on_the_day_a_reminder_answers_the_posted_digest(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-10-31 10:00', 'Europe/Moscow'));
