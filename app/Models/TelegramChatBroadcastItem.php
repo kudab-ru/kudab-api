@@ -194,6 +194,12 @@ class TelegramChatBroadcastItem extends Model
     public const KIND_DIGEST = 'digest'; // подборка недели: несколько событий, готовый caption
 
     /**
+     * Тема записи «Объявили» (`BroadcastAnnounce`): своя подпись и одно событие в составе.
+     * Копия — `TgDescribeDueCommand::ANNOUNCE_THEME` в парсере, правятся вместе.
+     */
+    public const THEME_ANNOUNCE = 'obyavili';
+
+    /**
      * Виды записей с готовым caption и без события. Проверять по этому списку,
      * а не `kind !== venue`: иначе новая рубрика попадёт в события.
      *
@@ -211,7 +217,7 @@ class TelegramChatBroadcastItem extends Model
 
     /**
      * Записи, после которых их события не идут отдельным постом: все, кроме подборок рубрик
-     * с `keeps_own_post` (config/broadcast_digest.php) — те называют событие за недели до даты.
+     * с `keeps_own_post` (config/broadcast_digest.php) и «Объявили» — те называют событие за недели до даты.
      *
      * @param  \Illuminate\Database\Query\Builder|\Illuminate\Database\Eloquent\Builder  $q
      */
@@ -220,11 +226,9 @@ class TelegramChatBroadcastItem extends Model
         $keep = collect((array) config('broadcast_digest.themes', []))
             ->filter(fn ($t) => ! empty($t['keeps_own_post']))
             ->map(fn ($t) => (string) $t['slug'])
+            ->push(self::THEME_ANNOUNCE)
             ->values()
             ->all();
-        if ($keep === []) {
-            return;
-        }
 
         $q->where(fn ($w) => $w->where($table.'.kind', '<>', self::KIND_DIGEST)
             ->orWhereRaw(
@@ -242,6 +246,16 @@ class TelegramChatBroadcastItem extends Model
         $v = trim((string) (($this->digest_meta['theme'] ?? '')));
 
         return $v === '' ? null : $v;
+    }
+
+    /** Рубрике не нужен текст модели (`text => false` в config/broadcast_digest.php). */
+    public function digestWithoutText(): bool
+    {
+        $slug = $this->digestTheme() ?? ($this->digest_meta['theme_wanted'] ?? null);
+        $theme = collect((array) config('broadcast_digest.themes', []))
+            ->first(fn ($t) => ($t['slug'] ?? null) === $slug);
+
+        return $theme !== null && ($theme['text'] ?? true) === false;
     }
 
     /** Подводка под шапкой подборки; null — пост выйдет без неё. */

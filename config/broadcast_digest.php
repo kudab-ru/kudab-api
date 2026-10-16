@@ -175,6 +175,68 @@ return [
             'count' => false,
             'feed' => [],
             'footer' => 'Вся афиша на эти даты'],
+
+        /*
+         * Повод: праздник, к которому ищут, куда пойти. Выходит по календарю, а не по ротации
+         * (`BroadcastOccasions`): пост за `lead_days` до дня в `hour`, в сам день — напоминание
+         * ответом на тот пост. События — по словам в названии или в начале описания.
+         */
+        ['slug' => 'povod-halloween', 'title' => 'Хэллоуин', 'headline' => 'Хэллоуин {city}: где отмечать', 'emoji' => '🎃',
+            'forms' => ['событие', 'события', 'событий'],
+            'pick' => 'words',
+            'words' => ['хэллоуин', 'хеллоуин', 'halloween'],
+            'occasion' => '10-31',
+            // вечеринки уходят на ближайшие выходные, квизы — на неделю вокруг
+            'window_before' => 3,
+            'window_after' => 1,
+            'lead_days' => 7,
+            'hour' => 12,
+            'reminder' => 'Хэллоуин сегодня',
+            'reminder_hour' => 12,
+            'auto' => false,
+            'named' => [3, 5],
+            'one_per_day' => false,
+            'min_events' => 3,
+            'min_venues' => 2,
+            // квиз и мастер-класс на Хэллоуин — тоже Хэллоуин; общий список исключений их бы снял
+            'stop_list' => false,
+            'cheap_line' => false,
+            'keeps_own_post' => true,
+            'line' => 'compact',
+            'hook_max' => 70,
+            'intro' => false,
+            'range_in_head' => false,
+            'count' => false,
+            'feed' => ['q' => 'хэллоуин'],
+            'footer' => 'Вся афиша на Хэллоуин'],
+
+        /*
+         * Что смотрят: будущие события, которые чаще всего открывали на сайте за неделю, по своему
+         * счётчику (`EventViews`), без Метрики. Ставится в слот расписания, ротация её не берёт.
+         */
+        ['slug' => 'chto-smotryat', 'title' => 'Что смотрят', 'headline' => 'Больше всего смотрят на kudab.ru', 'emoji' => '👀',
+            'forms' => ['событие', 'события', 'событий'],
+            'pick' => 'views',
+            'views_days' => 7,
+            'min_views' => 3,
+            'window_days' => 60,
+            'auto' => false,
+            'named' => [3, 4],
+            'one_per_day' => false,
+            'min_events' => 3,
+            'min_venues' => 2,
+            'cheap_line' => false,
+            'stop_list' => false,
+            'keep_shown' => true,
+            'keeps_own_post' => true,
+            'line' => 'compact',
+            'hooks' => false,
+            // текст модели не нужен: строки без фраз, список и так говорит сам за себя
+            'text' => false,
+            'intro' => false,
+            'range_in_head' => false,
+            'count' => false,
+            'footer_text' => 'По просмотрам карточек на сайте за семь дней.'],
     ],
 
     /*

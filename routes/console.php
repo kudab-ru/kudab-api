@@ -72,6 +72,18 @@ Schedule::command('broadcast:enqueue-digests')
     ->onOneServer()
     ->withoutOverlapping(10);
 
+// «Объявили»: часы, в которые ставить пост, команда решает сама, см. BroadcastAnnounce::HOURS.
+Schedule::command('broadcast:announce')
+    ->hourlyAt(5)
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
+// Подборки к праздникам за неделю и напоминание в сам день, см. BroadcastOccasions.
+Schedule::command('broadcast:occasions')
+    ->hourly()
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
 // Отчёт страницы «Аналитика». Считается заранее: сборка стоит восьми
 // обращений к чужим API и тянется около минуты, а nginx рвёт запрос раньше.
 // Каждые три часа при сроке жизни кэша в шесть — чтобы протухший отчёт

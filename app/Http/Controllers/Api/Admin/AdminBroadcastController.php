@@ -3645,7 +3645,8 @@ class AdminBroadcastController extends Controller
         if ($broadcast === null
             || ! $broadcast->ai_text
             || $item->kind !== TelegramChatBroadcastItem::KIND_DIGEST
-            || $item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL) {
+            || $item->caption_source === TelegramChatBroadcastItem::CAPTION_MANUAL
+            || $item->digestWithoutText()) {
             return false;
         }
 

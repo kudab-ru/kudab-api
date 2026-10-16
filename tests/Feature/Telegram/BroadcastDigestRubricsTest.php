@@ -1232,6 +1232,70 @@ class BroadcastDigestRubricsTest extends TestCase
         return ['подборка недели' => ['spektakli', false], 'билеты заранее' => ['bilety-zaranee', true]];
     }
 
+    #[Test]
+    public function the_occasion_names_events_by_the_word_around_its_day(): void
+    {
+        $this->onlyRubric('povod-halloween');
+        // от 15 сентября: 46 дней — суббота 31 октября, 44 — четверг 29-го
+        $party = $this->event('Хэллоуинская вечеринка', 46, free: false, priceMin: 1500);
+        $rock = $this->event('Кошмар на улице Кирова', 46, free: false, priceMin: 600, hour: 21,
+            description: 'Хэллоуин в рок-баре: пять групп и конкурс костюмов. '.str_repeat('описание события достаточной длины. ', 4));
+        $quiz = $this->event('Квиз: Halloween', 44, free: false, priceMin: 500);
+        $this->event('Хэллоуин через месяц', 76, free: false, priceMin: 500);
+        $this->event('Обычный концерт', 46, free: false, priceMin: 500, hour: 17);
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::parse('2026-10-24 12:00', 'Europe/Moscow'), null, 'povod-halloween');
+
+        $this->assertEqualsCanonicalizing([$party, $rock, $quiz], $out['event_ids']);
+        $this->assertStringContainsString('Хэллоуин в Воронеже: где отмечать', $out['caption']);
+    }
+
+    #[Test]
+    public function a_booked_occasion_is_not_replaced_by_another_rubric(): void
+    {
+        $this->onlyRubric('povod-halloween', 'besplatno');
+        $this->fill('Бесплатное', free: true);
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $this->channel()->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->is_off_grid = true;
+        $item->publish_at = Carbon::now()->addHours(6);
+        $item->digest_meta = ['theme_wanted' => 'povod-halloween'];
+        $item->save();
+
+        $result = app(\App\Services\Telegram\TelegramChatBroadcastService::class)
+            ->prepareDigestAhead($item, $this->channel(), Carbon::now());
+
+        $this->assertSame('failed', $result);
+        $this->assertNull($item->fresh()->digestTheme());
+    }
+
+    #[Test]
+    public function what_people_watch_goes_by_views_and_keeps_posted_events(): void
+    {
+        $this->onlyRubric('chto-smotryat');
+        $top = $this->event('Самое смотримое', 9, free: false, priceMin: 900);
+        $mid = $this->event('Второе по просмотрам', 3, free: false, priceMin: 900);
+        $low = $this->event('Третье по просмотрам', 5, free: false, priceMin: 900);
+        // другой вид: правило «сначала разные виды» поставило бы его вторым
+        $this->retag($low, 'music');
+        $few = $this->event('Почти не смотрели', 4, free: false, priceMin: 900);
+        foreach ([$top => 6, $mid => 5, $low => 3, $few => 2] as $event => $people) {
+            for ($i = 0; $i < $people; $i++) {
+                DB::table('event_views')->insert([
+                    'event_id' => $event, 'visitor' => 'v'.$event.'-'.$i, 'day' => Carbon::now('Europe/Moscow')->subDays($i % 5)->toDateString(),
+                ]);
+            }
+        }
+        $this->postedDigest($this->channel(), 'spektakli', 1, [$top]);
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::now(), null, 'chto-smotryat');
+
+        $this->assertSame([$top, $mid, $low], $out['event_ids']);
+    }
+
     /** @return list<int> */
     private function ticketed(array $days): array
     {

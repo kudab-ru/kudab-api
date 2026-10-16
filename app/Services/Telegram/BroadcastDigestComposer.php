@@ -133,6 +133,11 @@ final class BroadcastDigestComposer
                 continue;
             }
 
+            // поводы и «Что смотрят» выходят по своему расписанию, ротация их не берёт
+            if ($themeSlug === null && ($theme['auto'] ?? true) === false) {
+                continue;
+            }
+
             $picked = $this->pickForTheme($broadcast, (int) $cityId, (array) $theme, $publishAt, $forItem?->id);
             if ($picked !== null) {
                 $gathered[(string) ($theme['slug'] ?? '')] = [$theme, $picked];
@@ -297,7 +302,7 @@ final class BroadcastDigestComposer
      */
     private function windowMeta(array $theme, Carbon $publishAt): array
     {
-        if ((int) ($theme['window_from_days'] ?? 0) <= 0) {
+        if ((int) ($theme['window_from_days'] ?? 0) <= 0 && ! isset($theme['occasion'])) {
             return [];
         }
 
@@ -383,21 +388,14 @@ final class BroadcastDigestComposer
         $total = $rows->count();
         $venues = $rows->pluck('venue_id')->filter()->unique()->count();
 
-        if ($total < (int) config('broadcast_digest.min_events', 5)
-            || $venues < (int) config('broadcast_digest.min_venues', 3)) {
+        if ($total < (int) ($theme['min_events'] ?? config('broadcast_digest.min_events', 5))
+            || $venues < (int) ($theme['min_venues'] ?? config('broadcast_digest.min_venues', 3))) {
             return null;
         }
 
         return [
             'theme' => $theme,
-            'named' => $this->pickNamed(
-                $rows,
-                self::namedRange($theme),
-                (bool) ($theme['one_per_day'] ?? true),
-                ($theme['window'] ?? '') === 'weekend',
-                (bool) ($theme['cheap_line'] ?? true),
-                (bool) ($theme['ties_by_price'] ?? false),
-            ),
+            'named' => $this->pickNamed($rows, $theme),
             'total' => $total,
             'venues' => $venues,
         ];
@@ -717,7 +715,7 @@ final class BroadcastDigestComposer
         // конфиге («fre» вместо «free») тихо превращала бы рубрику про деньги
         // в подборку всего подряд, и заметить это можно было бы только в
         // канале.
-        if (! in_array($pick, ['interest', 'free', 'price_max', 'tod', 'all', 'ahead'], true)) {
+        if (! in_array($pick, ['interest', 'free', 'price_max', 'tod', 'all', 'ahead', 'words', 'views'], true)) {
             Log::warning('broadcast.digest.unknown_pick', [
                 'theme' => $theme['slug'] ?? null, 'pick' => $pick,
             ]);
@@ -780,6 +778,13 @@ final class BroadcastDigestComposer
                     "EXTRACT(HOUR FROM e.start_time AT TIME ZONE 'Europe/Moscow') >= ?",
                     [(int) ($theme['hour_from'] ?? 20)],
                 ))
+            // повод по словам в названии или в начале описания: «Кошмар на улице Кирова» называет Хэллоуин только там
+            ->when($pick === 'words', fn ($q) => $q->where(function ($w) use ($theme) {
+                foreach ((array) ($theme['words'] ?? []) as $word) {
+                    $w->orWhere('e.title', 'ilike', '%'.$word.'%')
+                        ->orWhereRaw('left(e.description, 300) ilike ?', ['%'.$word.'%']);
+                }
+            }))
             // бесплатное заранее не покупают; платное — это цена, продажа на чужом сайте или касса среди источников
             ->when($pick === 'ahead', fn ($q) => $q
                 ->whereNotIn('e.price_status', ['free', 'donation'])
@@ -813,7 +818,12 @@ final class BroadcastDigestComposer
             ->selectRaw($hiddenSql.' as channel_hidden', $hiddenBindings)
             ->get();
 
-        $rows = $this->rejectStopList($rows);
+        if ($theme['stop_list'] ?? true) {
+            $rows = $this->rejectStopList($rows);
+        }
+        if ($pick === 'views') {
+            $rows = $this->withViews($rows, $theme, $publishAt);
+        }
 
         // Жанровые отсечки — ТОЛЬКО тематическим рубрикам. Они спрашивают «не
         // чужой ли это жанр для темы», а у «Бесплатно» и «Дешевле 500» жанра
@@ -829,7 +839,8 @@ final class BroadcastDigestComposer
 
         // $keepShown — для выдачи «уже в ленте»: там нужны как раз те события,
         // которые эта отсечка и снимает. Автосборка её не отключает никогда.
-        if (! $keepShown) {
+        // «Что смотрят» называет и то, о чём канал уже писал: это выбор людей, а не новость
+        if (! $keepShown && ($theme['keep_shown'] ?? false) === false) {
             $rows = $this->rejectAlreadyShown($broadcast, $rows, $exceptItemId, $theme);
         }
 
@@ -844,8 +855,28 @@ final class BroadcastDigestComposer
         return ['rows' => $this->collapseRepeats($open->concat($hidden))->sortBy('start_time')->values()];
     }
 
+    /**
+     * Строки с числом людей, открывших карточку за `views_days` суток (свой счётчик, см. `EventViews`);
+     * у кого меньше `min_views`, тот не в счёт: два-три захода — это ещё не интерес.
+     */
+    private function withViews(\Illuminate\Support\Collection $rows, array $theme, Carbon $publishAt): \Illuminate\Support\Collection
+    {
+        $views = \App\Support\EventViews::visitors(
+            $rows->pluck('id')->map(fn ($id) => (int) $id)->all(),
+            (int) ($theme['views_days'] ?? 7),
+            $publishAt,
+        );
+        $min = (int) ($theme['min_views'] ?? 3);
+
+        return $rows->filter(fn ($row) => ($views[(int) $row->id] ?? 0) >= $min)
+            ->each(function ($row) use ($views) {
+                $row->views = $views[(int) $row->id];
+            })
+            ->values();
+    }
+
     /** Дерево интересов темы — тем же рекурсивным обходом, что и лендинг. */
-    private function interestTree(string $slug): array
+    public static function interestTree(string $slug): array
     {
         $rows = DB::select(
             'WITH RECURSIVE picked AS (
@@ -1093,19 +1124,24 @@ final class BroadcastDigestComposer
      * разными площадками, у недельных рубрик — и с разными днями. Вид, который уже назван, ждёт, пока не
      * кончатся другие; на выходных называем оба дня; бесплатное или дешёвое встаёт, если его не набралось.
      *
-     * @param  array{0:int,1:int}  $range  сколько назвать: минимум и максимум
+     * @param  array<string, mixed>  $theme  рубрика: сколько назвать, правила дня и цены, порядок
      * @return list<object>
      */
-    private function pickNamed(\Illuminate\Support\Collection $rows, array $range = [3, 3], bool $onePerDay = true, bool $bothDays = false, bool $cheapLine = true, bool $tiesByPrice = false): array
+    private function pickNamed(\Illuminate\Support\Collection $rows, array $theme): array
     {
-        [$min, $max] = $range;
+        [$min, $max] = self::namedRange($theme);
+        $onePerDay = (bool) ($theme['one_per_day'] ?? true);
+        $bothDays = ($theme['window'] ?? '') === 'weekend';
 
         // Без площадки не называем: строка «название · дата» без места говорит половину нужного,
         // а правило «одна площадка — одна строка» её не держит.
         $ranked = $this->scorer->rankRows($rows->filter(fn ($r) => $r->venue_id !== null)->values()->all());
-        if ($tiesByPrice) {
+        if (! empty($theme['ties_by_price'])) {
             usort($ranked, fn ($a, $b) => [$this->scorer->interest($b), (int) ($b->price_min ?? 0)]
                 <=> [$this->scorer->interest($a), (int) ($a->price_min ?? 0)]);
+        }
+        if (($theme['pick'] ?? '') === 'views') {
+            usort($ranked, fn ($a, $b) => (int) ($b->views ?? 0) <=> (int) ($a->views ?? 0));
         }
 
         /** @var array<int, object> $named */
@@ -1131,12 +1167,17 @@ final class BroadcastDigestComposer
             }
         }
 
-        $named = $cheapLine
+        $named = ($theme['cheap_line'] ?? true)
             ? $this->withCheapLine($named, $ranked, $min, $max, $onePerDay, $bothDays)
             : array_values($named);
 
-        // по датам: подборка отвечает на вопрос «что впереди», и читать её удобно по порядку недели
-        usort($named, fn ($a, $b) => strcmp((string) $a->start_time, (string) $b->start_time));
+        // по датам: подборка отвечает на вопрос «что впереди», и читать её удобно по порядку недели;
+        // «Что смотрят» — по числу людей, это и есть её смысл
+        if (($theme['pick'] ?? '') !== 'views') {
+            usort($named, fn ($a, $b) => strcmp((string) $a->start_time, (string) $b->start_time));
+        } else {
+            usort($named, fn ($a, $b) => (int) ($b->views ?? 0) <=> (int) ($a->views ?? 0));
+        }
 
         return $named;
     }
@@ -1313,15 +1354,17 @@ final class BroadcastDigestComposer
                 .$this->escape($this->plural($total, $forms[0] ?? 'событие', $forms[1] ?? null, $forms[2] ?? null))
                 .'.</b>');
         } else {
+            // у повода город в самом заголовке: «Хэллоуин в Воронеже: где отмечать»
+            $headline = trim((string) preg_replace('/\s+(?=[:,.]|$)/u', '', str_replace('{city}', $city !== null ? 'в '.$city : '', $headline)));
             $head = trim(($theme['emoji'] ?? '').' <b>'.$this->escape($headline).'</b>')
-                .' · '.$this->escape($range);
+                .(($theme['range_in_head'] ?? true) ? ' · '.$this->escape($range) : '');
         }
 
         // Подводку берём, только если она написана под этот состав: подпись собирают до того,
         // как из меты уберут текст под прежний состав (см. `withoutStaleDigestText`).
         $namedIds = array_map(fn ($r) => (int) $r->id, $picked['named']);
         $written = $item?->digestIntroFor($namedIds);
-        $intro = config('broadcast_digest.intro', true) ? $written : null;
+        $intro = config('broadcast_digest.intro', true) && ($theme['intro'] ?? true) ? $written : null;
 
         // Подводка — фраза своего события. Показана — событие стоит сразу под ней без строки,
         // выключена — её текст печатается фразой события на его месте.
@@ -1338,8 +1381,8 @@ final class BroadcastDigestComposer
         // Нижняя граница — $from, а не $since: у недельного окна $since пуст, и
         // склейка тянула ПРОШЕДШИЕ сеансы («сб 12 сентября и сб 3 октября»).
         $sessions = $this->sessionsFor($picked['named'], $from, $to);
-        // день недели без числа понятен только в пределах недели: «вс 18:00» через месяц читают как ближайшее
-        $shortDates = $from->diffInDays($to) <= 8 && $this->weekdaysAreDistinct($picked['named'], $sessions);
+        $shortDates = $this->withinSixDays($picked['named'], $sessions, $publishAt)
+            && $this->weekdaysAreDistinct($picked['named'], $sessions);
         // Значок у строки — только там, где строки РАЗНЫЕ по теме. В подборке
         // одной темы столбец выходит из одинаковых значков, а иногда и
         // противоречит рубрике: «🎵 Танцевальное шоу» в спектаклях.
@@ -1347,9 +1390,24 @@ final class BroadcastDigestComposer
             ? []
             : $this->emojiFor($picked['named'], $item);
 
+        $compact = ($theme['line'] ?? '') === 'compact';
+
         $lines = [];
         $rich = [];
         foreach ($named as $row) {
+            $hook = match (true) {
+                ($theme['hooks'] ?? true) === false, $leadOnTop && (int) $row->id === $leadId => '',
+                (int) $row->id !== $leadId => $this->hook($row, $item),
+                default => $this->hook($row, $item, $written),
+            };
+
+            if ($compact) {
+                $lines[] = $this->compactLine($row, $shortDates, $sessions[(int) $row->id] ?? [], $emoji[(int) $row->id] ?? '', $item);
+                $rich[] = $hook === '' ? end($lines) : end($lines).' '.$this->escape($hook);
+
+                continue;
+            }
+
             $meta = array_values(array_filter([
                 $this->whenLabel($row, $shortDates, $sessions[(int) $row->id] ?? []),
                 $this->venueLabel($row),
@@ -1364,11 +1422,6 @@ final class BroadcastDigestComposer
                 .$this->link($this->eventUrl((int) $row->id, $item?->id), (string) $row->title).'</b>');
             // Без курсива: пять наклонных строк подряд читаются как сноски.
             $facts = $this->escape(implode(' · ', $meta));
-            $hook = match (true) {
-                (int) $row->id !== $leadId => $this->hook($row, $item),
-                $leadOnTop => '',
-                default => $this->hook($row, $item, $written),
-            };
 
             // Блок заканчивается человеческой фразой, а не ценой. Тот же приём,
             // что промпт канала называет «панч отдельной строкой», но в вёрстке.
@@ -1395,12 +1448,15 @@ final class BroadcastDigestComposer
 
         // Число БЕЗ существительного: рядом стоит подпись ссылки, и «остальные
         // 23 события — вся афиша событий» повторяет слово дважды в семи словах.
-        $footer = $rest > 0
-            ? 'Остальные '.$rest.' — '.$this->link(
+        $footer = match (true) {
+            // «Что смотрят» ведёт не на страницу, а объясняет, откуда список
+            isset($theme['footer_text']) => $this->escape((string) $theme['footer_text']),
+            $rest > 0 => 'Остальные '.$rest.' — '.$this->link(
                 $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id, $theme, $feed['link'] ?? null),
                 (string) ($theme['feed_label'] ?? mb_strtolower($label)),
-            )
-            : $link;
+            ),
+            default => $link,
+        };
 
         $top = array_values(array_filter([$head, $intro !== null ? $this->escape($intro) : null]));
 
@@ -1431,6 +1487,10 @@ final class BroadcastDigestComposer
             self::HOOK_BUDGET_MIN,
             (int) floor(($soft - \App\Support\Telegram\CaptionLength::visible($bare)) / $phrases),
         );
+        // короткой строке нужна короткая фраза, даже если место есть
+        if (isset($theme['hook_max'])) {
+            $this->hookBudget = max(self::HOOK_BUDGET_MIN, min($this->hookBudget, (int) $theme['hook_max']));
+        }
 
         for ($keep = count($rich); $keep >= 0; $keep--) {
             $body = array_merge(
@@ -1445,6 +1505,54 @@ final class BroadcastDigestComposer
         }
 
         return implode("\n\n", array_merge($top, $lines, [$footer]));
+    }
+
+    /**
+     * Строка в одну фразу: «🎲 Название — сб 31 октября, 18:00 · 1500 ₽.» Площадку, которая уже
+     * есть в названии, второй раз не пишем.
+     *
+     * @param  list<Carbon>  $times
+     */
+    private function compactLine(object $row, bool $shortDates, array $times, string $mark, ?TelegramChatBroadcastItem $item): string
+    {
+        $venue = $this->venueLabel($row);
+        if ($venue !== '' && mb_stripos((string) $row->title, $venue) !== false) {
+            $venue = '';
+        }
+
+        $facts = implode(' · ', array_filter([
+            implode(', ', array_filter([$this->whenLabel($row, $shortDates, $times), $venue])),
+            $this->priceLabel($row),
+        ]));
+
+        return trim($mark.' '.$this->link($this->eventUrl((int) $row->id, $item?->id), (string) $row->title))
+            .' — '.$this->escape($facts).'.';
+    }
+
+    /**
+     * Все строки в ближайшие шесть дней после выхода: дальше «сб» без числа читают как ближайшую
+     * субботу, а событие через неделю — уже другая.
+     *
+     * @param  list<object>  $named
+     * @param  array<int, list<Carbon>>  $sessions
+     */
+    private function withinSixDays(array $named, array $sessions, Carbon $publishAt): bool
+    {
+        $start = $publishAt->copy()->setTimezone(self::TZ)->startOfDay();
+
+        foreach ($named as $row) {
+            $times = $sessions[(int) $row->id] ?? [];
+            if ($times === [] || count($times) > self::MERGE_MAX) {
+                $times = [Carbon::parse($row->start_time)->setTimezone(self::TZ)];
+            }
+            foreach ($times as $at) {
+                if ($start->diffInDays($at->copy()->startOfDay()) > 6) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -1744,6 +1852,25 @@ final class BroadcastDigestComposer
     }
 
     /**
+     * Ближайший день повода (`occasion` — «месяц-день»), окно которого ещё не кончилось.
+     *
+     * @param  array<string, mixed>  $theme
+     */
+    public static function occasionDate(array $theme, Carbon $at): Carbon
+    {
+        [$month, $day] = array_map('intval', explode('-', (string) $theme['occasion']));
+        $at = $at->copy()->setTimezone(self::TZ);
+        $date = Carbon::create($at->year, $month, $day, 0, 0, 0, self::TZ);
+
+        // в этом году повод уже прошёл вместе со своим окном — значит, следующий
+        if ($date->copy()->addDays((int) ($theme['window_after'] ?? 0))->endOfDay()->lt($at)) {
+            $date->addYear();
+        }
+
+        return $date;
+    }
+
+    /**
      * Окно рубрики — один метод на отбор и на шапку: пока их было два, шапка
      * обещала восемь дней там, где отбор смотрел пять. У «N дней вперёд» низа
      * нет (его держит [[PostTiming]]), у «выходных» он обязателен — иначе в
@@ -1760,6 +1887,15 @@ final class BroadcastDigestComposer
             // Той же формулой, что и лента: подвал такой рубрики ведёт на
             // ?when=weekend, и разойтись им нельзя. См. [[WeekendWindow]].
             return WeekendWindow::for($at);
+        }
+
+        if (isset($theme['occasion'])) {
+            $day = self::occasionDate($theme, $at);
+
+            return [
+                $day->copy()->subDays((int) ($theme['window_before'] ?? 0))->startOfDay(),
+                $day->copy()->addDays((int) ($theme['window_after'] ?? 0))->endOfDay(),
+            ];
         }
 
         $skip = (int) ($theme['window_from_days'] ?? 0);

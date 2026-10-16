@@ -659,6 +659,11 @@ class TelegramChatBroadcastService
                     $this->ensureVenueCaption($item, $now);
                 }
 
+                // «Объявили»: пересобираем с анонсом, который модель написала, пока пост ждал
+                if ($item->digestTheme() === TelegramChatBroadcastItem::THEME_ANNOUNCE) {
+                    $this->refreshAnnounceCaption($item, $broadcast, $now);
+                }
+
                 // photo_urls: null — собрать автоматически, [] — выбрано «без картинок»
                 $manualPhotos = is_array($item->photo_urls);
                 if ($manualPhotos) {
@@ -684,6 +689,13 @@ class TelegramChatBroadcastService
                     'photo_url' => $manualPhotos ? ($photoUrls[0] ?? null) : ($photoUrls[0] ?? $item->photo_url),
                     'photo_urls' => $photoUrls,
                 ];
+
+                // напоминание о празднике уходит ответом на свою подборку (`BroadcastOccasions`)
+                $replyTo = (int) (($item->digest_meta ?? [])['reply_to'] ?? 0);
+                $replyMessage = $replyTo > 0 ? TelegramChatBroadcastItem::query()->whereKey($replyTo)->value('message_id') : null;
+                if ($replyMessage) {
+                    $base['reply_to_message_id'] = (int) $replyMessage;
+                }
             } else {
                 // софт-удаление строку очереди не снимает: перевешиваем или снимаем здесь, до выдачи боту
                 $event = $item->event_id ? Event::query()->find($item->event_id) : null;
@@ -1136,6 +1148,7 @@ class TelegramChatBroadcastService
     {
         return $broadcast->ai_text
             && $item->caption_source !== TelegramChatBroadcastItem::CAPTION_MANUAL
+            && ! $item->digestWithoutText()
             // не hasDigestText: после замены события строки прежних остаются. И не фраза каждому
             // событию: гейт парсера фразу может выбросить, и текст заказывался бы по кругу
             && ! $item->digestTextCoversRoster($this->digestRosterIds($item));
@@ -1193,7 +1206,13 @@ class TelegramChatBroadcastService
             ? $this->digestComposer->compose($broadcast, $now, $item, $wanted)
             : null;
 
-        $draft ??= $this->digestComposer->compose($broadcast, $now, $item);
+        // повод и «Что смотрят» другой рубрикой не подменяем: вместо Хэллоуина вышли бы спектакли недели
+        $ownSchedule = $wanted !== null && collect((array) config('broadcast_digest.themes', []))
+            ->contains(fn ($t) => ($t['slug'] ?? null) === $wanted && ($t['auto'] ?? true) === false);
+
+        if (! $ownSchedule) {
+            $draft ??= $this->digestComposer->compose($broadcast, $now, $item);
+        }
 
         if ($draft === null) {
             // следующую бронь поставит broadcast:enqueue-digests
@@ -2171,6 +2190,32 @@ class TelegramChatBroadcastService
                 'template_code' => $broadcast->template_code,
                 'error' => $e->getMessage(),
             ]);
+        }
+    }
+
+    /** Подпись «Объявили» — сборщиком поста события, с «Объявили:» перед названием, см. `BroadcastAnnounce`. */
+    private function refreshAnnounceCaption(TelegramChatBroadcastItem $item, TelegramChatBroadcast $broadcast, mixed $now): void
+    {
+        $eventId = DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->orderBy('position')->value('event_id');
+        $event = $eventId ? Event::query()->with('venue:id,name')->find($eventId) : null;
+        if (! $event) {
+            return;
+        }
+
+        try {
+            $item->caption = BroadcastAnnounce::headed(
+                $this->captionBuilder->build(
+                    $event,
+                    $broadcast->templateCodeForDate($item->publish_at ?? $now),
+                    \Carbon\CarbonImmutable::parse($now)->setTimezone(self::SCHEDULE_TZ),
+                    (int) $item->id,
+                ),
+                (string) $event->title,
+            );
+            $item->save();
+        } catch (\Throwable $e) {
+            // уходит подпись, собранная при постановке
+            Log::warning('broadcast.announce.caption_failed', ['item_id' => $item->id, 'error' => $e->getMessage()]);
         }
     }
 
