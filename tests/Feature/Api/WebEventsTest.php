@@ -258,11 +258,11 @@ class WebEventsTest extends TestCase
         $this->getJson('/api/web/events?city=voronezh&q='.urlencode('концерт'))->assertOk()->assertJsonPath('meta.total', 0);
     }
 
-    public function test_search_shows_family_events_that_the_feed_hides(): void
+    public function test_search_shows_kids_events_that_the_feed_hides(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $event = $this->createEvent($vrn->id, $this->createCommunity($vrn->id, 'Котокафе')->id, 'Игротека', now()->addDay());
-        $this->setTaxonomy($event->id, 'family', 'entertainment');
+        $this->setTaxonomy($event->id, 'kids', 'entertainment');
 
         $this->getJson('/api/web/events?city=voronezh&q='.urlencode('игротека'))
             ->assertOk()
@@ -689,7 +689,7 @@ class WebEventsTest extends TestCase
         $response->assertStatus(422);
     }
 
-    public function test_main_feed_hides_kids_and_family_audience(): void
+    public function test_main_feed_hides_kids_but_shows_family(): void
     {
         $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
         $community = $this->createCommunity($msk->id, 'Организатор');
@@ -706,12 +706,10 @@ class WebEventsTest extends TestCase
 
         $response
             ->assertOk()
-            ->assertJsonPath('meta.total', 1)
-            ->assertJsonCount(1, 'data')
-            ->assertJsonPath('data.0.title', 'Концерт для взрослых');
-
-        $response->assertJsonMissing(['title' => 'Спектакль для детей']);
-        $response->assertJsonMissing(['title' => 'Семейный праздник']);
+            ->assertJsonPath('meta.total', 2)
+            ->assertJsonFragment(['title' => 'Семейный праздник'])
+            ->assertJsonFragment(['title' => 'Концерт для взрослых'])
+            ->assertJsonMissing(['title' => 'Спектакль для детей']);
     }
 
     public function test_main_feed_hides_official_and_other_content_kind(): void

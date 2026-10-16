@@ -207,18 +207,15 @@ class Event extends Model
     }
 
     /**
-     * Дефолтное сужение «общегородская развлекательная лента»: без
-     * kids/family-аудитории и вне-форматных content_kind. NULL-значения НЕ
-     * скрываем (legacy events / пропуски LLM — backwards-compat).
-     *
-     * Синхронно с EventRepository::applyMainFeedTaxonomyFilter (он делегирует
-     * сюда; include_all-override остаётся на стороне репозитория).
+     * Общая лента без детских событий и без событий не того вида (content_kind). Семейное видно всем.
+     * Пустую аудиторию не скрываем: её нет у старых событий и там, где модель её не поставила.
+     * Синхронно с EventRepository::applyMainFeedTaxonomyFilter (include_all разбирает он).
      */
     public function scopeWebMainFeedTaxonomy($q)
     {
         $q->where(function ($w) {
             $w->whereNull('events.audience')
-                ->orWhereNotIn('events.audience', ['kids', 'family']);
+                ->orWhere('events.audience', '<>', 'kids');
         });
 
         return $q->webFeedContentKind();

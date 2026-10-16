@@ -2616,7 +2616,7 @@ class EventRepository
         }
 
         // Выбравший «С детьми» ищет то, что лента по умолчанию прячет. Поиск словом тоже: пометку
-        // «семейное» носят и взрослые события, и по «Щелкунчику» иначе не находится ничего.
+        // «детское» носят и спектакли для всех, и по «Щелкунчику» иначе не находится ничего.
         if (! empty($filters['kids']) || SearchMatch::from($filters['q'] ?? null) !== null) {
             $q->webFeedContentKind();
 
@@ -3157,9 +3157,10 @@ class EventRepository
                 )
             ");
 
+            // то же, что Event::scopeWebMainFeedTaxonomy
             $q->where(function ($w) {
                 $w->whereNull('e.audience')
-                    ->orWhereNotIn('e.audience', ['kids', 'family']);
+                    ->orWhere('e.audience', '<>', 'kids');
             });
 
             $q->where(function ($w) {
