@@ -13,6 +13,7 @@ use App\Services\Telegram\TelegramChatBroadcastService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -405,6 +406,77 @@ class BroadcastEnqueueDueTest extends TestCase
         $this->assertSame('publish', $tasks[0]['type']);
         $this->assertSame(555222, $tasks[0]['telegram_id']);
         $this->assertSame($event->id, $tasks[0]['event_id']);
+    }
+
+    /** @return array<string, array{0: list<string>|null, 1: bool}> */
+    public static function photosOfEventWithoutImages(): array
+    {
+        return [
+            'автоподбор' => [null, true],
+            'вручную выбрано «без картинок»' => [[], false],
+        ];
+    }
+
+    #[DataProvider('photosOfEventWithoutImages')]
+    public function test_event_without_images_goes_out_with_cover(?array $chosen, bool $withCover): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Джаз-джем', now()->addDay());
+
+        $chat = $this->createChannelChat($city->id, -1017, 555223);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_APPROVED);
+        $item->photo_urls = $chosen;
+        $item->save();
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertCount(1, $tasks);
+        if ($withCover) {
+            $this->assertCount(1, $tasks[0]['photo_urls']);
+            $this->assertStringContainsString("/og/event/{$event->id}/preview.jpg?c=", $tasks[0]['photo_urls'][0]);
+            $this->assertSame($tasks[0]['photo_urls'][0], $tasks[0]['cover_url']);
+        } else {
+            $this->assertSame([], $tasks[0]['photo_urls']);
+            $this->assertNull($tasks[0]['cover_url']);
+        }
+    }
+
+    public function test_event_with_images_also_carries_spare_cover(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Джаз-джем', now()->addDay());
+
+        $chat = $this->createChannelChat($city->id, -1018, 555224);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $item = $this->makeItem($broadcast->id, $event->id, TelegramChatBroadcastItem::STATUS_APPROVED);
+        $item->photo_urls = ['https://example.com/poster.jpg'];
+        $item->save();
+
+        $tasks = $this->service()->collectDueSingleRuns(now());
+
+        $this->assertSame(['https://example.com/poster.jpg'], $tasks[0]['photo_urls']);
+        $this->assertStringContainsString("/og/event/{$event->id}/preview.jpg?c=", $tasks[0]['cover_url']);
+    }
+
+    public function test_cover_address_changes_with_event_topic(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $event = $this->createEvent($city->id, $community->id, 'Джаз-джем', now()->addDay());
+        $before = TelegramChatBroadcastService::coverUrl($event);
+
+        $jazz = (int) DB::table('interests')->insertGetId([
+            'name' => 'Джаз', 'slug' => 'jazz', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('event_interest')->insert([
+            'event_id' => $event->id, 'interest_id' => $jazz, 'rank' => 0,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->assertNotSame($before, TelegramChatBroadcastService::coverUrl($event->fresh()));
     }
 
     /**

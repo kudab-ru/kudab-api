@@ -714,6 +714,10 @@ class TelegramChatBroadcastService
                 $eventPhotos = is_array($item->photo_urls)
                     ? array_values(array_filter($item->photo_urls, 'is_string'))
                     : $this->eventPhotos((int) $item->event_id);
+                // Без картинок пост уходит с обложкой сайта; ручное «без картинок» ([]) не трогаем.
+                if ($eventPhotos === [] && ! is_array($item->photo_urls)) {
+                    $eventPhotos = [self::coverUrl($event)];
+                }
 
                 $base += [
                     'kind' => 'event',
@@ -725,6 +729,9 @@ class TelegramChatBroadcastService
                     // них бот ходил бы за событием только ради обложки.
                     'photo_url' => $eventPhotos[0] ?? null,
                     'photo_urls' => $eventPhotos,
+                    // Запасной кадр: бот шлёт его, если картинки не скачались или Телеграм их отверг.
+                    // При ручном «без картинок» запаса нет — выбор человека сильнее.
+                    'cover_url' => $item->photo_urls === [] ? null : self::coverUrl($event),
                 ];
             }
 
@@ -2018,6 +2025,33 @@ class TelegramChatBroadcastService
         }
 
         return self::pickPhotos($event->getAttribute('images'), $limit);
+    }
+
+    /** Растёт вместе с `COVER_VERSION` в `shared/cover` фронта: новый рисунок — новый адрес кадра. */
+    private const COVER_VERSION = 2;
+
+    /**
+     * Кадр с обложкой для события без картинок: его рисует фронт (`server/utils/ogImage.ts`).
+     * Метка меняется вместе с подписью и значком темы на кадре: nginx держит его месяц,
+     * и старая дата или старый значок ушли бы в канал.
+     */
+    public static function coverUrl(Event $event): string
+    {
+        $base = rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/');
+        $stamp = substr(md5(implode('|', [
+            self::COVER_VERSION,
+            (string) $event->title,
+            (string) $event->start_time,
+            (string) $event->getRawOriginal('start_date'),
+            (string) $event->venue_id,
+            (string) $event->address,
+            (string) $event->price_min,
+            (string) $event->price_status,
+            (string) $event->age_restriction,
+            $event->interests->pluck('slug')->implode(','),
+        ])), 0, 8);
+
+        return $base.'/og/event/'.$event->id.'/preview.jpg?c='.$stamp;
     }
 
     /**
