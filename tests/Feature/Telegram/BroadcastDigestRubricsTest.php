@@ -1118,6 +1118,24 @@ class BroadcastDigestRubricsTest extends TestCase
     }
 
     #[Test]
+    public function a_twin_without_time_does_not_hide_the_clock(): void
+    {
+        $this->onlyRubric('besplatno');
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $group = $this->group();
+
+        // тот же вечер из второго источника, где час не назван
+        $this->poster($this->event('Ночь кино', 1, free: true, hour: 0, description: $long, timePrecision: 'date', groupId: $group));
+        $this->poster($this->event('Ночь кино', 1, free: true, hour: 19, description: $long, groupId: $group));
+        $this->fill('Бесплатное', free: true);
+
+        $caption = $this->caption();
+
+        $this->assertStringContainsString('19:00', $caption);
+        $this->assertStringNotContainsString('00:00', $caption);
+    }
+
+    #[Test]
     public function the_tickets_rubric_takes_paid_events_two_to_six_weeks_ahead(): void
     {
         $this->onlyRubric('bilety-zaranee');
@@ -1252,6 +1270,24 @@ class BroadcastDigestRubricsTest extends TestCase
 
         $this->assertEqualsCanonicalizing([$party, $rock, $quiz, $bar, $club], $out['event_ids']);
         $this->assertStringContainsString('Хэллоуин в Воронеже: где отмечать', $out['caption']);
+    }
+
+    #[Test]
+    public function the_occasion_names_a_second_party_before_weaker_kinds(): void
+    {
+        $this->onlyRubric('povod-halloween');
+        $parties = [];
+        foreach ([18, 20, 22] as $i => $hour) {
+            $parties[] = $party = $this->event('Хэллоуин-вечеринка '.($i + 1), 46, free: false, priceMin: 1000, hour: $hour);
+            $this->retag($party, 'parties');
+        }
+        foreach (['quiz-games', 'kids', 'excursions', 'education'] as $i => $kind) {
+            $this->retag($this->event('Хэллоуин: '.$kind, 45, free: false, priceMin: 500, hour: 12 + $i), $kind);
+        }
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::parse('2026-10-24 12:00', 'Europe/Moscow'), null, 'povod-halloween');
+
+        $this->assertCount(2, array_intersect($parties, $out['event_ids']));
     }
 
     #[Test]

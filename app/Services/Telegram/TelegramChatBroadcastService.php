@@ -1407,6 +1407,13 @@ class TelegramChatBroadcastService
             } else {
                 unset($meta['window']);
             }
+
+            // короткий список: парсер пишет строки без подводки и ставит каждой свой значок
+            if (($draft['theme']['line'] ?? '') === 'compact') {
+                $meta['line'] = 'compact';
+            } else {
+                unset($meta['line']);
+            }
         }
 
         $item->caption = $draft['caption'];

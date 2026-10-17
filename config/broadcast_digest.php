@@ -204,8 +204,13 @@ return [
             'address_as_place' => true,
             'cheap_line' => false,
             'keeps_own_post' => true,
+            // гид к празднику называет лучшее, даже если у события уже был или будет свой пост
+            'keep_shown' => true,
+            // вечеринок к празднику больше всего: вид может повториться в двух строках, а не в одной
+            'kind_cap' => 2,
             'line' => 'compact',
-            'hook_max' => 70,
+            // фраза в полстроки: парсер просит у модели на 10 знаков меньше, до 50
+            'hook_max' => 60,
             'intro' => false,
             'range_in_head' => false,
             'count' => false,

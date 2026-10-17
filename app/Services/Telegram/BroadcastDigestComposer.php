@@ -846,6 +846,9 @@ final class BroadcastDigestComposer
             $rows = $this->rejectAlreadyShown($broadcast, $rows, $exceptItemId, $theme);
         }
 
+        // из повторов остаётся первый, и у двух записей одного дня это та, где есть время
+        $rows = $rows->sortBy(fn ($r) => self::dayOrder($r))->values();
+
         if (! $keepHidden) {
             return ['rows' => $this->collapseRepeats($rows)];
         }
@@ -1158,7 +1161,7 @@ final class BroadcastDigestComposer
             foreach (array_unique(array_map(fn ($r) => self::dayOf($r), $ranked)) as $day) {
                 foreach ($ranked as $row) {
                     // день важнее разнообразия вида: воскресенье без строки хуже двух спектаклей
-                    if (self::dayOf($row) === $day && $this->fitsNamed($row, $named, $min, $max, $onePerDay, false)) {
+                    if (self::dayOf($row) === $day && $this->fitsNamed($row, $named, $min, $max, $onePerDay)) {
                         $named[(int) $row->id] = $row;
                         break;
                     }
@@ -1166,9 +1169,10 @@ final class BroadcastDigestComposer
             }
         }
 
-        foreach ([true, false] as $strictKind) {
+        // сначала строк одного вида не больше `kind_cap`, потом без этого предела, если мест осталось больше
+        foreach ([max(1, (int) ($theme['kind_cap'] ?? 1)), 0] as $kindCap) {
             foreach ($ranked as $row) {
-                if ($this->fitsNamed($row, $named, $min, $max, $onePerDay, $strictKind)) {
+                if ($this->fitsNamed($row, $named, $min, $max, $onePerDay, $kindCap)) {
                     $named[(int) $row->id] = $row;
                 }
             }
@@ -1181,7 +1185,7 @@ final class BroadcastDigestComposer
         // по датам: подборка отвечает на вопрос «что впереди», и читать её удобно по порядку недели;
         // «Что смотрят» — по числу людей, это и есть её смысл
         if (($theme['pick'] ?? '') !== 'views') {
-            usort($named, fn ($a, $b) => strcmp((string) $a->start_time, (string) $b->start_time));
+            usort($named, fn ($a, $b) => self::dayOrder($a) <=> self::dayOrder($b));
         } else {
             usort($named, fn ($a, $b) => (int) ($b->views ?? 0) <=> (int) ($a->views ?? 0));
         }
@@ -1197,13 +1201,14 @@ final class BroadcastDigestComposer
      *
      * @param  array<int, object>  $named
      */
-    private function fitsNamed(object $row, array $named, int $min, int $max, bool $onePerDay, bool $strictKind): bool
+    private function fitsNamed(object $row, array $named, int $min, int $max, bool $onePerDay, int $kindCap = 0): bool
     {
         if (isset($named[(int) $row->id]) || count($named) >= $max) {
             return false;
         }
 
         $kind = $this->scorer->explain($row)['kind'];
+        $sameKind = 0;
         foreach ($named as $other) {
             if (self::samePlace($other, $row)) {
                 return false;
@@ -1212,9 +1217,13 @@ final class BroadcastDigestComposer
             if ($onePerDay && self::dayOf($other) === self::dayOf($row)) {
                 return false;
             }
-            if ($strictKind && $kind !== null && $this->scorer->explain($other)['kind'] === $kind) {
-                return false;
+            if ($kind !== null && $this->scorer->explain($other)['kind'] === $kind) {
+                $sameKind++;
             }
+        }
+        // 0 — вид не ограничен
+        if ($kindCap > 0 && $sameKind >= $kindCap) {
+            return false;
         }
 
         // сверх минимума — только с описанием на строку, иначе встанет голое «название · дата · место»
@@ -1244,7 +1253,7 @@ final class BroadcastDigestComposer
             if (! $cheap($row) || isset($named[(int) $row->id])) {
                 continue;
             }
-            if ($this->fitsNamed($row, $named, $min, $max, $onePerDay, false)) {
+            if ($this->fitsNamed($row, $named, $min, $max, $onePerDay)) {
                 $named[(int) $row->id] = $row;
                 break;
             }
@@ -1265,7 +1274,7 @@ final class BroadcastDigestComposer
 
             $without = $named;
             unset($without[(int) $weakest->id]);
-            if ($this->fitsNamed($row, $without, $min, $max, $onePerDay, false)) {
+            if ($this->fitsNamed($row, $without, $min, $max, $onePerDay)) {
                 $without[(int) $row->id] = $row;
                 $named = $without;
                 break;
@@ -1288,6 +1297,12 @@ final class BroadcastDigestComposer
     private static function dayOf(object $row): string
     {
         return Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
+    }
+
+    /** По дням; событие без времени — в конце своего дня: в start_time у него полночь, и оно встало бы перед утренними. */
+    private static function dayOrder(object $row): array
+    {
+        return [self::dayOf($row), ($row->time_precision ?? null) === 'date', (string) $row->start_time];
     }
 
     /**
@@ -1405,7 +1420,7 @@ final class BroadcastDigestComposer
         // противоречит рубрике: «🎵 Танцевальное шоу» в спектаклях.
         $emoji = ($theme['pick'] ?? 'interest') === 'interest'
             ? []
-            : $this->emojiFor($picked['named'], $item);
+            : $this->emojiFor($picked['named'], $item, (string) ($theme['emoji'] ?? ''));
 
         $compact = ($theme['line'] ?? '') === 'compact';
 
@@ -1414,12 +1429,12 @@ final class BroadcastDigestComposer
         foreach ($named as $row) {
             $hook = match (true) {
                 ($theme['hooks'] ?? true) === false, $leadOnTop && (int) $row->id === $leadId => '',
-                (int) $row->id !== $leadId => $this->hook($row, $item),
-                default => $this->hook($row, $item, $written),
+                (int) $row->id !== $leadId => $this->hook($row, $item, null, $compact),
+                default => $this->hook($row, $item, $written, $compact),
             };
 
             if ($compact) {
-                $lines[] = $this->compactLine($row, $shortDates, $sessions[(int) $row->id] ?? [], $emoji[(int) $row->id] ?? '', $item, (string) ($broadcast->chat?->city?->name ?? ''));
+                $lines[] = $this->compactLine($row, $shortDates, $sessions[(int) $row->id] ?? [], $emoji[(int) $row->id] ?? '', $item, (string) ($broadcast->chat?->city?->name ?? ''), $city);
                 $rich[] = $hook === '' ? end($lines) : end($lines).' '.$this->escape($hook);
 
                 continue;
@@ -1498,7 +1513,9 @@ final class BroadcastDigestComposer
         // при пяти всего 91, а модель пишет в среднем 101. То есть на пяти
         // строках фразы начали бы сниматься с конца просто потому, что порог
         // был один на всех.
-        $bare = implode("\n\n", array_merge($top, $lines, [$footer]));
+        // короткие строки идут сплошным списком: значок в начале и так их разделяет
+        $list = fn (array $rows) => $compact ? [implode("\n", $rows)] : $rows;
+        $bare = implode("\n\n", array_merge($top, $list($lines), [$footer]));
         $phrases = max(1, count($named) - ($leadOnTop ? 1 : 0));
         $this->hookBudget = max(
             self::HOOK_BUDGET_MIN,
@@ -1514,14 +1531,14 @@ final class BroadcastDigestComposer
                 array_slice($rich, 0, $keep),
                 array_slice($lines, $keep),
             );
-            $caption = implode("\n\n", array_merge($top, $body, [$footer]));
+            $caption = implode("\n\n", array_merge($top, $list($body), [$footer]));
 
             if ($keep === 0 || \App\Support\Telegram\CaptionLength::visible($caption) <= $soft) {
                 return $caption;
             }
         }
 
-        return implode("\n\n", array_merge($top, $lines, [$footer]));
+        return implode("\n\n", array_merge($top, $list($lines), [$footer]));
     }
 
     /**
@@ -1530,22 +1547,34 @@ final class BroadcastDigestComposer
      *
      * @param  list<Carbon>  $times
      */
-    private function compactLine(object $row, bool $shortDates, array $times, string $mark, ?TelegramChatBroadcastItem $item, string $city): string
+    private function compactLine(object $row, bool $shortDates, array $times, string $mark, ?TelegramChatBroadcastItem $item, string $city, ?string $cityIn = null): string
     {
         $venue = $this->venueLabel($row);
         if ($venue === '' && trim((string) ($row->address ?? '')) !== '') {
             $venue = EventCaptionBuilder::placeFromAddress((string) $row->address, $city);
         }
-        if ($venue !== '' && mb_stripos((string) $row->title, $venue) !== false) {
-            $venue = '';
+        // имя площадки из группы ВК «Настольные игры | ПараDice | Воронеж»: в названии события бывает вторая часть
+        $parts = array_filter(array_merge([$venue], preg_split('/\s+[|\/]\s+/u', (string) ($row->venue_name ?? '')) ?: []),
+            fn ($p) => mb_strlen(trim((string) $p)) >= 3 && mb_strtolower(trim((string) $p)) !== mb_strtolower(trim($city)));
+        foreach ($parts as $part) {
+            if (mb_stripos((string) $row->title, trim((string) $part)) !== false) {
+                $venue = '';
+                break;
+            }
         }
+        // посреди строки вид заведения со строчной: «рестобар «Литера»», «рок-бар The Last of Vavilone»
+        $venue = (string) preg_replace_callback('/^[А-ЯЁ][а-яё]+(?:-[а-яё]+)?(?=\s+(?:«|\p{Latin}))/u', fn ($m) => mb_strtolower($m[0]), $venue);
 
         $facts = implode(' · ', array_filter([
             implode(', ', array_filter([$this->whenLabel($row, $shortDates, $times), $venue])),
             $this->priceLabel($row),
         ]));
 
-        return trim($mark.' '.$this->link($this->eventUrl((int) $row->id, $item?->id), (string) $row->title))
+        // «Готический Halloween в Воронеже» под заголовком «Хэллоуин в Воронеже»: город уже назван
+        $title = $cityIn === null ? (string) $row->title
+            : (string) preg_replace('/\s+в\s+'.preg_quote($cityIn, '/').'$/u', '', (string) $row->title);
+
+        return trim($mark.' '.$this->link($this->eventUrl((int) $row->id, $item?->id), $this->typography($title)))
             .' — '.$this->escape($facts).'.';
     }
 
@@ -1584,7 +1613,7 @@ final class BroadcastDigestComposer
      *
      * @param  string|null  $written  текст модели вместо строки события из меты
      */
-    private function hook(object $row, ?TelegramChatBroadcastItem $item = null, ?string $written = null): string
+    private function hook(object $row, ?TelegramChatBroadcastItem $item = null, ?string $written = null, bool $writtenOnly = false): string
     {
         $limit = (int) config('broadcast_digest.named_line_chars', 130);
 
@@ -1594,6 +1623,10 @@ final class BroadcastDigestComposer
         $written ??= $item?->digestHook((int) $row->id);
         if ($written !== null) {
             return $this->typography($this->trimToWord((string) preg_replace('/\s+/u', ' ', $written), (int) round($limit * 1.3)));
+        }
+        // короткой строке фраза из анонса или описания велика: лучше без неё
+        if ($writtenOnly) {
+            return '';
         }
 
         // 2. Наш собственный анонс события — он уже в голосе канала. Если у
@@ -1942,12 +1975,13 @@ final class BroadcastDigestComposer
      * Значок для каждой строки. Подавление «тема названа словом» выключено:
      * в подборке значок — столбец, и дыра в нём читается как сбой вёрстки
      * (замер: с подавлением пусто у 167 событий из 465, без него у 12).
-     * Значок из digest_meta.emoji перекрывает вычисленный.
+     * Значок из digest_meta.emoji (его подбирает модель короткому списку) перекрывает вычисленный,
+     * кроме значка самой рубрики: он уже стоит в заголовке.
      *
      * @param  list<object>  $named
      * @return array<int, string>
      */
-    private function emojiFor(array $named, ?TelegramChatBroadcastItem $item): array
+    private function emojiFor(array $named, ?TelegramChatBroadcastItem $item, string $themeEmoji = ''): array
     {
         if ($named === []) {
             return [];
@@ -1971,7 +2005,7 @@ final class BroadcastDigestComposer
             $id = (int) $row->id;
             $byHand = trim((string) ($manual[(string) $id] ?? ''));
 
-            $out[$id] = $byHand !== '' ? $byHand : KindEmoji::for([
+            $out[$id] = $byHand !== '' && $byHand !== trim($themeEmoji) ? $byHand : KindEmoji::for([
                 'title' => $row->title,
                 'interest_slugs' => $slugs[$id] ?? [],
                 'content_kind' => $row->content_kind ?? null,
@@ -2016,6 +2050,8 @@ final class BroadcastDigestComposer
             ->where('status', 'active')
             ->where('start_time', '<=', $until)
             ->when($since !== null, fn ($q) => $q->where('start_time', '>=', $since))
+            // запись без времени — не сеанс: в start_time у неё полночь, и вышло бы «00:00 и 19:00»
+            ->where('time_precision', '<>', 'date')
             ->orderBy('start_time')
             ->get(['event_group_id', 'start_time']);
 
