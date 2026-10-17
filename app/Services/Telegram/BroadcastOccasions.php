@@ -62,6 +62,9 @@ final class BroadcastOccasions
     private function bookMain(TelegramChatBroadcast $broadcast, array $theme, Carbon $now, bool $dryRun): bool
     {
         $day = BroadcastDigestComposer::occasionDate($theme, $now);
+        if ($day === null) {
+            return false;
+        }
         $planned = $day->copy()->subDays((int) ($theme['lead_days'] ?? 7))->setTime((int) ($theme['hour'] ?? 12), 0);
         $msk = $now->copy()->setTimezone(self::TZ);
 
@@ -120,7 +123,7 @@ final class BroadcastOccasions
         $lead = trim((string) ($theme['reminder'] ?? ''));
         $msk = $now->copy()->setTimezone(self::TZ);
         $day = BroadcastDigestComposer::occasionDate($theme, $now);
-        if ($lead === '' || ! $msk->isSameDay($day) || $msk->hour >= self::REMIND_UNTIL_HOUR) {
+        if ($lead === '' || $day === null || ! $msk->isSameDay($day) || $msk->hour >= self::REMIND_UNTIL_HOUR) {
             return false;
         }
 

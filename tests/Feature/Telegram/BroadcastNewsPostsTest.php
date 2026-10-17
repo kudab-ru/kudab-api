@@ -72,6 +72,20 @@ class BroadcastNewsPostsTest extends TestCase
     }
 
     #[Test]
+    public function a_floating_holiday_is_booked_by_its_date_for_the_year(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2027-03-01 12:10', 'Europe/Moscow'));
+        $this->onlyRubric('povod-maslenica');
+        $this->channel();
+
+        app(BroadcastOccasions::class)->run(Carbon::now());
+
+        $booked = $this->items()->get();
+        $this->assertCount(1, $booked);
+        $this->assertSame('2027-03-07 12:00', Carbon::parse($booked[0]->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H:i'));
+    }
+
+    #[Test]
     public function a_hand_made_occasion_draft_is_scheduled_instead_of_a_second_post(): void
     {
         $draft = new TelegramChatBroadcastItem;
@@ -92,6 +106,8 @@ class BroadcastNewsPostsTest extends TestCase
     public function on_the_day_a_reminder_answers_the_posted_digest(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-10-31 10:00', 'Europe/Moscow'));
+        // другие поводы тех же дней ставят свои брони
+        $this->onlyRubric('povod-halloween');
         $early = $this->event('Вечеринка в ПараDice', Carbon::parse('2026-10-31 18:00', 'Europe/Moscow'));
         $late = $this->event('Кошмар на улице Кирова', Carbon::parse('2026-10-31 19:00', 'Europe/Moscow'));
         $eve = $this->event('Готический маркет', Carbon::parse('2026-10-30 18:00', 'Europe/Moscow'));
@@ -148,6 +164,14 @@ class BroadcastNewsPostsTest extends TestCase
     public static function notNews(): array
     {
         return ['шоу уже знали' => ['known'], 'всплеск нового источника' => ['burst']];
+    }
+
+    private function onlyRubric(string $slug): void
+    {
+        config(['broadcast_digest.themes' => array_values(array_filter(
+            (array) config('broadcast_digest.themes'),
+            fn (array $t) => ($t['slug'] ?? '') === $slug,
+        ))]);
     }
 
     private function items()

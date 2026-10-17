@@ -1315,6 +1315,39 @@ class BroadcastDigestRubricsTest extends TestCase
     }
 
     #[Test]
+    public function the_kids_new_year_rubric_takes_only_shows_for_children(): void
+    {
+        $this->onlyRubric('povod-elki');
+        // от 15 сентября: 101 день — 25 декабря
+        $this->retag($show = $this->event('Праздник у Деда Мороза', 102, free: false, priceMin: 800), 'kids');
+        $this->retag($ice = $this->event('Морозко: ледовое шоу', 103, free: false, priceMin: 1500), 'circus-show');
+        $this->retag($story = $this->event('Новогодняя история игрушек', 104, free: false, priceMin: 600), 'kids');
+        $this->retag($this->event('Ёлка', 102, free: false, priceMin: 3000, hour: 20), 'music');
+        $this->retag($this->event('Новогодний корпоратив в пабе', 101, free: false, priceMin: 4000), 'theatre');
+        $this->retag($this->event('Белка и Стрелка', 103, free: false, priceMin: 500, hour: 12), 'kids');
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::parse('2026-12-05 12:00', 'Europe/Moscow'), null, 'povod-elki');
+
+        $this->assertEqualsCanonicalizing([$show, $ice, $story], $out['event_ids']);
+    }
+
+    #[Test]
+    public function the_new_year_night_takes_the_evening_and_the_small_hours(): void
+    {
+        $this->onlyRubric('povod-novyj-god');
+        // 107 дней от 15 сентября — 31 декабря
+        $this->retag($party = $this->event('Новогодняя ночь в ресторане', 107, free: false, priceMin: 7000, hour: 22), 'parties');
+        $this->retag($disco = $this->event('Новогодняя симфодискотека', 107, free: false, priceMin: 1500, hour: 19), 'music');
+        $this->retag($late = $this->event('Новогодняя вечеринка до утра', 108, free: false, priceMin: 2000, hour: 1), 'parties');
+        $this->retag($this->event('Новогодний концерт днём', 107, free: false, priceMin: 900, hour: 14), 'music');
+        $this->retag($this->event('Новогодний спектакль', 107, free: false, priceMin: 700, hour: 19, minute: 30), 'kids');
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::parse('2026-12-23 12:00', 'Europe/Moscow'), null, 'povod-novyj-god');
+
+        $this->assertEqualsCanonicalizing([$party, $disco, $late], $out['event_ids']);
+    }
+
+    #[Test]
     #[DataProvider('removedByHand')]
     public function only_a_removed_event_post_holds_its_event_back(string $kind, int $pool): void
     {

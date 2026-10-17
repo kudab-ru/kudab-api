@@ -724,8 +724,13 @@ final class BroadcastDigestComposer
         }
 
         $ids = [];
-        if ($pick === 'interest' || $pick === 'ahead') {
-            $roots = $pick === 'interest' ? [(string) $theme['interest']] : array_map('strval', (array) ($theme['kinds'] ?? []));
+        // у повода `kinds` сужает темы: детские «Ёлки» без концерта певицы Ёлки
+        $roots = match ($pick) {
+            'interest' => [(string) $theme['interest']],
+            'ahead', 'words' => array_map('strval', (array) ($theme['kinds'] ?? [])),
+            default => [],
+        };
+        if ($roots !== [] || $pick === 'ahead') {
             $ids = array_values(array_unique(array_merge(...array_map(fn ($slug) => $this->interestTree($slug), $roots))));
             if ($ids === []) {
                 return null;
@@ -746,11 +751,12 @@ final class BroadcastDigestComposer
             ->whereNull('e.deleted_at')
             ->where('e.status', 'active')
             ->where('c.city_id', $cityId)
-            ->where('e.start_time', '<=', $until)
+            // границы окна московские, а в запрос дата уходит без пояса и читается как UTC: переводим сами
+            ->where('e.start_time', '<=', $until->copy()->utc())
             // Нижняя граница нужна только КАЛЕНДАРНОМУ окну: у «N дней вперёд»
             // низ и так момент выхода, а у «выходных» он суббота, и без этого
             // условия в подборку на выходные попадал бы вечер пятницы.
-            ->when($since !== null, fn ($q) => $q->where('e.start_time', '>=', $since))
+            ->when($since !== null, fn ($q) => $q->where('e.start_time', '>=', $since->copy()->utc()))
             // Срок — общим правилом ([[PostTiming]]), а не «начнётся позже
             // поста»: у многодневки успеть надо к ЗАКРЫТИЮ. Из-за своей копии
             // рубрика «Выставки недели» по построению не могла назвать
@@ -778,11 +784,18 @@ final class BroadcastDigestComposer
                     "EXTRACT(HOUR FROM e.start_time AT TIME ZONE 'Europe/Moscow') >= ?",
                     [(int) ($theme['hour_from'] ?? 20)],
                 ))
-            // повод по словам в названии или в начале описания: «Кошмар на улице Кирова» называет Хэллоуин только там
+            // повод по словам в названии или в начале описания: «Кошмар на улице Кирова» называет Хэллоуин только там;
+            // слово ищется с начала слова, иначе «елк» находится внутри «Щелкунчика»
             ->when($pick === 'words', fn ($q) => $q->where(function ($w) use ($theme) {
                 foreach ((array) ($theme['words'] ?? []) as $word) {
-                    $w->orWhere('e.title', 'ilike', '%'.$word.'%')
-                        ->orWhereRaw('left(e.description, 300) ilike ?', ['%'.$word.'%']);
+                    $w->orWhere('e.title', '~*', self::wordStart((string) $word))
+                        ->orWhereRaw('left(e.description, 300) ~* ?', [self::wordStart((string) $word)]);
+                }
+            }))
+            // «Новогодний корпоратив» — предложение для фирм, а не праздник для читателя
+            ->when(! empty($theme['not_words']), fn ($q) => $q->where(function ($w) use ($theme) {
+                foreach ((array) $theme['not_words'] as $word) {
+                    $w->where('e.title', '!~*', self::wordStart((string) $word));
                 }
             }))
             // бесплатное заранее не покупают; платное — это цена, продажа на чужом сайте или касса среди источников
@@ -1213,8 +1226,8 @@ final class BroadcastDigestComposer
     private function byOccasion(array $ranked, array $words): array
     {
         $score = function (object $row) use ($words): int {
-            $title = mb_strtolower((string) $row->title);
-            $named = array_filter($words, fn ($w) => $w !== '' && str_contains($title, mb_strtolower((string) $w))) !== [];
+            $named = array_filter($words, fn ($w) => $w !== ''
+                && preg_match('/(?<![\p{L}\p{N}])'.preg_quote((string) $w, '/').'/iu', (string) $row->title)) !== [];
 
             return $this->scorer->interest($row)
                 + ($named ? self::OCCASION_TITLE_BONUS : 0)
@@ -1326,6 +1339,12 @@ final class BroadcastDigestComposer
     private static function dayOf(object $row): string
     {
         return Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
+    }
+
+    /** Регулярное выражение базы: слово с начала слова. */
+    private static function wordStart(string $word): string
+    {
+        return '\m'.preg_replace('/([.^$|?*+()\[\]{}\\\\])/', '\\\\$1', $word);
     }
 
     /** По дням; событие без времени — в конце своего дня: в start_time у него полночь, и оно встало бы перед утренними. */
@@ -1941,18 +1960,32 @@ final class BroadcastDigestComposer
     }
 
     /**
-     * Ближайший день повода (`occasion` — «месяц-день»), окно которого ещё не кончилось.
+     * Ближайший день повода, окно которого ещё не кончилось. `occasion` — «месяц-день» каждый год
+     * или список дат «год-месяц-день» у праздника с плавающей датой; null — дальше дат в списке нет.
      *
      * @param  array<string, mixed>  $theme
      */
-    public static function occasionDate(array $theme, Carbon $at): Carbon
+    public static function occasionDate(array $theme, Carbon $at): ?Carbon
     {
-        [$month, $day] = array_map('intval', explode('-', (string) $theme['occasion']));
         $at = $at->copy()->setTimezone(self::TZ);
+        $over = fn (Carbon $d) => $d->copy()->addDays((int) ($theme['window_after'] ?? 0))->endOfDay()->lt($at);
+
+        if (is_array($theme['occasion'])) {
+            foreach ($theme['occasion'] as $date) {
+                $day = Carbon::parse((string) $date, self::TZ)->startOfDay();
+                if (! $over($day)) {
+                    return $day;
+                }
+            }
+
+            return null;
+        }
+
+        [$month, $day] = array_map('intval', explode('-', (string) $theme['occasion']));
         $date = Carbon::create($at->year, $month, $day, 0, 0, 0, self::TZ);
 
         // в этом году повод уже прошёл вместе со своим окном — значит, следующий
-        if ($date->copy()->addDays((int) ($theme['window_after'] ?? 0))->endOfDay()->lt($at)) {
+        if ($over($date)) {
             $date->addYear();
         }
 
@@ -1980,6 +2013,16 @@ final class BroadcastDigestComposer
 
         if (isset($theme['occasion'])) {
             $day = self::occasionDate($theme, $at);
+            // даты в списке кончились: окна нет, подборка не соберётся
+            if ($day === null) {
+                return [$at->copy(), $at->copy()];
+            }
+            // часы от начала дня повода: у «Где встретить Новый год» [18, 30] — с вечера до шести утра
+            if (isset($theme['hours'])) {
+                [$from, $to] = array_map('intval', (array) $theme['hours']);
+
+                return [$day->copy()->addHours($from), $day->copy()->addHours($to)];
+            }
 
             return [
                 $day->copy()->subDays((int) ($theme['window_before'] ?? 0))->startOfDay(),
