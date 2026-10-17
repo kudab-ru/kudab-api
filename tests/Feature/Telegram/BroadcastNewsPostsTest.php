@@ -86,6 +86,22 @@ class BroadcastNewsPostsTest extends TestCase
     }
 
     #[Test]
+    public function an_occasion_skipped_in_the_calendar_is_not_booked_until_returned(): void
+    {
+        $this->onlyRubric('povod-halloween');
+        $this->actingAsSuperadmin();
+        $url = '/api/admin/broadcast/channels/'.$this->channel()->id.'/occasions/povod-halloween/skip';
+
+        $this->postJson($url)->assertOk()->assertJsonPath('data.state', 'skipped');
+        app(BroadcastOccasions::class)->run(Carbon::now());
+        $this->assertSame(0, $this->items()->where('status', TelegramChatBroadcastItem::STATUS_PENDING)->count());
+
+        $this->deleteJson($url)->assertOk();
+        app(BroadcastOccasions::class)->run(Carbon::now());
+        $this->assertSame(1, $this->items()->where('status', TelegramChatBroadcastItem::STATUS_PENDING)->count());
+    }
+
+    #[Test]
     public function a_hand_made_occasion_draft_is_scheduled_instead_of_a_second_post(): void
     {
         $draft = new TelegramChatBroadcastItem;
@@ -164,6 +180,14 @@ class BroadcastNewsPostsTest extends TestCase
     public static function notNews(): array
     {
         return ['шоу уже знали' => ['known'], 'всплеск нового источника' => ['burst']];
+    }
+
+    private function actingAsSuperadmin(): void
+    {
+        \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
+        $user = \App\Models\User::factory()->create();
+        $user->assignRole('superadmin');
+        \Laravel\Sanctum\Sanctum::actingAs($user);
     }
 
     private function onlyRubric(string $slug): void

@@ -22,7 +22,10 @@ final class BroadcastOccasions
     private const TZ = 'Europe/Moscow';
 
     /** Бронь ставим не больше чем за неделю до выхода: иначе она неделями висела бы в ленте админки. */
-    private const BOOK_AHEAD_DAYS = 7;
+    public const BOOK_AHEAD_DAYS = 7;
+
+    /** Пометка записи, которой праздник пропущен в календаре админки: бронь на этот год не ставится. */
+    public const SKIPPED_IN_CALENDAR = 'пропущено в календаре';
 
     /** После этого часа напоминание о сегодняшнем празднике уже не нужно. */
     private const REMIND_UNTIL_HOUR = 20;
@@ -59,6 +62,12 @@ final class BroadcastOccasions
         return $summary;
     }
 
+    /** Когда выходит пост к празднику: за `lead_days` до дня в `hour`. */
+    public static function plannedAt(array $theme, Carbon $day): Carbon
+    {
+        return $day->copy()->subDays((int) ($theme['lead_days'] ?? 7))->setTime((int) ($theme['hour'] ?? 12), 0);
+    }
+
     /** Подборка к празднику: за `lead_days` в `hour`, а если опоздали — как можно скорее, но не позже чем за день. */
     private function bookMain(TelegramChatBroadcast $broadcast, array $theme, Carbon $now, bool $dryRun): bool
     {
@@ -66,7 +75,7 @@ final class BroadcastOccasions
         if ($day === null) {
             return false;
         }
-        $planned = $day->copy()->subDays((int) ($theme['lead_days'] ?? 7))->setTime((int) ($theme['hour'] ?? 12), 0);
+        $planned = self::plannedAt($theme, $day);
         $msk = $now->copy()->setTimezone(self::TZ);
 
         if ($msk->lt($planned->copy()->subDays(self::BOOK_AHEAD_DAYS)) || $msk->gte($day->copy()->subDay())) {
@@ -209,7 +218,7 @@ final class BroadcastOccasions
     }
 
     /** Подборки этого повода в канале: бронь, черновик, вышедшая и напоминание. Месяц назад — запас на черновик. */
-    private function occasionItems(TelegramChatBroadcast $broadcast, array $theme, Carbon $day): \Illuminate\Database\Eloquent\Builder
+    public function occasionItems(TelegramChatBroadcast $broadcast, array $theme, Carbon $day): \Illuminate\Database\Eloquent\Builder
     {
         $from = $day->copy()->subDays(30)->utc();
         $to = $day->copy()->addDays((int) ($theme['window_after'] ?? 0) + 1)->utc();

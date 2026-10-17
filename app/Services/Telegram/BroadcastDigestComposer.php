@@ -863,6 +863,23 @@ final class BroadcastDigestComposer
     }
 
     /**
+     * Сколько событий и площадок набирает рубрика к моменту выхода, теми же отсечками, что сборка поста.
+     *
+     * @param  array<string, mixed>  $theme
+     * @return array{events: int, venues: int}
+     */
+    public function poolSize(TelegramChatBroadcast $broadcast, array $theme, Carbon $publishAt): array
+    {
+        $cityId = $broadcast->chat?->city_id;
+        $rows = $cityId ? ($this->poolForTheme($broadcast, (int) $cityId, $theme, $publishAt)['rows'] ?? collect()) : collect();
+
+        return [
+            'events' => $rows->count(),
+            'venues' => $rows->map(fn ($r) => $r->venue_id ?: mb_strtolower((string) ($r->address ?? '')))->filter()->unique()->count(),
+        ];
+    }
+
+    /**
      * Строки с числом людей, открывших карточку за `views_days` суток (свой счётчик, см. `EventViews`);
      * у кого меньше `min_views`, тот не в счёт: два-три захода — это ещё не интерес.
      */

@@ -90,6 +90,10 @@ Route::prefix('admin')
         Route::get('/broadcast/channels/{id}/slot-candidates', [AdminBroadcastController::class, 'slotCandidates']);
         Route::get('/broadcast/channels/{id}/picker', [AdminBroadcastController::class, 'slotPicker']);
         Route::get('/broadcast/channels/{id}/digest-preview', [AdminBroadcastController::class, 'digestPreview']);
+        // календарь поводов канала: строка праздников на странице «Рассылка»
+        Route::get('/broadcast/channels/{id}/occasions', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'index']);
+        Route::post('/broadcast/channels/{id}/occasions/{slug}/skip', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'skip']);
+        Route::delete('/broadcast/channels/{id}/occasions/{slug}/skip', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'unskip']);
         Route::patch('/broadcast/channels/{id}', [AdminBroadcastController::class, 'updateChannel']);
         Route::post('/broadcast/channels/{id}/enqueue', [AdminBroadcastController::class, 'enqueue']);
         Route::post('/broadcast/channels/{id}/enqueue-venue', [AdminBroadcastController::class, 'enqueueVenue']);
