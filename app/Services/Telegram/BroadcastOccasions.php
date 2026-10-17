@@ -44,7 +44,8 @@ final class BroadcastOccasions
 
         foreach (TelegramChatBroadcast::query()->with('chat')->get() as $broadcast) {
             $chat = $broadcast->chat;
-            if (! $broadcast->enabled || $broadcast->period === 'off' || $broadcast->autofill_paused
+            // пауза автомата — про пустые слоты; праздник ставится, как подборка недели по расписанию
+            if (! $broadcast->enabled || $broadcast->period === 'off'
                 || ! $chat?->city_id || ! BroadcastSafety::postingAllowed((int) $chat->telegram_chat_id)) {
                 continue;
             }
@@ -102,10 +103,16 @@ final class BroadcastOccasions
             return true;
         }
 
-        if ($dryRun) {
-            return true;
+        if (! $dryRun) {
+            $this->book($broadcast, $theme, $at);
         }
 
+        return true;
+    }
+
+    /** Пустая бронь поста к празднику: состав и текст ей соберёт broadcast:prepare-digests или кнопка в админке. */
+    public function book(TelegramChatBroadcast $broadcast, array $theme, Carbon $at): TelegramChatBroadcastItem
+    {
         $item = new TelegramChatBroadcastItem;
         $item->broadcast_id = $broadcast->id;
         $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
@@ -121,7 +128,7 @@ final class BroadcastOccasions
             'theme' => $theme['slug'], 'publish_at' => $at->toIso8601String(),
         ]);
 
-        return true;
+        return $item;
     }
 
     /**

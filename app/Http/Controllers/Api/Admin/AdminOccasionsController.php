@@ -13,6 +13,7 @@ use App\Services\Telegram\BroadcastOccasions;
 use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\PickReason;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
+use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Support\CalmCaps;
 use App\Support\CityCase;
 use App\Support\EventStart;
@@ -40,6 +41,7 @@ final class AdminOccasionsController extends Controller
         private readonly BroadcastDigestComposer $composer,
         private readonly BroadcastOccasions $occasions,
         private readonly EventBroadcastScorer $scorer,
+        private readonly TelegramChatBroadcastService $broadcasts,
     ) {}
 
     public function index(int $broadcastId): JsonResponse
@@ -51,6 +53,46 @@ final class AdminOccasionsController extends Controller
         usort($rows, fn ($a, $b) => strcmp($a['date'] ?? '9999', $b['date'] ?? '9999'));
 
         return response()->json(['data' => $rows]);
+    }
+
+    /**
+     * Собрать пост к празднику сейчас, не дожидаясь брони за неделю: запись встаёт на время поста,
+     * состав и текст собираются сразу. Не набирается — запись не остаётся.
+     */
+    public function book(int $broadcastId, string $slug): JsonResponse
+    {
+        [$broadcast, $theme, $day] = $this->resolve($broadcastId, $slug);
+        $now = Carbon::now(self::TZ);
+        if ($now->gte($day->copy()->subDay())) {
+            return response()->json(['error' => 'До праздника меньше суток — ставить пост поздно.'], 422);
+        }
+        $existing = $this->occasions->occasionItems($broadcast, $theme, $day)->get();
+        if ($existing->isNotEmpty()) {
+            return response()->json(['error' => $existing->contains('error_message', BroadcastOccasions::SKIPPED_IN_CALENDAR)
+                ? 'Праздник пропущен в этом году — сначала верните его.'
+                : 'Пост к этому празднику уже есть.'], 409);
+        }
+
+        $at = BroadcastOccasions::plannedAt($theme, $day)->max($now->copy()->addMinutes(30));
+        DB::beginTransaction();
+        try {
+            $item = $this->occasions->book($broadcast, $theme, $at);
+            $draft = $this->composer->compose($broadcast, $at, $item, (string) $theme['slug']);
+            if ($draft === null) {
+                DB::rollBack();
+
+                return response()->json(['error' => 'Пока не набирается: к празднику нужно хотя бы '
+                    .(int) ($theme['min_events'] ?? 3).' события на '.(int) ($theme['min_venues'] ?? 2).' площадках.'], 422);
+            }
+            $this->broadcasts->applyDigestDraft($item, $draft);
+            DB::commit();
+        } catch (\Throwable $e) {
+            DB::rollBack();
+
+            throw $e;
+        }
+
+        return response()->json(['data' => $this->row($broadcast, $theme, Carbon::now(self::TZ))]);
     }
 
     /** Пропустить праздник в этом году: снять бронь или, если её ещё нет, поставить запись, которая её не пустит. */
@@ -218,6 +260,9 @@ final class AdminOccasionsController extends Controller
             default => 'booked',
         };
         $postAt = $main?->publish_at ? Carbon::parse($main->publish_at) : $planned;
+        $found = in_array($state, ['posted', 'skipped'], true)
+            ? null
+            : $this->composer->poolSize($broadcast, $theme, $planned->copy()->max($now));
 
         return $base + [
             'state' => $state,
@@ -228,6 +273,9 @@ final class AdminOccasionsController extends Controller
             'window' => ['from' => $window[0]->toDateString(), 'to' => $window[1]->toDateString()],
             'post_at' => $postAt->copy()->setTimezone(self::TZ)->toIso8601String(),
             'book_from' => $planned->copy()->subDays(BroadcastOccasions::BOOK_AHEAD_DAYS)->toIso8601String(),
+            // пустую бронь состав и текст получают за `prepare_hours` до выхода, см. PrepareDigestsCommand
+            'compose_at' => $postAt->copy()->subHours((int) config('broadcast_digest.prepare_hours', 18))
+                ->setTimezone(self::TZ)->toIso8601String(),
             'reminder_at' => trim((string) ($theme['reminder'] ?? '')) !== ''
                 ? $day->copy()->setTime((int) ($theme['reminder_hour'] ?? 12), 0)->toIso8601String()
                 : null,
@@ -242,9 +290,10 @@ final class AdminOccasionsController extends Controller
                 'id' => (int) $reminder->id,
                 'status' => (string) $reminder->status,
             ],
-            'found' => in_array($state, ['posted', 'skipped'], true)
-                ? null
-                : $this->composer->poolSize($broadcast, $theme, $planned->copy()->max($now)),
+            'found' => $found,
+            // хватает ли событий на пост; тот же порог, что у сборки
+            'gathers' => $found !== null && $found['events'] >= (int) ($theme['min_events'] ?? 3)
+                && $found['venues'] >= (int) ($theme['min_venues'] ?? 2),
             'roster' => $this->roster($main, $roster, (string) ($broadcast->chat?->city?->name ?? '')),
             'more' => $state === 'composed' ? $this->more($broadcast, $theme, $main, $roster, $postAt) : [],
         ];

@@ -72,6 +72,36 @@ class BroadcastNewsPostsTest extends TestCase
     }
 
     #[Test]
+    public function the_occasion_is_booked_while_the_automat_is_paused(): void
+    {
+        $this->onlyRubric('povod-halloween');
+        $channel = $this->channel();
+        $channel->autofill_paused = true;
+        $channel->save();
+
+        app(BroadcastOccasions::class)->run(Carbon::now());
+
+        $this->assertSame(1, $this->items()->count());
+    }
+
+    #[Test]
+    public function a_holiday_post_made_ahead_waits_for_its_own_time(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-10 12:00', 'Europe/Moscow'));
+        $this->onlyRubric('povod-halloween');
+        $this->actingAsSuperadmin();
+        foreach (['Хэллоуин в баре', 'Хэллоуин-вечеринка', 'Квиз на Хэллоуин'] as $i => $title) {
+            $this->event($title, Carbon::parse('2026-10-31 19:00', 'Europe/Moscow')->addHours($i));
+        }
+
+        $this->postJson('/api/admin/broadcast/channels/'.$this->channel()->id.'/occasions/povod-halloween/book')->assertOk();
+
+        $item = $this->items()->sole();
+        $this->assertSame('2026-10-24 12:00', Carbon::parse($item->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H:i'));
+        $this->assertSame(3, DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->count());
+    }
+
+    #[Test]
     public function a_floating_holiday_is_booked_by_its_date_for_the_year(): void
     {
         Carbon::setTestNow(Carbon::parse('2027-03-01 12:10', 'Europe/Moscow'));
