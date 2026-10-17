@@ -148,7 +148,7 @@ final class OccasionPage
             ->orderBy('events.start_time')
             ->limit(400);
 
-        if (($theme['pick'] ?? '') === 'words') {
+        if (in_array($theme['pick'] ?? '', ['words', 'all'], true)) {
             OccasionCalendar::applyWords($q, $theme, 'events');
         }
 

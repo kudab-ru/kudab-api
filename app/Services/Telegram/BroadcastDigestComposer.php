@@ -786,7 +786,8 @@ final class BroadcastDigestComposer
                     [(int) ($theme['hour_from'] ?? 20)],
                 ))
             // повод по словам в названии или в начале описания: «Кошмар на улице Кирова» называет Хэллоуин только там
-            ->when($pick === 'words', fn ($q) => OccasionCalendar::applyWords($q, $theme, 'e'))
+            // у «всего подряд» слов нет, но темы и исключения повода действуют: школьные каникулы — детское
+            ->when($pick === 'words' || $pick === 'all', fn ($q) => OccasionCalendar::applyWords($q, $theme, 'e'))
             // бесплатное заранее не покупают; платное — это цена, продажа на чужом сайте или касса среди источников
             ->when($pick === 'ahead', fn ($q) => $q
                 ->whereNotIn('e.price_status', ['free', 'donation'])
@@ -1957,36 +1958,13 @@ final class BroadcastDigestComposer
     }
 
     /**
-     * Ближайший день повода, окно которого ещё не кончилось. `occasion` — «месяц-день» каждый год
-     * или список дат «год-месяц-день» у праздника с плавающей датой; null — дальше дат в списке нет.
+     * Ближайший день повода, см. OccasionCalendar::occurrence.
      *
      * @param  array<string, mixed>  $theme
      */
     public static function occasionDate(array $theme, Carbon $at): ?Carbon
     {
-        $at = $at->copy()->setTimezone(self::TZ);
-        $over = fn (Carbon $d) => $d->copy()->addDays((int) ($theme['window_after'] ?? 0))->endOfDay()->lt($at);
-
-        if (is_array($theme['occasion'])) {
-            foreach ($theme['occasion'] as $date) {
-                $day = Carbon::parse((string) $date, self::TZ)->startOfDay();
-                if (! $over($day)) {
-                    return $day;
-                }
-            }
-
-            return null;
-        }
-
-        [$month, $day] = array_map('intval', explode('-', (string) $theme['occasion']));
-        $date = Carbon::create($at->year, $month, $day, 0, 0, 0, self::TZ);
-
-        // в этом году повод уже прошёл вместе со своим окном — значит, следующий
-        if ($over($date)) {
-            $date->addYear();
-        }
-
-        return $date;
+        return OccasionCalendar::occurrence($theme, $at)['day'] ?? null;
     }
 
     /**

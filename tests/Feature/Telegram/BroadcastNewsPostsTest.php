@@ -102,6 +102,24 @@ class BroadcastNewsPostsTest extends TestCase
     }
 
     #[Test]
+    public function a_holiday_date_entered_in_the_admin_is_booked(): void
+    {
+        $this->onlyRubric('povod-noch-muzeev');
+        $this->actingAsSuperadmin();
+        $this->channel();
+
+        app(BroadcastOccasions::class)->run(Carbon::now());
+        $this->assertSame(0, $this->items()->count(), 'без вписанной даты поста нет');
+
+        $this->postJson('/api/admin/broadcast/occasions/povod-noch-muzeev/dates', ['starts_on' => '2026-10-22'])->assertOk();
+        app(BroadcastOccasions::class)->run(Carbon::now());
+
+        $booked = $this->items()->get();
+        $this->assertCount(1, $booked);
+        $this->assertSame('2026-10-18 12:00', Carbon::parse($booked[0]->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H:i'));
+    }
+
+    #[Test]
     public function a_hand_made_occasion_draft_is_scheduled_instead_of_a_second_post(): void
     {
         $draft = new TelegramChatBroadcastItem;

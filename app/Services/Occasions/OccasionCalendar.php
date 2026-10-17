@@ -6,6 +6,8 @@ namespace App\Services\Occasions;
 
 use App\Services\Telegram\BroadcastDigestComposer;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Поводы года — рубрики config/broadcast_digest.php с ключом `occasion`. Одни и те же правила отбора
@@ -37,23 +39,78 @@ final class OccasionCalendar
     }
 
     /**
-     * Окно событий ближайшего повода в московском времени; null — дат в списке больше нет.
+     * Ближайший повод, окно которого ещё не кончилось: день и окно событий в московском времени.
+     * `occasion` — «месяц-день» каждый год, список дат «год-месяц-день» или 'floating' — даты вписывают
+     * в календаре админки (таблица occasion_dates). null — дат впереди нет.
+     *
+     * @param  array<string, mixed>  $theme
+     * @return array{day: Carbon, from: Carbon, to: Carbon}|null
+     */
+    public static function occurrence(array $theme, Carbon $at): ?array
+    {
+        $at = $at->copy()->setTimezone(self::TZ);
+        $raw = $theme['occasion'];
+        $dates = match (true) {
+            $raw === 'floating' => self::floating((string) $theme['slug']),
+            is_array($raw) => array_map(fn ($d) => [(string) $d, null], $raw),
+            default => array_map(
+                fn (int $year) => [sprintf('%d-%s', $year, $raw), null],
+                [$at->year, $at->year + 1],
+            ),
+        };
+
+        foreach ($dates as [$start, $end]) {
+            $day = Carbon::parse($start, self::TZ)->startOfDay();
+            [$from, $to] = self::span($theme, $day, $end);
+            if ($to->gte($at)) {
+                return ['day' => $day, 'from' => $from, 'to' => $to];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Окно событий ближайшего повода; null — дат впереди нет.
      *
      * @param  array<string, mixed>  $theme
      * @return array{0: Carbon, 1: Carbon}|null
      */
     public static function window(array $theme, Carbon $at): ?array
     {
-        $day = BroadcastDigestComposer::occasionDate($theme, $at);
-        if ($day === null) {
-            return null;
-        }
+        $o = self::occurrence($theme, $at);
 
+        return $o === null ? null : [$o['from'], $o['to']];
+    }
+
+    /** Даты плавающего повода: [начало, конец или null], по порядку. */
+    public static function floating(string $slug): array
+    {
+        return Cache::remember('occasion-dates:v1:'.$slug, 300, fn () => DB::table('occasion_dates')
+            ->where('slug', $slug)
+            ->orderBy('starts_on')
+            ->get(['starts_on', 'ends_on'])
+            ->map(fn ($r) => [(string) $r->starts_on, $r->ends_on !== null ? (string) $r->ends_on : null])
+            ->all());
+    }
+
+    public static function forgetFloating(string $slug): void
+    {
+        Cache::forget('occasion-dates:v1:'.$slug);
+    }
+
+    /** @return array{0: Carbon, 1: Carbon} */
+    private static function span(array $theme, Carbon $day, ?string $end): array
+    {
         // часы от начала дня повода: у «Где встретить Новый год» [18, 30] — с вечера до шести утра
         if (isset($theme['hours'])) {
             [$from, $to] = array_map('intval', (array) $theme['hours']);
 
             return [$day->copy()->addHours($from), $day->copy()->addHours($to)];
+        }
+        // у вписанной в админке даты с концом окно — сами даты: у каникул длина каждый раз своя
+        if ($end !== null) {
+            return [$day->copy(), Carbon::parse($end, self::TZ)->endOfDay()];
         }
 
         return [

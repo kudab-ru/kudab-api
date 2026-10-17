@@ -19,6 +19,7 @@ use App\Support\Telegram\KindEmoji;
 use App\Support\Telegram\VenueName;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 /** Календарь поводов канала в админке: когда пост, что в составе, что ещё нашлось и почему не взято. */
@@ -100,6 +101,65 @@ final class AdminOccasionsController extends Controller
         return response()->json(['data' => $this->row($broadcast, $theme, Carbon::now(self::TZ))]);
     }
 
+    /** Вписать дату праздника, который назначают каждый год заново; конец — у школьных каникул. */
+    public function addDate(Request $request, string $slug): JsonResponse
+    {
+        $theme = $this->floatingTheme($slug);
+        $validator = validator($request->all(), [
+            'starts_on' => ['required', 'date_format:Y-m-d', 'after_or_equal:today'],
+            'ends_on' => ['nullable', 'date_format:Y-m-d', 'after_or_equal:starts_on'],
+        ], [
+            'starts_on.required' => 'Нужна дата начала.',
+            'starts_on.after_or_equal' => 'Эта дата уже прошла.',
+            'ends_on.after_or_equal' => 'Конец раньше начала.',
+            '*.date_format' => 'Дата в виде год-месяц-день.',
+        ]);
+        if ($validator->fails()) {
+            return response()->json(['error' => $validator->errors()->first()], 422);
+        }
+        $v = $validator->validated();
+        if (! empty($v['ends_on']) && Carbon::parse($v['starts_on'])->diffInDays(Carbon::parse($v['ends_on'])) > 31) {
+            return response()->json(['error' => 'Больше месяца — это уже не праздник: проверьте даты.'], 422);
+        }
+
+        DB::table('occasion_dates')->updateOrInsert(
+            ['slug' => $theme['slug'], 'starts_on' => $v['starts_on']],
+            ['ends_on' => $v['ends_on'] ?? null, 'updated_at' => now(), 'created_at' => now()],
+        );
+        OccasionCalendar::forgetFloating((string) $theme['slug']);
+
+        return response()->json(['data' => $this->dates((string) $theme['slug'])]);
+    }
+
+    public function removeDate(string $slug, string $date): JsonResponse
+    {
+        $theme = $this->floatingTheme($slug);
+        DB::table('occasion_dates')->where('slug', $theme['slug'])->where('starts_on', $date)->delete();
+        OccasionCalendar::forgetFloating((string) $theme['slug']);
+
+        return response()->json(['data' => $this->dates((string) $theme['slug'])]);
+    }
+
+    /** @return array<string, mixed> */
+    private function floatingTheme(string $slug): array
+    {
+        $theme = collect(OccasionCalendar::themes())->firstWhere('slug', $slug);
+        abort_if($theme === null || ($theme['occasion'] ?? null) !== 'floating', 404);
+
+        return $theme;
+    }
+
+    /** @return list<array{starts_on: string, ends_on: string|null}> */
+    private function dates(string $slug): array
+    {
+        $today = Carbon::now(self::TZ)->toDateString();
+
+        return array_values(array_map(
+            fn ($d) => ['starts_on' => $d[0], 'ends_on' => $d[1]],
+            array_filter(OccasionCalendar::floating($slug), fn ($d) => ($d[1] ?? $d[0]) >= $today),
+        ));
+    }
+
     /** @return array{0: TelegramChatBroadcast, 1: array<string, mixed>, 2: Carbon} */
     private function resolve(int $broadcastId, string $slug): array
     {
@@ -130,6 +190,8 @@ final class AdminOccasionsController extends Controller
             'page_url' => isset($theme['page']) && $citySlug
                 ? rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/').'/afisha/'.$citySlug.'/'.$theme['page']
                 : null,
+            'floating' => ($theme['occasion'] ?? null) === 'floating',
+            'dates' => ($theme['occasion'] ?? null) === 'floating' ? $this->dates((string) $theme['slug']) : [],
         ];
 
         $day = BroadcastDigestComposer::occasionDate($theme, $now);

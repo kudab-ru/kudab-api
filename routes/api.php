@@ -94,6 +94,9 @@ Route::prefix('admin')
         Route::get('/broadcast/channels/{id}/occasions', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'index']);
         Route::post('/broadcast/channels/{id}/occasions/{slug}/skip', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'skip']);
         Route::delete('/broadcast/channels/{id}/occasions/{slug}/skip', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'unskip']);
+        // даты праздников, которые назначают каждый год заново: общие для всех каналов
+        Route::post('/broadcast/occasions/{slug}/dates', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'addDate']);
+        Route::delete('/broadcast/occasions/{slug}/dates/{date}', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'removeDate'])->where('date', '\d{4}-\d{2}-\d{2}');
         Route::patch('/broadcast/channels/{id}', [AdminBroadcastController::class, 'updateChannel']);
         Route::post('/broadcast/channels/{id}/enqueue', [AdminBroadcastController::class, 'enqueue']);
         Route::post('/broadcast/channels/{id}/enqueue-venue', [AdminBroadcastController::class, 'enqueueVenue']);
