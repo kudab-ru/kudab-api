@@ -7,6 +7,7 @@ namespace App\Services\Telegram;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Support\BroadcastSafety;
+use App\Support\CalmCaps;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -199,7 +200,7 @@ final class BroadcastOccasions
         foreach ($events as $e) {
             $parts[] = 'в '.Carbon::parse($e->start_time)->setTimezone(self::TZ)->format('H:i').' — '
                 .'<a href="'.htmlspecialchars(PostLink::utm($base.'/events/'.$e->id, PostLink::MEDIUM_DIGEST, $itemId), ENT_QUOTES).'">'
-                .htmlspecialchars((string) $e->title, ENT_NOQUOTES).'</a>';
+                .htmlspecialchars(CalmCaps::title((string) $e->title), ENT_NOQUOTES).'</a>';
         }
 
         $list = implode(', ', $parts);

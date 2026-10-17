@@ -7,6 +7,8 @@ namespace App\Services\Telegram;
 use App\Models\Event;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
+use App\Services\Occasions\OccasionCalendar;
+use App\Support\CalmCaps;
 use App\Support\CityCase;
 use App\Support\Telegram\KindEmoji;
 use App\Support\Telegram\VenueName;
@@ -724,13 +726,12 @@ final class BroadcastDigestComposer
         }
 
         $ids = [];
-        // у повода `kinds` сужает темы: детские «Ёлки» без концерта певицы Ёлки
         $roots = match ($pick) {
             'interest' => [(string) $theme['interest']],
-            'ahead', 'words' => array_map('strval', (array) ($theme['kinds'] ?? [])),
+            'ahead' => array_map('strval', (array) ($theme['kinds'] ?? [])),
             default => [],
         };
-        if ($roots !== [] || $pick === 'ahead') {
+        if ($roots !== []) {
             $ids = array_values(array_unique(array_merge(...array_map(fn ($slug) => $this->interestTree($slug), $roots))));
             if ($ids === []) {
                 return null;
@@ -784,20 +785,8 @@ final class BroadcastDigestComposer
                     "EXTRACT(HOUR FROM e.start_time AT TIME ZONE 'Europe/Moscow') >= ?",
                     [(int) ($theme['hour_from'] ?? 20)],
                 ))
-            // повод по словам в названии или в начале описания: «Кошмар на улице Кирова» называет Хэллоуин только там;
-            // слово ищется с начала слова, иначе «елк» находится внутри «Щелкунчика»
-            ->when($pick === 'words', fn ($q) => $q->where(function ($w) use ($theme) {
-                foreach ((array) ($theme['words'] ?? []) as $word) {
-                    $w->orWhere('e.title', '~*', self::wordStart((string) $word))
-                        ->orWhereRaw('left(e.description, 300) ~* ?', [self::wordStart((string) $word)]);
-                }
-            }))
-            // «Новогодний корпоратив» — предложение для фирм, а не праздник для читателя
-            ->when(! empty($theme['not_words']), fn ($q) => $q->where(function ($w) use ($theme) {
-                foreach ((array) $theme['not_words'] as $word) {
-                    $w->where('e.title', '!~*', self::wordStart((string) $word));
-                }
-            }))
+            // повод по словам в названии или в начале описания: «Кошмар на улице Кирова» называет Хэллоуин только там
+            ->when($pick === 'words', fn ($q) => OccasionCalendar::applyWords($q, $theme, 'e'))
             // бесплатное заранее не покупают; платное — это цена, продажа на чужом сайте или касса среди источников
             ->when($pick === 'ahead', fn ($q) => $q
                 ->whereNotIn('e.price_status', ['free', 'donation'])
@@ -1226,11 +1215,8 @@ final class BroadcastDigestComposer
     private function byOccasion(array $ranked, array $words): array
     {
         $score = function (object $row) use ($words): int {
-            $named = array_filter($words, fn ($w) => $w !== ''
-                && preg_match('/(?<![\p{L}\p{N}])'.preg_quote((string) $w, '/').'/iu', (string) $row->title)) !== [];
-
             return $this->scorer->interest($row)
-                + ($named ? self::OCCASION_TITLE_BONUS : 0)
+                + (OccasionCalendar::titleNames((string) $row->title, $words) ? self::OCCASION_TITLE_BONUS : 0)
                 - (($row->time_precision ?? null) === 'date' ? Scoring\EventBroadcastScorer::W_NO_TIME : 0);
         };
         usort($ranked, fn ($a, $b) => $score($b) <=> $score($a));
@@ -1339,12 +1325,6 @@ final class BroadcastDigestComposer
     private static function dayOf(object $row): string
     {
         return Carbon::parse($row->start_time)->setTimezone(self::TZ)->toDateString();
-    }
-
-    /** Регулярное выражение базы: слово с начала слова. */
-    private static function wordStart(string $word): string
-    {
-        return '\m'.preg_replace('/([.^$|?*+()\[\]{}\\\\])/', '\\\\$1', $word);
     }
 
     /** По дням; событие без времени — в конце своего дня: в start_time у него полночь, и оно встало бы перед утренними. */
@@ -1622,7 +1602,7 @@ final class BroadcastDigestComposer
         $title = $cityIn === null ? (string) $row->title
             : (string) preg_replace('/\s+в\s+'.preg_quote($cityIn, '/').'$/u', '', (string) $row->title);
 
-        return trim($mark.' '.$this->link($this->eventUrl((int) $row->id, $item?->id), $this->typography($title)))
+        return trim($mark.' '.$this->link($this->eventUrl((int) $row->id, $item?->id), $this->typography(CalmCaps::title($title))))
             .' — '.$this->escape($facts).'.';
     }
 
@@ -2012,22 +1992,8 @@ final class BroadcastDigestComposer
         }
 
         if (isset($theme['occasion'])) {
-            $day = self::occasionDate($theme, $at);
             // даты в списке кончились: окна нет, подборка не соберётся
-            if ($day === null) {
-                return [$at->copy(), $at->copy()];
-            }
-            // часы от начала дня повода: у «Где встретить Новый год» [18, 30] — с вечера до шести утра
-            if (isset($theme['hours'])) {
-                [$from, $to] = array_map('intval', (array) $theme['hours']);
-
-                return [$day->copy()->addHours($from), $day->copy()->addHours($to)];
-            }
-
-            return [
-                $day->copy()->subDays((int) ($theme['window_before'] ?? 0))->startOfDay(),
-                $day->copy()->addDays((int) ($theme['window_after'] ?? 0))->endOfDay(),
-            ];
+            return OccasionCalendar::window($theme, $at) ?? [$at->copy(), $at->copy()];
         }
 
         $skip = (int) ($theme['window_from_days'] ?? 0);
@@ -2414,6 +2380,8 @@ final class BroadcastDigestComposer
             : '';
 
         $url = match (true) {
+            // у праздника своя страница: программа по дням вместо ленты поиска
+            isset($theme['page']) && $citySlug !== '' => $base.'/afisha/'.$citySlug.'/'.$theme['page'],
             $query !== '' => $base.'/events?'.$query,
             $citySlug !== '' => $base.'/afisha/'.$citySlug.'/'.$slug,
             default => $base.'/events',
