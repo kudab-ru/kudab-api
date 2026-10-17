@@ -15,6 +15,7 @@ use App\Services\Telegram\PickReason;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Support\CalmCaps;
 use App\Support\CityCase;
+use App\Support\EventStart;
 use App\Support\Telegram\KindEmoji;
 use App\Support\Telegram\VenueName;
 use Carbon\Carbon;
@@ -264,7 +265,8 @@ final class AdminOccasionsController extends Controller
             ->whereIn('ei.event_id', $ids)->orderBy('ei.rank')->get(['ei.event_id', 'i.slug'])
             ->groupBy('event_id')->map(fn ($g) => $g->pluck('slug')->all());
         $events = DB::table('events as e')->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
-            ->whereIn('e.id', $ids)->get(['e.id', 'e.title', 'e.start_time', 'e.time_precision', 'e.content_kind', 'e.address', 'v.name as venue'])
+            ->whereIn('e.id', $ids)->selectRaw(EventStart::sql('e').' as start_time')
+            ->addSelect(['e.id', 'e.title', 'e.time_precision', 'e.content_kind', 'e.address', 'v.name as venue'])->get()
             ->keyBy('id');
 
         $out = [];
@@ -303,11 +305,12 @@ final class AdminOccasionsController extends Controller
         $kindOf = fn (int $id) => $this->scorer->explain((object) ['id' => $id])['kind'];
         $rosterVenues = array_filter(array_map(fn ($id) => $facts->get($id)?->venue_id, $roster));
         $rosterKinds = array_count_values(array_filter(array_map($kindOf, $roster)));
-        $cap = max(1, (int) ($theme['kind_cap'] ?? 1));
+        $caps = (array) ($theme['kind_caps'] ?? []);
 
-        return array_map(function (array $c) use ($facts, $kindOf, $rosterVenues, $rosterKinds, $cap) {
+        return array_map(function (array $c) use ($facts, $kindOf, $rosterVenues, $rosterKinds, $theme, $caps) {
             $id = (int) $c['id'];
             $kind = $kindOf($id);
+            $cap = (int) ($caps[$kind] ?? max(1, (int) ($theme['kind_cap'] ?? 1)));
             $why = match (true) {
                 in_array($facts->get($id)?->venue_id, $rosterVenues, true) => 'та же площадка',
                 $kind !== null && ($rosterKinds[$kind] ?? 0) >= $cap => $cap === 1 ? 'такой вид уже есть' : 'уже две строки этого вида',
@@ -318,7 +321,7 @@ final class AdminOccasionsController extends Controller
             return [
                 'id' => $id,
                 'title' => $this->title((string) $c['title']),
-                'when' => $this->when($c['start_time'], 'datetime'),
+                'when' => $this->when($c['start_time'], $c['has_time'] ? 'datetime' : 'date'),
                 'venue' => VenueName::label($c['venue'] ?? null),
                 'note' => $why,
             ];
@@ -329,6 +332,7 @@ final class AdminOccasionsController extends Controller
     private function rule(array $theme): string
     {
         $words = array_map(fn ($w) => '«'.$w.'»', array_slice((array) ($theme['words'] ?? []), 0, 4));
+        $single = array_intersect_key(['quiz-games' => 'квиз', 'kids' => 'детское'], array_filter((array) ($theme['kind_caps'] ?? []), fn ($n) => (int) $n === 1));
 
         return implode(' · ', array_filter([
             ($theme['pick'] ?? '') === 'all' ? 'лучшее из всей афиши этих дней' : ($words !== [] ? 'ищет '.implode(', ', $words).' в названии и начале описания' : null),
@@ -336,6 +340,7 @@ final class AdminOccasionsController extends Controller
             isset($theme['hours']) ? 'с '.((array) $theme['hours'])[0].':00 до утра' : null,
             ($theme['pick'] ?? '') === 'words' ? 'праздник в названии выше' : null,
             (int) ($theme['kind_cap'] ?? 1) === 2 ? 'не больше двух строк одного вида' : 'по строке каждого вида',
+            $single !== [] ? implode(' и ', $single).' — не больше строки' : null,
         ]));
     }
 

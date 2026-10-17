@@ -500,19 +500,12 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertStringContainsString('свободный взнос', $this->caption());
     }
 
-    /**
-     * У события без времени часов в строке нет.
-     *
-     * В start_time у таких стоит полночь, и «сб 00:00» — это не факт, а
-     * артефакт: источник назвал только день.
-     */
     #[Test]
     public function an_event_without_a_time_is_printed_without_a_clock(): void
     {
         $this->onlyRubric('besplatno');
         $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
-        $fair = $this->event('Ярмарка весь день', 1, free: true, hour: 0, description: $long,
-            timePrecision: 'date');
+        $fair = $this->event('Ярмарка весь день', 1, free: true, description: $long, timePrecision: 'date');
         $this->poster($fair);
         $this->fill('Бесплатное', free: true);
 
@@ -1125,7 +1118,7 @@ class BroadcastDigestRubricsTest extends TestCase
         $group = $this->group();
 
         // тот же вечер из второго источника, где час не назван
-        $this->poster($this->event('Ночь кино', 1, free: true, hour: 0, description: $long, timePrecision: 'date', groupId: $group));
+        $this->poster($this->event('Ночь кино', 1, free: true, description: $long, timePrecision: 'date', groupId: $group));
         $this->poster($this->event('Ночь кино', 1, free: true, hour: 19, description: $long, groupId: $group));
         $this->fill('Бесплатное', free: true);
 
@@ -1295,7 +1288,7 @@ class BroadcastDigestRubricsTest extends TestCase
     {
         $this->onlyRubric('povod-halloween');
         // маркет без часа и с темой «Городские акции»: по общей оценке он вровень с квизами
-        $market = $this->event('Готический Хэллоуин', 45, free: false, priceMin: 300, hour: 0, timePrecision: 'date');
+        $market = $this->event('Готический Хэллоуин', 45, free: false, priceMin: 300, timePrecision: 'date');
         $this->retag($market, 'city');
         foreach ([18, 20] as $i => $hour) {
             $this->retag($this->event('Хэллоуин-вечеринка '.($i + 1), 46, free: false, priceMin: 1000, hour: $hour), 'parties');
@@ -1312,6 +1305,22 @@ class BroadcastDigestRubricsTest extends TestCase
         $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::parse('2026-10-24 12:00', 'Europe/Moscow'), null, 'povod-halloween');
 
         $this->assertContains($market, $out['event_ids']);
+    }
+
+    #[Test]
+    public function the_occasion_post_names_one_quiz_even_with_room_for_more(): void
+    {
+        $this->onlyRubric('povod-halloween');
+        $quizzes = [];
+        foreach ([1, 2, 3] as $i) {
+            $this->retag($quizzes[] = $this->event('Квиз на Хэллоуин '.$i, 45, free: false, priceMin: 500, hour: 15 + $i), 'quiz-games');
+        }
+        $this->retag($this->event('Хэллоуин-вечеринка', 46, free: false, priceMin: 1000, hour: 21), 'parties');
+        $this->retag($this->event('Хэллоуин в рок-баре', 46, free: false, priceMin: 600, hour: 22), 'music');
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::parse('2026-10-24 12:00', 'Europe/Moscow'), null, 'povod-halloween');
+
+        $this->assertCount(1, array_intersect($out['event_ids'], $quizzes));
     }
 
     #[Test]
@@ -1762,10 +1771,12 @@ class BroadcastDigestRubricsTest extends TestCase
         // ложилось в базу как 21:00 UTC, то есть полночь по Москве, и рубрика
         // «Вечером» не набиралась вовсе.
         $at = Carbon::now('Europe/Moscow')->addDays($dayOffset)->setTime($hour, $minute)->utc();
+        // у события без часа парсер оставляет start_time пустым
+        $dateOnly = $timePrecision === 'date';
 
-        $event->start_time = $at;
-        $event->start_date = $at->toDateString();
-        $event->end_time = $at->copy()->addHours(2);
+        $event->start_time = $dateOnly ? null : $at;
+        $event->start_date = $at->copy()->setTimezone('Europe/Moscow')->toDateString();
+        $event->end_time = $dateOnly ? null : $at->copy()->addHours(2);
         $event->description = $description ?? str_repeat('описание события достаточной длины. ', 5);
         $event->price_status = $donation
             ? 'donation'

@@ -9,6 +9,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Repositories\EventRepository;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
+use App\Support\EventStart;
 use App\Support\Telegram\VenueName;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
@@ -136,7 +137,7 @@ final class BroadcastEventPicker
         $search = self::isSearch($query);
         $q = $this->cityEvents($cityId);
         if ($search) {
-            $this->applySearch($q, (string) $query);
+            $this->applySearch($q, (string) $query, wholeDay: true);
         } else {
             $q->whereIn('events.id', array_values(array_diff($pool, $roster)))
                 ->orderBy('events.start_time')
@@ -154,8 +155,10 @@ final class BroadcastEventPicker
         foreach ($events as $e) {
             $verdict = $this->digestVerdict($e, $publishAt, in_array((int) $e->id, $roster, true), $taken[$e->id] ?? null, $replacing === null);
             if ($verdict['action'] !== null) {
-                $start = $e->start_time;
-                $outside = $start === null || $start->gt($until) || (PostTiming::deadline($e) ?? $start)->lt($since ?? $publishAt);
+                $start = EventStart::of($e);
+                // у события без часа срок — конец его дня
+                $last = PostTiming::deadline($e) ?? $start?->copy()->setTimezone(self::TZ)->endOfDay();
+                $outside = $start === null || $start->gt($until) || $last->lt($since ?? $publishAt);
                 $more = array_filter([
                     match (true) {
                         $outside => 'не в днях подборки',
@@ -187,8 +190,12 @@ final class BroadcastEventPicker
             ->with('venue:id,name');
     }
 
-    /** Ссылка с сайта находит своё событие, остальное ищется тем же правилом, что поиск на сайте. */
-    private function applySearch(Builder $q, string $query): void
+    /**
+     * Ссылка с сайта находит своё событие, остальное ищется тем же правилом, что поиск на сайте.
+     *
+     * @param  bool  $wholeDay  находить и события без часа, см. PostTiming::applyFits
+     */
+    private function applySearch(Builder $q, string $query, bool $wholeDay = false): void
     {
         if (preg_match('~/events/(\d+)~', $query, $m)) {
             $q->whereKey((int) $m[1]);
@@ -198,7 +205,7 @@ final class BroadcastEventPicker
 
         $match = $this->events->applyTextSearch($q, $query);
         // о прошедшем пост уже не расскажет
-        PostTiming::applyFits($q, Carbon::now()->utc(), 0, strictRuns: true);
+        PostTiming::applyFits($q, Carbon::now()->utc(), 0, strictRuns: true, wholeDay: $wholeDay);
         if ($match !== null) {
             $q->orderByRaw($match[0], $match[1]);
         }
@@ -225,7 +232,7 @@ final class BroadcastEventPicker
         $facts = $this->scorer->explain($e);
         $kind = $facts['kind'];
         $repeats = $facts['repeats'];
-        $start = $e->start_time?->copy()->setTimezone(self::TZ);
+        $start = EventStart::of($e)?->setTimezone(self::TZ);
         $runsUntil = PostTiming::runningUntil($e, $at)?->setTimezone(self::TZ);
         $images = $e->getAttribute('images');
 

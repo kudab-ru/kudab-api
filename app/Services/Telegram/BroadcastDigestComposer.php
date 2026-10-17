@@ -10,6 +10,7 @@ use App\Models\TelegramChatBroadcastItem;
 use App\Services\Occasions\OccasionCalendar;
 use App\Support\CalmCaps;
 use App\Support\CityCase;
+use App\Support\EventStart;
 use App\Support\Telegram\KindEmoji;
 use App\Support\Telegram\VenueName;
 use App\Support\WeekendWindow;
@@ -341,9 +342,10 @@ final class BroadcastDigestComposer
             ->whereNull('e.deleted_at')
             ->where('e.status', 'active')
             // Тем же правилом срока, что и пул: многодневка годится, пока идёт.
-            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, 0, 'e'))
-            ->get([
-                'e.id', 'e.title', 'e.start_time', 'e.event_group_id', 'e.venue_id',
+            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, 0, 'e', wholeDay: true))
+            ->selectRaw(EventStart::sql('e').' as start_time')
+            ->addSelect([
+                'e.id', 'e.title', 'e.event_group_id', 'e.venue_id',
                 'e.description', 'e.tg_description', 'e.price_min', 'e.price_max', 'e.price_status',
                 // price_text — ради «по регистрации»: отдельного поля под это нет,
                 // слово живёт только в тексте цены. time_precision — ради событий
@@ -351,6 +353,7 @@ final class BroadcastDigestComposer
                 'e.price_text', 'e.time_precision', 'e.content_kind', 'e.address',
                 'v.name as venue_name',
             ])
+            ->get()
             ->keyBy(fn ($r) => (int) $r->id);
 
         // ПОРЯДОК СВЯЗЕЙ — ЭТО РЕШЕНИЕ ЧЕЛОВЕКА, и пересортировка по дате его
@@ -569,7 +572,8 @@ final class BroadcastDigestComposer
         $out = [];
         foreach (DB::table('events as e')
             ->whereIn('e.id', $eventIds)
-            ->select(['e.id', 'e.title', 'e.start_time', 'e.venue_id', 'e.description', 'e.tg_description', 'e.content_kind'])
+            ->select(['e.id', 'e.title', 'e.venue_id', 'e.description', 'e.tg_description', 'e.content_kind'])
+            ->selectRaw(EventStart::sql('e').' as start_time')
             ->selectRaw('null as venue_name')
             ->selectRaw($hiddenSql.' as channel_hidden', $hiddenBindings)
             ->get() as $row) {
@@ -680,6 +684,7 @@ final class BroadcastDigestComposer
             'id' => (int) $row->id,
             'title' => (string) $row->title,
             'start_time' => $row->start_time ? Carbon::parse($row->start_time)->toIso8601String() : null,
+            'has_time' => ($row->time_precision ?? 'datetime') !== 'date',
             'venue' => $row->venue_name,
             'venue_id' => $venue,
             'description_length' => $length,
@@ -752,18 +757,19 @@ final class BroadcastDigestComposer
             ->whereNull('e.deleted_at')
             ->where('e.status', 'active')
             ->where('c.city_id', $cityId)
-            // границы окна московские, а в запрос дата уходит без пояса и читается как UTC: переводим сами
-            ->where('e.start_time', '<=', $until->copy()->utc())
+            ->where(fn ($q) => EventStart::notAfter($q, $until, 'e'))
             // Нижняя граница нужна только КАЛЕНДАРНОМУ окну: у «N дней вперёд»
             // низ и так момент выхода, а у «выходных» он суббота, и без этого
             // условия в подборку на выходные попадал бы вечер пятницы.
-            ->when($since !== null, fn ($q) => $q->where('e.start_time', '>=', $since->copy()->utc()))
+            ->when($since !== null, fn ($q) => EventStart::notBefore($q, $since, 'e'))
+            // часам повода (`hours`) событие без часа не годится: неизвестно, ночью ли оно
+            ->when(isset($theme['hours']), fn ($q) => $q->where('e.time_precision', '<>', 'date'))
             // Срок — общим правилом ([[PostTiming]]), а не «начнётся позже
             // поста»: у многодневки успеть надо к ЗАКРЫТИЮ. Из-за своей копии
             // рубрика «Выставки недели» по построению не могла назвать
             // выставку, открывшуюся на прошлой неделе и висящую месяц, — то
             // есть ровно ту, ради которой тема и заведена.
-            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, PostTiming::MIN_LEAD_HOURS, 'e'))
+            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, PostTiming::MIN_LEAD_HOURS, 'e', wholeDay: true))
             ->when($byInterest, fn ($q) => $q
                 // ПЕРВИЧНЫЙ интерес внутри дерева темы. Без rank = 0 в спектакли
                 // попадает концерт, которому театр проставлен вторым тегом.
@@ -801,14 +807,14 @@ final class BroadcastDigestComposer
             // закрылась, — выставке так и надо. А «Вечером» с таким правилом
             // называет спектакль, начавшийся 8 июля, и строка выходит
             // «ср 8 июля, 20:00»: дата в прошлом под заголовком про эту неделю.
-            ->when($pick !== 'interest', fn ($q) => $q->where('e.start_time', '>=', $publishAt))
+            ->when($pick !== 'interest', fn ($q) => EventStart::notBefore($q, $publishAt, 'e'))
             ->where(function ($q) {
                 $q->whereNull('e.tickets_status')->orWhere('e.tickets_status', '<>', 'sold_out');
             })
             ->when(! $keepHidden, fn ($q) => $q->whereRaw('not '.$hiddenSql, $hiddenBindings))
-            ->orderBy('e.start_time')
+            ->orderByRaw(EventStart::sql('e'))
             ->select([
-                'e.id', 'e.title', 'e.start_time', 'e.event_group_id', 'e.venue_id',
+                'e.id', 'e.title', 'e.event_group_id', 'e.venue_id',
                 'e.description', 'e.tg_description', 'e.price_min', 'e.price_max', 'e.price_status',
                 // price_text — ради «по регистрации»: отдельного поля под это нет,
                 // слово живёт только в тексте цены. time_precision — ради событий
@@ -820,6 +826,7 @@ final class BroadcastDigestComposer
                 'e.address',
                 'v.name as venue_name',
             ])
+            ->selectRaw(EventStart::sql('e').' as start_time')
             ->selectRaw($hiddenSql.' as channel_hidden', $hiddenBindings)
             ->get();
 
@@ -1192,6 +1199,7 @@ final class BroadcastDigestComposer
             }
         }
 
+        $this->kindCaps = array_map('intval', (array) ($theme['kind_caps'] ?? []));
         // сначала строк одного вида не больше `kind_cap`, потом без этого предела, если мест осталось больше
         foreach ([max(1, (int) ($theme['kind_cap'] ?? 1)), 0] as $kindCap) {
             foreach ($ranked as $row) {
@@ -1218,6 +1226,9 @@ final class BroadcastDigestComposer
 
     /** Цена, до которой событие в подборке считается дешёвым. */
     private const CHEAP_MAX = 500;
+
+    /** @var array<string, int> пределы видов текущей рубрики, см. pickNamed */
+    private array $kindCaps = [];
 
     /** Прибавка к оценке события, у которого праздник прямо в названии, см. byOccasion. */
     private const OCCASION_TITLE_BONUS = 20;
@@ -1269,6 +1280,10 @@ final class BroadcastDigestComposer
         }
         // 0 — вид не ограничен
         if ($kindCap > 0 && $sameKind >= $kindCap) {
+            return false;
+        }
+        // свой предел вида (`kind_caps`) не снимает и добор: второй квиз хуже строкой меньше
+        if ($kind !== null && isset($this->kindCaps[$kind]) && $sameKind >= $this->kindCaps[$kind]) {
             return false;
         }
 

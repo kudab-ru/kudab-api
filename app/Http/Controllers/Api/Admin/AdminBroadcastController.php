@@ -1606,7 +1606,7 @@ class AdminBroadcastController extends Controller
         $fresh = Event::query()
             ->whereKey((int) $data['in'])
             ->active()
-            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, 0))
+            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, 0, wholeDay: true))
             ->exists();
 
         if (! $fresh) {
@@ -2070,7 +2070,7 @@ class AdminBroadcastController extends Controller
         $fresh = Event::query()
             ->whereKey($inEventId)
             ->active()
-            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, 0))
+            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, 0, wholeDay: true))
             ->exists();
 
         if (! $fresh) {

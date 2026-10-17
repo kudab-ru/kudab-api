@@ -13,6 +13,7 @@ use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Support\CalmCaps;
 use App\Support\CityCase;
+use App\Support\EventStart;
 use App\Support\Telegram\KindEmoji;
 use App\Support\Telegram\VenueName;
 use Carbon\Carbon;
@@ -142,17 +143,21 @@ final class OccasionPage
             ->whereNull('events.deleted_at')
             ->webNotBlacklisted()
             ->webFeedContentKind()
-            // границы московские, в запрос — в UTC, см. BroadcastDigestComposer::poolForTheme
-            ->where('events.start_time', '>=', $window[0]->copy()->utc())
-            ->where('events.start_time', '<=', $window[1]->copy()->utc())
-            ->orderBy('events.start_time')
+            ->where(fn ($q) => EventStart::notBefore($q, $window[0], 'events'))
+            ->where(fn ($q) => EventStart::notAfter($q, $window[1], 'events'))
+            // часам повода событие без часа не годится, см. BroadcastDigestComposer::poolForTheme
+            ->when(isset($theme['hours']), fn ($q) => $q->where('events.time_precision', '<>', 'date'))
+            ->orderByRaw(EventStart::sql('events'))
             ->limit(400);
 
         if (in_array($theme['pick'] ?? '', ['words', 'all'], true)) {
             OccasionCalendar::applyWords($q, $theme, 'events');
         }
 
-        return $q->get();
+        // дальше всё считается от start_time: событию без часа ставим полночь его дня
+        return $q->get()->each(function (Event $e) {
+            $e->start_time ??= EventStart::of($e);
+        });
     }
 
     /**

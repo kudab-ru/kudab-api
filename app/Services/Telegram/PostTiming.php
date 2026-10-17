@@ -80,11 +80,12 @@ final class PostTiming
 
     /**
      * Правило fits() в виде SQL-условия, правятся вместе. Отличие: событие
-     * без start_time здесь не проходит, в fits() проходит.
+     * без start_time здесь проходит только с `$wholeDay`, в fits() проходит всегда.
      *
      * @param  \Illuminate\Database\Query\Builder|\Illuminate\Database\Eloquent\Builder  $query
      * @param  string  $table  префикс колонок: 'events' или алиас вроде 'e'
      * @param  bool  $strictRuns  начавшееся проходит, только если это прокат от RUN_MIN_DAYS, а не сеанс с общим для серии концом
+     * @param  bool  $wholeDay  событие без часа идёт весь свой день и проходит, пока день не кончился (подборкам)
      */
     public static function applyFits(
         $query,
@@ -92,10 +93,11 @@ final class PostTiming
         int $minLeadHours = 0,
         string $table = 'events',
         bool $strictRuns = false,
+        bool $wholeDay = false,
     ): void {
         $from = $publishAt->copy()->addHours(max(0, $minLeadHours));
 
-        $query->where(function ($w) use ($from, $table, $strictRuns) {
+        $query->where(function ($w) use ($from, $table, $strictRuns, $wholeDay) {
             $w->where($table.'.start_time', '>=', $from)
                 ->orWhere(function ($x) use ($from, $table, $strictRuns) {
                     $x->whereNotNull($table.'.end_time')
@@ -124,6 +126,11 @@ final class PostTiming
                                 ->whereNull('same_end.deleted_at');
                         });
                 });
+
+            if ($wholeDay) {
+                $w->orWhere(fn ($x) => $x->whereNull($table.'.start_time')
+                    ->where($table.'.start_date', '>=', $from->copy()->setTimezone('Europe/Moscow')->toDateString()));
+            }
         });
     }
 
