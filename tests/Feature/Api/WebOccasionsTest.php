@@ -71,6 +71,24 @@ class WebOccasionsTest extends TestCase
         $this->assertSame(['14:00', '18:00'], $days[0]['events'][0]['times']);
     }
 
+    #[Test]
+    public function a_show_running_for_days_is_one_row_with_its_last_date(): void
+    {
+        $group = (int) DB::table('event_groups')->insertGetId([
+            'community_id' => Community::create(['name' => 'Театр', 'city_id' => $this->cityId])->id,
+            'city_id' => $this->cityId, 'group_key' => 'grp-2', 'title_norm' => 'хэллоуин-квест',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        foreach (['2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31'] as $day) {
+            Event::query()->whereKey($this->event('Хэллоуин-квест', $day.' 11:00'))->update(['event_group_id' => $group]);
+        }
+
+        $days = $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data.days');
+
+        $this->assertCount(1, $days);
+        $this->assertSame('2026-10-31', $days[0]['events'][0]['until']);
+    }
+
     private function event(string $title, string $at): int
     {
         $start = Carbon::parse($at, 'Europe/Moscow');

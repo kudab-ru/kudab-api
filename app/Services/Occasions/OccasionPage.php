@@ -93,7 +93,7 @@ final class OccasionPage
         $events = $window === null ? collect() : $this->events($theme, $city, $window);
         // признаки оценки одним запросом на все события, а не по запросу на каждое
         $this->scorer->prepare($events->all());
-        $rows = $this->rows($events, $now);
+        $rows = $this->foldSeries($this->rows($events, $now));
         $days = $this->days($rows);
         $picks = $day === null ? [] : $this->picks($theme, $city, $day, $events, $now);
 
@@ -187,10 +187,41 @@ final class OccasionPage
                 continue;
             }
 
-            $out[$key] = $this->dto($e, $now) + ['times' => $time !== null ? [$time] : []];
+            $out[$key] = $this->dto($e, $now) + [
+                'times' => $time !== null ? [$time] : [],
+                'series' => $e->event_group_id ? 'g'.$e->event_group_id : 't'.mb_strtolower(trim((string) $e->title)),
+                'until' => null,
+            ];
         }
 
         return array_values($out);
+    }
+
+    /**
+     * Событие, которое идёт три дня и больше, — одной строкой в первый предстоящий день с датой
+     * последнего показа: иначе ежедневный спектакль занимает каждый день программы.
+     *
+     * @param  list<array<string, mixed>>  $rows
+     * @return list<array<string, mixed>>
+     */
+    private function foldSeries(array $rows): array
+    {
+        $bySeries = [];
+        foreach ($rows as $i => $row) {
+            $bySeries[$row['series']][] = $i;
+        }
+
+        $drop = [];
+        foreach ($bySeries as $idx) {
+            if (count($idx) < 3) {
+                continue;
+            }
+            $keep = collect($idx)->first(fn ($i) => ! $rows[$i]['is_past']) ?? $idx[0];
+            $rows[$keep]['until'] = $rows[end($idx)]['date'];
+            $drop = array_merge($drop, array_diff($idx, [$keep]));
+        }
+
+        return array_values(array_diff_key($rows, array_flip($drop)));
     }
 
     /**
@@ -218,7 +249,7 @@ final class OccasionPage
                 'date' => $date,
                 'weekday' => self::WEEKDAYS[$d->isoWeekday()],
                 'label' => $this->dayMonth($d),
-                'events' => array_map(fn ($r) => array_diff_key($r, ['score' => true]), $items),
+                'events' => array_map(fn ($r) => array_diff_key($r, ['score' => true, 'series' => true]), $items),
                 'more' => $more,
             ];
         }
