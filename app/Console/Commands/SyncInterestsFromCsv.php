@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Http\Controllers\Api\Web\InterestsController;
 use App\Models\Interest;
 use App\Models\InterestAlias;
 use Illuminate\Console\Command;
@@ -131,13 +132,11 @@ class SyncInterestsFromCsv extends Command
 
     private function invalidateCatalogCache(): void
     {
-        // Cache::tags недоступен на file/database драйверах, поэтому стираем
-        // ключи по списку. Шаблон ключа должен синхронно меняться с
-        // InterestsController::index().
-        Cache::forget('interests:catalog:all:-:-');
+        // Cache::tags недоступен на file/database драйверах, поэтому стираем ключи по списку
+        Cache::forget(InterestsController::cacheKey(null));
         $cityIds = DB::table('cities')->pluck('id');
         foreach ($cityIds as $cityId) {
-            Cache::forget("interests:catalog:{$cityId}:-:-");
+            Cache::forget(InterestsController::cacheKey((int) $cityId));
         }
         $this->info("Catalog cache invalidated (cities: {$cityIds->count()})");
     }

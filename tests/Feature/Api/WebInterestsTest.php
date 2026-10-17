@@ -137,6 +137,30 @@ class WebInterestsTest extends TestCase
         );
     }
 
+    public function test_events_count_counts_a_series_once_and_genres_into_their_topic(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $art = $this->createInterest('Выставки', 'exhibitions');
+        $painting = $this->createInterest('Живопись', 'painting', $art->id);
+        $com = $this->createCommunity($vrn->id, 'Музей');
+        $groupId = DB::table('event_groups')->insertGetId([
+            'community_id' => $com->id, 'city_id' => $vrn->id, 'group_key' => 'vystavka',
+            'title_norm' => 'выставка', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        foreach (range(1, 5) as $day) {
+            $session = $this->createEvent($vrn->id, $com->id, 'Выставка', now()->addDays($day));
+            $session->event_group_id = $groupId;
+            $session->save();
+            $this->tagEvent($session->id, $painting->id);
+        }
+
+        $rows = collect($this->getJson('/api/web/interests?city=voronezh')->json('data'))->keyBy('slug');
+
+        $this->assertSame(1, $rows['painting']['events_count']);
+        $this->assertSame(1, $rows['exhibitions']['events_count']);
+    }
+
     public function test_q_filter_uses_ilike_on_name(): void
     {
         $this->createInterest('Театр', 'teatr');

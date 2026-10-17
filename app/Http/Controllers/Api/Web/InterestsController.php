@@ -38,23 +38,22 @@ class InterestsController extends Controller
         $parentSlug = trim((string) $request->input('parent_slug', '')) ?: null;
         $q          = trim((string) $request->input('q', '')) ?: null;
 
-        // v2 в ключе: правило подсчёта events_count изменилось (предстоящие + скоуп
-        // видимости ленты). Без смены ключа старые числа жили бы ещё 10 минут после
-        // выкатки, и «починили, а всё по-старому» выглядело бы как невыкаченная правка.
-        $cacheKey = sprintf(
-            'interests:catalog:v2:%s:%s:%s',
-            $cityId ?? 'all',
-            $parentSlug ?? '-',
-            $q !== null ? md5($q) : '-'
-        );
-
-        $items = Cache::remember($cacheKey, 600, function () use ($cityId, $parentSlug, $q) {
+        $items = Cache::remember(self::cacheKey($cityId, $parentSlug, $q), 600, function () use ($cityId, $parentSlug, $q) {
             return $this->fetch($cityId, $parentSlug, $q);
         });
 
         return response()->json([
             'data' => WebInterestResource::collection($items)->toArray(request()),
         ]);
+    }
+
+    /**
+     * Версия в ключе меняется вместе с правилом подсчёта: иначе старые числа живут ещё 10 минут
+     * после выката. Ключ без фильтров сбрасывает SyncInterestsFromCsv.
+     */
+    public static function cacheKey(?int $cityId, ?string $parentSlug = null, ?string $q = null): string
+    {
+        return sprintf('interests:catalog:v3:%s:%s:%s', $cityId ?? 'all', $parentSlug ?? '-', $q !== null ? md5($q) : '-');
     }
 
     /**
@@ -76,10 +75,18 @@ class InterestsController extends Controller
         // Окно — ПРЕДСТОЯЩИЕ, а не lookback ленты: у числа возле темы роль обещания
         // («столько можно посетить»), а не описи. Лента при этом честно показывает
         // и прошедшие за последние 7 дней, но внизу и приглушёнными.
+        // Как в ленте по клику на тему: серия — одно событие (ключ схлопывания серий ленты),
+        // жанры темы входят в её число
         $countSub = Event::query()
-            ->selectRaw('COUNT(*)')
+            ->selectRaw('COUNT(DISTINCT COALESCE(eg.federation_id, events.event_group_id, -events.id))')
             ->join('event_interest as ei', 'ei.event_id', '=', 'events.id')
-            ->whereColumn('ei.interest_id', 'interests.id')
+            ->leftJoin('event_groups as eg', function ($j) {
+                $j->on('eg.id', '=', 'events.event_group_id')->whereNull('eg.deleted_at');
+            })
+            ->whereIn('ei.interest_id', fn ($s) => $s->from('interests as own')
+                ->select('own.id')
+                ->whereColumn('own.id', 'interests.id')
+                ->orWhereColumn('own.parent_id', 'interests.id'))
             ->visibleWeb()
             ->where('events.status', 'active')
             ->where(function ($w) {
