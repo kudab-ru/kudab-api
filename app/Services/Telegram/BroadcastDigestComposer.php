@@ -1153,6 +1153,9 @@ final class BroadcastDigestComposer
         if (($theme['pick'] ?? '') === 'views') {
             usort($ranked, fn ($a, $b) => (int) ($b->views ?? 0) <=> (int) ($a->views ?? 0));
         }
+        if (isset($theme['occasion'])) {
+            $ranked = $this->byOccasion($ranked, (array) ($theme['words'] ?? []));
+        }
 
         /** @var array<int, object> $named */
         $named = [];
@@ -1195,6 +1198,32 @@ final class BroadcastDigestComposer
 
     /** Цена, до которой событие в подборке считается дешёвым. */
     private const CHEAP_MAX = 500;
+
+    /** Прибавка к оценке события, у которого праздник прямо в названии, см. byOccasion. */
+    private const OCCASION_TITLE_BONUS = 20;
+
+    /**
+     * Праздник в названии — событие про праздник, а не к нему: «Готический Halloween» с темой «Городские
+     * акции» иначе проигрывал квизу. Без часа строка повода всё равно с датой, штраф за это снимаем.
+     *
+     * @param  list<object>  $ranked
+     * @param  list<string>  $words
+     * @return list<object>
+     */
+    private function byOccasion(array $ranked, array $words): array
+    {
+        $score = function (object $row) use ($words): int {
+            $title = mb_strtolower((string) $row->title);
+            $named = array_filter($words, fn ($w) => $w !== '' && str_contains($title, mb_strtolower((string) $w))) !== [];
+
+            return $this->scorer->interest($row)
+                + ($named ? self::OCCASION_TITLE_BONUS : 0)
+                - (($row->time_precision ?? null) === 'date' ? Scoring\EventBroadcastScorer::W_NO_TIME : 0);
+        };
+        usort($ranked, fn ($a, $b) => $score($b) <=> $score($a));
+
+        return $ranked;
+    }
 
     /**
      * Встанет ли строка рядом с уже названными.

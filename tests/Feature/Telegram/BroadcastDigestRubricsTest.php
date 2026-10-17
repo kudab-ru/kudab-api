@@ -1291,6 +1291,30 @@ class BroadcastDigestRubricsTest extends TestCase
     }
 
     #[Test]
+    public function an_event_named_after_the_occasion_beats_quizzes_with_their_own_text(): void
+    {
+        $this->onlyRubric('povod-halloween');
+        // маркет без часа и с темой «Городские акции»: по общей оценке он вровень с квизами
+        $market = $this->event('Готический Хэллоуин', 45, free: false, priceMin: 300, hour: 0, timePrecision: 'date');
+        $this->retag($market, 'city');
+        foreach ([18, 20] as $i => $hour) {
+            $this->retag($this->event('Хэллоуин-вечеринка '.($i + 1), 46, free: false, priceMin: 1000, hour: $hour), 'parties');
+        }
+        $this->retag($this->event('Рок-концерт', 46, free: false, priceMin: 600, hour: 21,
+            description: 'Хэллоуин в рок-баре: пять групп и конкурс костюмов. '.str_repeat('описание события достаточной длины. ', 4)), 'music');
+        foreach ([1, 2] as $i) {
+            $quiz = $this->event('Квиз '.$i, 44 + $i, free: false, priceMin: 500,
+                description: 'Квиз к Хэллоуину: вопросы о мистике. '.str_repeat('описание события достаточной длины. ', 4));
+            $this->retag($quiz, 'quiz-games');
+            DB::table('events')->where('id', $quiz)->update(['tg_description' => 'Свой анонс квиза.']);
+        }
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::parse('2026-10-24 12:00', 'Europe/Moscow'), null, 'povod-halloween');
+
+        $this->assertContains($market, $out['event_ids']);
+    }
+
+    #[Test]
     #[DataProvider('removedByHand')]
     public function only_a_removed_event_post_holds_its_event_back(string $kind, int $pool): void
     {
