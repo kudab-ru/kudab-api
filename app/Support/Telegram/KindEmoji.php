@@ -41,6 +41,7 @@ final class KindEmoji
         'workshops' => '🎨',
         'yoga-wellness' => '🧘',
         'city' => '🏛️',
+        'markets' => '🛍️',
         // Широкие темы.
         'education' => '🎓',
         'music' => '🎵',

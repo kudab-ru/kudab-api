@@ -21,6 +21,7 @@ class EventBroadcastScorer
         'standup' => 25,
         'circus-show' => 20,
         'parties' => 15,
+        'markets' => 15,
         'city' => 5,
         'sport' => 5,
         'exhibitions' => 5,

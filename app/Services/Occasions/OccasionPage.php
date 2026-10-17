@@ -57,7 +57,7 @@ final class OccasionPage
         'parties' => 'party', 'quiz-games' => 'quiz', 'music' => 'concert', 'theatre' => 'theatre', 'kids' => 'kids',
         'exhibitions' => 'exhibition', 'standup' => 'standup', 'education' => 'lecture', 'literature' => 'lecture',
         'excursions' => 'excursion', 'cinema' => 'cinema', 'circus-show' => 'show', 'festival' => 'festival',
-        'city' => 'city', 'sport' => 'sport',
+        'city' => 'city', 'sport' => 'sport', 'markets' => 'market',
     ];
 
     /** [одно, много] */
