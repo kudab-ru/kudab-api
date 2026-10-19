@@ -35,6 +35,8 @@ final class OccasionPage
 
     private const WEEKDAYS = [1 => 'понедельник', 2 => 'вторник', 3 => 'среда', 4 => 'четверг', 5 => 'пятница', 6 => 'суббота', 7 => 'воскресенье'];
 
+    private const WEEKDAYS_AT = [1 => 'в понедельник', 2 => 'во вторник', 3 => 'в среду', 4 => 'в четверг', 5 => 'в пятницу', 6 => 'в субботу', 7 => 'в воскресенье'];
+
     private const MONTHS = [1 => 'января', 2 => 'февраля', 3 => 'марта', 4 => 'апреля', 5 => 'мая', 6 => 'июня',
         7 => 'июля', 8 => 'августа', 9 => 'сентября', 10 => 'октября', 11 => 'ноября', 12 => 'декабря'];
 
@@ -116,6 +118,7 @@ final class OccasionPage
                 'window' => $window ? ['from' => $window[0]->toDateString(), 'to' => $window[1]->toDateString()] : null,
                 'window_label' => $window ? $this->windowLabel($theme, $window) : null,
                 'kicker' => $day && $window ? $this->kicker($theme, $day, $window) : null,
+                'season' => $this->isSeason($theme),
                 'days_left' => $day ? max(0, (int) $now->copy()->startOfDay()->diffInDays($day, false)) : null,
                 'total' => $total,
                 'lead' => $lead,
@@ -368,6 +371,10 @@ final class OccasionPage
             'start_at' => $start->toIso8601String(),
             'time_precision' => (string) ($e->time_precision ?? 'datetime'),
             'venue' => $this->venueLabel($e),
+            // точка на карте праздника: у события свои координаты, у площадки — запасные
+            'venue_id' => $e->venue_id !== null ? (int) $e->venue_id : null,
+            'lat' => $e->latitude ?? $e->venue?->latitude,
+            'lng' => $e->longitude ?? $e->venue?->longitude,
             'price_status' => (string) ($e->price_status ?? 'unknown'),
             'price_min' => $e->price_min !== null ? (int) $e->price_min : null,
             'price_max' => $e->price_max !== null ? (int) $e->price_max : null,
@@ -512,66 +519,90 @@ final class OccasionPage
     }
 
     /**
-     * Ответы для поиска собираются из того, что на странице: названия, площадки и часы, без общих слов.
+     * Короткие ответы на вопросы, которые задают поиску, одной фразой из того, что есть на странице.
+     * В `links` названия событий так, как они написаны в ответе: сайт делает их ссылками.
      *
      * @param  array<string, mixed>  $theme
      * @param  list<array<string, mixed>>  $picks
      * @param  list<array<string, mixed>>  $rows
-     * @return list<array{q: string, a: string}>
+     * @return list<array{q: string, a: string, links: list<array{text: string, url: string}>}>
      */
     private function faq(array $theme, ?string $cityIn, ?Carbon $day, array $picks, array $rows): array
     {
         $out = [];
         $city = $cityIn !== null ? 'в '.$cityIn : '';
         $q = fn (string $key) => trim((string) preg_replace('/\s+(?=\?)/u', '', str_replace('{city}', $city, (string) ($theme[$key] ?? ''))));
-
-        if (($theme['question'] ?? '') !== '' && $picks !== []) {
-            $byDay = [];
-            foreach ($picks as $p) {
-                $byDay[$p['date']][] = $p;
-            }
-            ksort($byDay);
-            $parts = [];
-            foreach (array_slice($byDay, 0, 3, true) as $date => $items) {
-                $d = Carbon::parse($date, self::TZ);
-                $parts[] = $this->capital(self::WEEKDAYS[$d->isoWeekday()]).', '.$this->dayMonth($d).': '
-                    .implode('; ', array_map(fn ($p) => $this->line($p), $items));
-            }
-            $out[] = ['q' => $q('question'), 'a' => implode('. ', $parts).'.'];
-        }
-
-        $kids = array_values(array_filter($rows, fn ($r) => $r['kids']));
-        if ($kids !== [] && count($kids) < count($rows)) {
-            $out[] = ['q' => 'Что есть для детей?', 'a' => implode('; ', array_map(fn ($r) => $this->line($r, true), array_slice($kids, 0, 3))).'.'];
-        }
-
-        $free = array_values(array_filter($rows, fn ($r) => in_array($r['price_status'], ['free', 'donation'], true)));
-        $cheap = array_values(array_filter($rows, fn ($r) => $r['price_min'] !== null && $r['price_min'] > 0 && $r['price_min'] <= 500));
-        if ($free !== []) {
-            $out[] = ['q' => 'Есть ли бесплатные события?', 'a' => 'Да: '.implode('; ', array_map(fn ($r) => $this->line($r, true), array_slice($free, 0, 3))).'.'];
-        } elseif ($cheap !== []) {
-            $out[] = ['q' => 'Что есть дешевле 500 рублей?', 'a' => implode('; ', array_map(fn ($r) => $this->line($r, true, true), array_slice($cheap, 0, 3))).'.'];
-        }
+        $season = $this->isSeason($theme);
+        $live = array_values(array_filter($rows, fn ($r) => ! $r['is_past']));
+        $link = fn (array $r) => ['text' => (string) $r['title'], 'url' => (string) $r['url']];
 
         if (($theme['when_question'] ?? '') !== '' && $day !== null) {
-            $when = str_replace('{year}', (string) $day->year, $q('when_question'));
-            $out[] = ['q' => $when, 'a' => $this->capital($this->dayMonth($day)).' '.$day->year.', '.self::WEEKDAYS[$day->isoWeekday()].'.'];
+            $answer = $this->capital(self::WEEKDAYS_AT[$day->isoWeekday()]).', '.$this->dayMonth($day).'.';
+            $dates = array_column($rows, 'date');
+            if ($dates !== [] && min($dates) !== max($dates)) {
+                $answer .= ' События идут '.$this->span(Carbon::parse(min($dates), self::TZ), Carbon::parse(max($dates), self::TZ)).'.';
+            }
+            $out[] = ['q' => str_replace('{year}', (string) $day->year, $q('when_question')), 'a' => $answer, 'links' => []];
+        }
+
+        // главное по дням: «В пятницу: … В субботу: … в 17:00, … в 18:00.»
+        $main = array_slice(array_values(array_filter($picks, fn ($p) => ! $p['is_past'])), 0, 4);
+        if (($theme['question'] ?? '') !== '' && $main !== []) {
+            usort($main, fn ($a, $b) => [$a['date'], $a['times'][0] ?? '99'] <=> [$b['date'], $b['times'][0] ?? '99']);
+            $byDay = [];
+            foreach ($main as $p) {
+                $byDay[$p['date']][] = $p;
+            }
+            $parts = [];
+            foreach ($byDay as $date => $items) {
+                $d = Carbon::parse($date, self::TZ);
+                $parts[] = $this->capital($season ? $this->dayMonth($d) : self::WEEKDAYS_AT[$d->isoWeekday()]).': '
+                    .implode(', ', array_map(fn ($p) => $p['title'].($p['times'] !== [] ? ' в '.$p['times'][0] : ''), $items)).'.';
+            }
+            $out[] = ['q' => $q('question'), 'a' => implode(' ', $parts), 'links' => array_map($link, $main)];
+        }
+
+        $kids = array_values(array_filter($live, fn ($r) => $r['kids']));
+        if ($kids !== [] && count($kids) * 2 > count($live)) {
+            $out[] = ['q' => 'Можно ли с детьми?', 'links' => [], 'a' => count($kids) === count($live)
+                ? 'Да, все события для детей.'
+                : 'Да, почти всё: '.count($kids).' из '.count($live).' '.$this->plural(count($live), 'события', 'событий', 'событий').' подходят детям.'];
+        } elseif ($kids !== []) {
+            $two = array_slice($kids, 0, 2);
+            $out[] = ['q' => 'Можно ли с детьми?', 'links' => array_map($link, $two),
+                'a' => 'Да: '.implode('; ', array_map(fn ($r) => $r['title'].', '.$this->at($r, $season), $two)).'.'];
+        }
+
+        $free = array_values(array_filter($live, fn ($r) => $r['free']));
+        $paid = array_values(array_filter($live, fn ($r) => ! $r['free'] && (int) ($r['price_min'] ?? 0) > 0));
+        if ($free !== []) {
+            $two = array_slice($free, 0, 2);
+            $out[] = ['q' => 'Есть ли что-то бесплатное?', 'links' => array_map($link, $two),
+                'a' => 'Да: '.implode(', ', array_column($two, 'title')).'.'];
+        } elseif ($paid !== []) {
+            usort($paid, fn ($a, $b) => $a['price_min'] <=> $b['price_min']);
+            $lo = (int) $paid[0]['price_min'];
+            $hi = max(array_map(fn ($r) => (int) ($r['price_max'] ?? $r['price_min']), $paid));
+            $range = $lo === $hi ? $this->rub($lo) : 'От '.$this->rub($lo, false).' до '.$this->rub($hi);
+            $out[] = ['q' => 'Сколько стоит?', 'links' => [$link($paid[0])],
+                'a' => $range.'. Дешевле всего '.$paid[0]['title'].'. Бесплатных событий нет.'];
         }
 
         return $out;
     }
 
-    /** «Кошмар на улице Кирова — The Last of Vavilone, 19:00»; с датой — для ответов, где дни вперемешку. */
-    private function line(array $row, bool $withDay = false, bool $withPrice = false): string
+    /** «в субботу в 17:00»; у сезона дни разные — «6 декабря в 12:00». */
+    private function at(array $row, bool $season): string
     {
-        $bits = array_filter([
-            $withDay ? self::WEEKDAYS[Carbon::parse($row['date'], self::TZ)->isoWeekday()].' '.$this->dayMonth(Carbon::parse($row['date'], self::TZ)) : null,
-            $row['venue'],
-            $row['times'] !== [] ? implode(' и ', $row['times']) : null,
-            $withPrice && $row['price_min'] !== null ? $row['price_min']."\u{00A0}₽" : null,
-        ]);
+        $d = Carbon::parse($row['date'], self::TZ);
 
-        return $row['title'].($bits !== [] ? ' — '.implode(', ', $bits) : '');
+        return ($season ? $this->dayMonth($d) : self::WEEKDAYS_AT[$d->isoWeekday()]).($row['times'] !== [] ? ' в '.$row['times'][0] : '');
+    }
+
+    /** «2 500 ₽» с неразрывными пробелами; без знака — для начала диапазона «от 400 до 2 500 ₽». */
+    private function rub(int $n, bool $sign = true): string
+    {
+        return number_format($n, 0, '', "\u{00A0}").($sign ? "\u{00A0}₽" : '');
     }
 
     /** @return list<array<string, mixed>> */

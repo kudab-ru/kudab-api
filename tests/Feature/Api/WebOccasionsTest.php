@@ -104,6 +104,35 @@ class WebOccasionsTest extends TestCase
         $this->assertSame([$soon, $late, $next], array_column($program, 'id'));
     }
 
+    #[Test]
+    public function the_short_answer_names_the_main_events_by_day_and_links_them(): void
+    {
+        $party = $this->event('Хэллоуинская вечеринка', '2026-10-31 18:00');
+        $market = $this->event('Готический Halloween', '2026-10-30 12:00');
+        $quiz = $this->event('Квиз про Хэллоуин', '2026-10-31 17:00');
+        $this->postedOccasion([$party, $market, $quiz], []);
+
+        $faq = $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data.faq');
+        $where = collect($faq)->firstWhere('q', 'Где отметить Хэллоуин в Воронеже?');
+
+        $this->assertSame('В пятницу: Готический Halloween в 12:00. В субботу: Квиз про Хэллоуин в 17:00, Хэллоуинская вечеринка в 18:00.', $where['a']);
+        foreach ($where['links'] as $link) {
+            $this->assertStringContainsString($link['text'], $where['a']);
+        }
+    }
+
+    #[Test]
+    public function the_next_holiday_tells_how_many_events_it_already_has(): void
+    {
+        $this->event('Хэллоуинская вечеринка', '2026-10-31 18:00');
+        $this->event('Ночь искусств в музее', '2026-11-03 19:00');
+
+        $next = $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data.next.0');
+
+        $this->assertSame('noch-iskusstv', $next['page']);
+        $this->assertSame(1, $next['total']);
+    }
+
     private function event(string $title, string $at): int
     {
         $start = Carbon::parse($at, 'Europe/Moscow');

@@ -60,14 +60,26 @@ final class OccasionsController extends Controller
         $theme = OccasionCalendar::byPage($page);
         abort_if($theme === null, 404);
 
-        return response()->json(['data' => $this->pageData($theme, $this->city($request))]);
+        $city = $this->city($request);
+        $data = $this->pageData($theme, $city);
+        // лента следующего праздника внизу страницы говорит, есть ли у него уже события
+        $next = isset($data['next'][0]) ? OccasionCalendar::byPage($data['next'][0]['page']) : null;
+        if ($next !== null) {
+            $n = $this->pageData((array) $next, $city);
+            $data['next'][0] += [
+                'total' => $n['occasion']['total'],
+                'kinds' => array_slice(array_column(array_filter($n['kinds'], fn ($k) => $k['key'] !== 'for-kids'), 'label'), 0, 3),
+            ];
+        }
+
+        return response()->json(['data' => $data]);
     }
 
     /** @param  array<string, mixed>  $theme */
     private function pageData(array $theme, City $city): array
     {
         return Cache::remember(
-            'occasion-page:v1:'.$city->slug.':'.$theme['page'],
+            'occasion-page:v2:'.$city->slug.':'.$theme['page'],
             self::CACHE_SECONDS,
             fn () => $this->page->build($theme, $city, Carbon::now()),
         );
