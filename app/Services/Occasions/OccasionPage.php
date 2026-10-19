@@ -586,7 +586,7 @@ final class OccasionPage
     /**
      * Ближайшие поводы с датами по порядку — для «дальше в календаре» и списка страниц.
      *
-     * @return list<array{page: string, title: string, emoji: string, date: string, badge: string, until: string, label: string}>
+     * @return list<array{page: string, title: string, emoji: string, date: string, badge: string, until: string, label: string, season: bool, phrase: string}>
      */
     public function calendar(Carbon $now): array
     {
@@ -610,11 +610,44 @@ final class OccasionPage
                 'badge' => ($this->isSeason($t) ? $window[0] : $day)->toDateString(),
                 'until' => $window[1]->toDateString(),
                 'label' => $this->isSeason($t) ? $this->windowLabel($t, $window) : $this->kicker($t, $day, $window),
+                'season' => $this->isSeason($t),
+                'phrase' => (string) ($t['phrase'] ?? ''),
             ];
         }
         usort($out, fn ($a, $b) => strcmp($a['date'], $b['date']));
 
         return $out;
+    }
+
+    /**
+     * Три события праздника для ленты на главной: предстоящие из «Главного», а если их меньше трёх —
+     * добор из программы по дням. Показываются по порядку времени, событие без часа — после часовых того же дня.
+     *
+     * @param  array<string, mixed>  $data  ответ build()
+     * @return list<array{id: int, title: string, url: string, date: string, time: string|null}>
+     */
+    public static function program(array $data, int $limit = 3): array
+    {
+        $rows = [];
+        $all = array_merge((array) $data['picks'], ...array_map(fn ($d) => (array) $d['events'], (array) $data['days']));
+        foreach ($all as $row) {
+            if (count($rows) >= $limit) {
+                break;
+            }
+            if (! $row['is_past'] && ! isset($rows[$row['id']])) {
+                $rows[$row['id']] = $row;
+            }
+        }
+        $sortKey = fn ($r) => [$r['date'], ($r['times'][0] ?? null) === null, $r['times'][0] ?? ''];
+        usort($rows, fn ($a, $b) => $sortKey($a) <=> $sortKey($b));
+
+        return array_map(fn ($r) => [
+            'id' => (int) $r['id'],
+            'title' => (string) $r['title'],
+            'url' => (string) $r['url'],
+            'date' => (string) $r['date'],
+            'time' => $r['times'][0] ?? null,
+        ], $rows);
     }
 
     /**

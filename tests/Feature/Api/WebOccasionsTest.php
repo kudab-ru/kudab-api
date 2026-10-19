@@ -89,6 +89,21 @@ class WebOccasionsTest extends TestCase
         $this->assertSame('2026-10-31', $days[0]['events'][0]['until']);
     }
 
+    #[Test]
+    public function the_home_promo_shows_upcoming_events_of_the_post_in_time_order(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-31 19:30', 'Europe/Moscow'));
+        $past = $this->event('Квиз: Хэллоуин', '2026-10-31 15:00');
+        $late = $this->event('Хэллоуинская вечеринка', '2026-10-31 20:00');
+        $next = $this->event('Halloween VRN', '2026-11-01 18:00');
+        $soon = $this->event('Кошмар на Хэллоуин', '2026-10-31 18:00');
+        $this->postedOccasion([$next, $past, $late, $soon], []);
+
+        $program = $this->getJson('/api/web/occasions?city=voronezh')->assertOk()->json('soon.program');
+
+        $this->assertSame([$soon, $late, $next], array_column($program, 'id'));
+    }
+
     private function event(string $title, string $at): int
     {
         $start = Carbon::parse($at, 'Europe/Moscow');

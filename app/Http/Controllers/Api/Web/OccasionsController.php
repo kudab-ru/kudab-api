@@ -44,6 +44,9 @@ final class OccasionsController extends Controller
                     'days_left' => max(0, (int) $now->copy()->startOfDay()->diffInDays($start, false)),
                     'total' => $data['occasion']['total'],
                     'lead' => $data['occasion']['lead'],
+                    // лента и билет на главной: виды событий праздника и три события его программы
+                    'kinds' => array_slice(array_column($data['kinds'], 'label'), 0, 3),
+                    'program' => OccasionPage::program($data),
                 ];
             }
             break;
