@@ -124,6 +124,17 @@ final class PickReason
     /** @param  array<string, mixed>  $meta */
     private static function auto(array $meta): string
     {
+        $line = self::autoLine($meta);
+        $missed = SlotRole::LABELS[(string) ($meta['role_missed'] ?? '')] ?? null;
+
+        return $missed === null
+            ? $line
+            : 'Для часа «'.$missed.'» подходящего не нашлось; '.mb_strtolower(mb_substr($line, 0, 1)).mb_substr($line, 1);
+    }
+
+    /** @param  array<string, mixed>  $meta */
+    private static function autoLine(array $meta): string
+    {
         if (($meta['rule'] ?? null) === self::RULE_OPTIONAL) {
             $supply = (int) ($meta['supply'] ?? 0);
 

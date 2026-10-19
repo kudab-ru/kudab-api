@@ -1140,6 +1140,83 @@ class BroadcastSlotsTest extends TestCase
             ->exists());
     }
 
+    /** @return array<string, array{list<int>, string}> */
+    public static function walkRoleDays(): array
+    {
+        return [
+            'выставка без часа сегодня, а не спектакль' => [[], 'Выставка «Палех»'],
+            'музей закрыт по вторникам' => [[2], 'Лекция о Платонове'],
+        ];
+    }
+
+    /** @param  list<int>  $closed */
+    #[DataProvider('walkRoleDays')]
+    public function test_walk_role_calls_into_an_open_place_today(array $closed, string $picked): void
+    {
+        [$broadcast, $city] = $this->roleChannel('walk');
+        $museum = $this->insertVenue($city->id, 'Краеведческий музей', 'museum');
+        DB::table('venues')->where('id', $museum)->update(['closed_weekdays' => $closed === [] ? null : json_encode($closed)]);
+
+        $show = $this->eventAt($city->id, 'Три сестры', Carbon::parse('2026-09-18 19:00', 'Europe/Moscow')->utc(), rich: true);
+        $this->tag($show->id, $this->interestNamed('theatre'));
+        $exhibition = $this->eventAt($city->id, 'Выставка «Палех»', Carbon::parse('2026-09-15 00:00', 'Europe/Moscow')->utc(), rich: true);
+        $exhibition->forceFill(['start_time' => null, 'start_date' => '2026-09-15', 'time_precision' => 'date', 'venue_id' => $museum])->save();
+        $this->tag($exhibition->id, $this->interestNamed('exhibitions'));
+        $lecture = $this->eventAt($city->id, 'Лекция о Платонове', Carbon::parse('2026-09-15 19:00', 'Europe/Moscow')->utc(), rich: true);
+        $lecture->forceFill(['price_status' => 'free'])->save();
+        $this->tag($lecture->id, $this->interestNamed('education'));
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame([$picked], $this->pickedTitles($broadcast->id));
+    }
+
+    public function test_role_without_a_fitting_event_takes_the_best_of_the_rest(): void
+    {
+        [$broadcast, $city] = $this->roleChannel('bar');
+        $show = $this->eventAt($city->id, 'Три сестры', Carbon::parse('2026-09-18 19:00', 'Europe/Moscow')->utc(), rich: true);
+        $this->tag($show->id, $this->interestNamed('theatre'));
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $item = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->whereNotNull('publish_at')->first();
+        $this->assertSame($show->id, (int) $item?->event_id, 'час не пустеет');
+        $this->assertSame('bar', $item->pick_meta['role_missed'] ?? null);
+    }
+
+    /**
+     * Вторник 15.09, 06:00 по Москве, один час 10:00 с ролью.
+     *
+     * @return array{TelegramChatBroadcast, City}
+     */
+    private function roleChannel(string $role): array
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 06:00', 'Europe/Moscow')->utc());
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, ['slots' => [10], 'horizon_days' => 1]);
+        $broadcast->slot_roles = [['weekday' => 2, 'hour' => 10, 'role' => $role]];
+        $broadcast->save();
+
+        return [$broadcast, City::query()->where('slug', 'voronezh')->firstOrFail()];
+    }
+
+    private function interestNamed(string $slug): int
+    {
+        return (int) (DB::table('interests')->where('slug', $slug)->value('id') ?? $this->interest($slug));
+    }
+
+    /** @return list<string> */
+    private function pickedTitles(int $broadcastId): array
+    {
+        return TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcastId)
+            ->whereNotNull('publish_at')
+            ->get()
+            ->map(fn (TelegramChatBroadcastItem $i) => (string) Event::query()->find($i->event_id)?->title)
+            ->all();
+    }
+
     /** @return array<string, array{string, int, bool}> */
     public static function cardAtConcertVenue(): array
     {

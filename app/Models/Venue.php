@@ -38,6 +38,7 @@ class Venue extends Model
 
     protected $casts = [
         'source_meta' => 'array',
+        'closed_weekdays' => 'array',
         'latitude'    => 'float',
         'longitude'   => 'float',
         'created_at'  => 'datetime',

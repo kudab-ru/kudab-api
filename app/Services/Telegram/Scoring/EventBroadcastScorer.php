@@ -4,6 +4,7 @@ namespace App\Services\Telegram\Scoring;
 
 use App\Models\Event;
 use App\Services\Telegram\PostTiming;
+use App\Support\EventStart;
 use Carbon\Carbon;
 
 /**
@@ -338,7 +339,9 @@ class EventBroadcastScorer
 
     private function freshnessDelta(Event $e, Carbon $at): int
     {
-        if ($e->start_time === null) {
+        // у события без часа начало — его день: выставка сегодня не «далеко»
+        $start = EventStart::of($e);
+        if ($start === null) {
             return self::FRESHNESS_FAR;
         }
 
@@ -347,7 +350,7 @@ class EventBroadcastScorer
             return $this->penalty($daysLeft, self::RUN_TIERS, self::RUN_FAR);
         }
 
-        return $this->penalty($this->daysAfter($at, $e->start_time), self::FRESHNESS_TIERS, self::FRESHNESS_FAR);
+        return $this->penalty($this->daysAfter($at, $start), self::FRESHNESS_TIERS, self::FRESHNESS_FAR);
     }
 
     /** @param array<int, int> $tiers */

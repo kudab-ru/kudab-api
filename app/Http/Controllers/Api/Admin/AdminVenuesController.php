@@ -61,7 +61,7 @@ class AdminVenuesController extends Controller
             ->get([
                 'v.id', 'v.name', 'v.slug', 'v.kind', 'v.address', 'v.latitude', 'v.longitude',
                 'v.house_fias_id', 'v.source_meta', 'v.created_at', 'c.name as city_name', 'v.city_id',
-                'v.parent_id', 'v.description', 'v.avatar_url',
+                'v.parent_id', 'v.description', 'v.avatar_url', 'v.closed_weekdays',
             ]);
 
         $ids = $venues->pluck('id');
@@ -95,6 +95,7 @@ class AdminVenuesController extends Controller
                 // площадок он пуст» из админки было нельзя — а пуст он у 70 из 125.
                 'kind' => $v->kind,
                 'kind_manual' => (bool) ($meta['manual_kind'] ?? false),
+                'closed_weekdays' => json_decode((string) ($v->closed_weekdays ?? 'null'), true) ?? [],
                 // Родитель — физическое вложение (сцена в парке). События не
                 // поднимаются, это только факт «внутри».
                 'parent_id' => $v->parent_id !== null ? (int) $v->parent_id : null,
@@ -227,6 +228,9 @@ class AdminVenuesController extends Controller
             // метку рукой, и с этого момента автоматика её не трогает.
             'lat' => ['sometimes', 'numeric', 'between:-90,90'],
             'lon' => ['sometimes', 'numeric', 'between:-180,180'],
+            // дни недели 1–7, когда площадка закрыта: по ним автомат не зовёт туда «сегодня»
+            'closed_weekdays' => ['sometimes', 'nullable', 'array', 'max:7'],
+            'closed_weekdays.*' => ['integer', 'between:1,7'],
         ]);
         abort_if($data === [], 422, 'Нечего обновлять');
         // Половина координаты — не координата: required_with тут не помогает,
@@ -263,6 +267,12 @@ class AdminVenuesController extends Controller
         $lat = isset($data['lat']) ? (float) $data['lat'] : null;
         $lon = isset($data['lon']) ? (float) $data['lon'] : null;
         unset($data['lat'], $data['lon']);
+
+        if (array_key_exists('closed_weekdays', $data)) {
+            $days = array_values(array_unique(array_map('intval', (array) $data['closed_weekdays'])));
+            sort($days);
+            $data['closed_weekdays'] = $days === [] ? null : json_encode($days);
+        }
 
         $update = $data + ['updated_at' => now()];
 

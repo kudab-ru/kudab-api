@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Telegram\SlotRole;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -394,6 +395,56 @@ class TelegramChatBroadcast extends Model
 
         $settings['digest_slots'] = array_values($clean);
         $this->settings = $settings;
+    }
+
+    /**
+     * Роли часов сетки, см. `SlotRole`: день недели, час и роль. Час без роли выбирается как раньше.
+     *
+     * @return list<array{weekday: int, hour: int, role: string}>
+     */
+    public function getSlotRolesAttribute(): array
+    {
+        return self::cleanRoles((array) (($this->settings ?? [])['slot_roles'] ?? []));
+    }
+
+    /** @param  list<array<string, mixed>>  $roles */
+    public function setSlotRolesAttribute(array $roles): void
+    {
+        $settings = $this->settings ?? [];
+        $settings['slot_roles'] = self::cleanRoles($roles);
+        $this->settings = $settings;
+    }
+
+    /** Роль часа, в который встаёт пост; null — у часа роли нет. */
+    public function roleAt(Carbon $at): ?string
+    {
+        $msk = $at->copy()->setTimezone('Europe/Moscow');
+        foreach ($this->slot_roles as $r) {
+            if ($r['weekday'] === $msk->isoWeekday() && $r['hour'] === $msk->hour) {
+                return $r['role'];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<mixed>  $roles
+     * @return list<array{weekday: int, hour: int, role: string}>
+     */
+    private static function cleanRoles(array $roles): array
+    {
+        $out = [];
+        foreach ($roles as $r) {
+            $weekday = (int) ($r['weekday'] ?? 0);
+            $hour = (int) ($r['hour'] ?? -1);
+            $role = (string) ($r['role'] ?? '');
+            if ($weekday >= 1 && $weekday <= 7 && $hour >= 0 && $hour <= 23 && isset(SlotRole::LABELS[$role])) {
+                $out[$weekday.':'.$hour] = ['weekday' => $weekday, 'hour' => $hour, 'role' => $role];
+            }
+        }
+
+        return array_values($out);
     }
 
     private function legacyDigestWeekday(): ?int

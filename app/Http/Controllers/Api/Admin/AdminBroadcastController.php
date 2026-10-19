@@ -18,6 +18,7 @@ use App\Services\Telegram\BroadcastEventPicker;
 use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\PickReason;
 use App\Services\Telegram\PostTiming;
+use App\Services\Telegram\SlotRole;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Support\BroadcastSafety;
 use App\Support\Telegram\CaptionLength;
@@ -28,6 +29,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\Rule;
 
 /**
  * Управление телеграм-рассылкой из админки.
@@ -3949,6 +3951,10 @@ class AdminBroadcastController extends Controller
             'digest_slots.*.weekday' => ['required', 'integer', 'min:1', 'max:7'],
             'digest_slots.*.hour' => ['required', 'integer', 'min:0', 'max:23'],
             'digest_slots.*.theme' => ['sometimes', 'nullable', 'string', 'max:64'],
+            'slot_roles' => ['sometimes', 'array', 'max:168'],
+            'slot_roles.*.weekday' => ['required', 'integer', 'min:1', 'max:7'],
+            'slot_roles.*.hour' => ['required', 'integer', 'min:0', 'max:23'],
+            'slot_roles.*.role' => ['required', 'string', Rule::in(array_keys(SlotRole::LABELS))],
         ]);
 
         $broadcast = TelegramChatBroadcast::query()->with('chat')->findOrFail($broadcastId);
@@ -4035,6 +4041,9 @@ class AdminBroadcastController extends Controller
         }
         if ($request->has('digest_slots')) {
             $broadcast->digest_slots = (array) $data['digest_slots'];
+        }
+        if ($request->has('slot_roles')) {
+            $broadcast->slot_roles = (array) $data['slot_roles'];
         }
         if ($request->has('digest_weekday')) {
             $broadcast->digest_weekday = $data['digest_weekday'] === null
@@ -4420,6 +4429,8 @@ class AdminBroadcastController extends Controller
             'digest_weekday' => $b->digest_weekday,
             'digest_hour' => $b->digest_hour,
             'digest_slots' => $b->digest_slots,
+            'slot_roles' => $b->slot_roles,
+            'slot_role_labels' => SlotRole::LABELS,
             // Когда канал снова сможет постить. Без этого пост, ждущий
             // зазора, выглядел как «ничего не происходит»: в ленте он стоит
             // со временем в прошлом и молчит.

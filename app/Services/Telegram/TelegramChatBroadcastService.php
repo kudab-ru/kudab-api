@@ -14,6 +14,7 @@ use App\Models\TelegramChatBroadcastItem;
 use App\Models\Venue;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Support\BroadcastSafety;
+use App\Support\EventStart;
 use Carbon\Carbon;
 use DateTimeInterface;
 use Illuminate\Database\Eloquent\Builder;
@@ -1634,6 +1635,37 @@ class TelegramChatBroadcastService
         ?int $replacedItemId = null,
         int $limit = 4,
         bool $optional = false,
+        ?string $role = null,
+    ): array {
+        $args = compact('chat', 'broadcastId', 'excludeEventIds', 'notBefore', 'repeatCap', 'avoidInterestId', 'replacedItemId', 'limit', 'optional');
+        if ($role === null || $notBefore === null) {
+            return $this->rankCandidates(...$args);
+        }
+
+        $fitting = $this->rankCandidates(...$args, role: $role);
+        if ($fitting !== []) {
+            return $fitting;
+        }
+
+        // для роли часа ничего не нашлось: час не пустеет, берётся лучшее из остального
+        return array_map(fn (array $c) => $c + ['role_missed' => $role], $this->rankCandidates(...$args));
+    }
+
+    /**
+     * @param  list<int>  $excludeEventIds
+     * @return list<array<string, mixed>>
+     */
+    private function rankCandidates(
+        TelegramChat $chat,
+        int $broadcastId,
+        array $excludeEventIds = [],
+        ?Carbon $notBefore = null,
+        ?int $repeatCap = null,
+        ?int $avoidInterestId = null,
+        ?int $replacedItemId = null,
+        int $limit = 4,
+        bool $optional = false,
+        ?string $role = null,
     ): array {
         $query = $this->channelCandidates($chat, $broadcastId);
 
@@ -1644,6 +1676,8 @@ class TelegramChatBroadcastService
         if ($optional && $notBefore !== null) {
             [$from, $until] = $this->optionalWindow($notBefore);
             $query->whereBetween('start_time', [$from, $until]);
+        } elseif ($role !== null && $notBefore !== null) {
+            EventStart::notAfter($query, SlotRole::lastDay($role, $notBefore), 'events');
         } else {
             // горизонт от дня слота: от «сейчас» окно у дальних слотов схлопывается
             $query->where(
@@ -1656,7 +1690,8 @@ class TelegramChatBroadcastService
         // нижняя граница от момента публикации, а не от «сейчас»: к дню поста событие может пройти.
         // upcoming() тут не нужен — он отрезал бы идущие выставки. Срок проката — закрытие, см. PostTiming
         if ($notBefore !== null) {
-            PostTiming::applyFits($query, $notBefore, self::MIN_LEAD_HOURS, strictRuns: true);
+            // у «зайти сегодня» и события без часа: выставка заведена днём на каждую дату
+            PostTiming::applyFits($query, $notBefore, self::MIN_LEAD_HOURS, strictRuns: true, wholeDay: $role === SlotRole::WALK);
             $this->weekendHold->applyTo($query, $broadcastId, $notBefore);
         } else {
             $query->upcoming();
@@ -1668,7 +1703,7 @@ class TelegramChatBroadcastService
             DB::statement('SET LOCAL jit = off');
 
             return $query
-                ->with(['sources:id,event_id,images,published_at', 'venue:id,name'])
+                ->with(['sources:id,event_id,images,published_at', 'venue:id,name,closed_weekdays'])
                 ->withCount('interests')
                 ->orderBy('start_time')
                 ->orderBy('id')
@@ -1729,11 +1764,15 @@ class TelegramChatBroadcastService
                 if ($this->scorer->isBigStage($e) && ! PostTiming::stageDayFits($e, $at)) {
                     continue;
                 }
+                if ($role !== null && ! SlotRole::fits($role, $this->scorer->access($e), $e, $at, (array) ($e->venue?->closed_weekdays ?? []))) {
+                    continue;
+                }
                 $ranked[] = [
                     'event' => $e,
                     'score' => $this->scorer->breakdown($e, $at, $freeWanted),
                     'facts' => $this->scorer->explain($e),
                     'dropped' => $tier === '' ? [] : explode(',', $tier),
+                    'role' => $role,
                 ];
                 if (count($ranked) >= $limit) {
                     return $ranked;
@@ -1773,6 +1812,8 @@ class TelegramChatBroadcastService
                 'facts' => $candidate['facts'] ?? null,
                 'dropped' => $candidate['dropped'],
                 'closes_in' => $daysLeft,
+                'role' => $candidate['role'] ?? null,
+                'role_missed' => $candidate['role_missed'] ?? null,
             ], fn ($v) => $v !== null && $v !== []),
         );
     }
@@ -2433,6 +2474,7 @@ class TelegramChatBroadcastService
                     $this->venueRepeatCap($broadcast),
                     $prevTheme,
                     limit: 1,
+                    role: $broadcast->roleAt($publishAt),
                 )[0] ?? null;
 
                 if ($best === null) {
@@ -2483,6 +2525,7 @@ class TelegramChatBroadcastService
                     $this->neighborTheme((int) $broadcast->id, $publishAt, $now, null),
                     limit: 1,
                     optional: true,
+                    role: $broadcast->roleAt($publishAt),
                 )[0] ?? null);
 
                 if ($best === null) {
@@ -2762,6 +2805,7 @@ class TelegramChatBroadcastService
             avoidInterestId: $this->neighborTheme((int) $broadcast->id, $at, Carbon::now(), $occupantItemId),
             replacedItemId: $occupantItemId,
             limit: $limit,
+            role: $broadcast->roleAt($at),
         );
 
         return array_map(fn (array $c) => ['event' => $c['event'], 'meta' => $this->autoPickMeta($c, $at)], $ranked);
