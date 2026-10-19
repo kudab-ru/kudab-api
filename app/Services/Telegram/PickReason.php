@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Telegram;
 
+use App\Services\Telegram\Scoring\EventAccess;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use Carbon\Carbon;
 
@@ -214,7 +215,10 @@ final class PickReason
             }
         }
 
-        return self::upperFirst(implode(', ', $good)).($weak === [] ? '' : '; '.implode(', ', $weak));
+        $line = implode(', ', $good).($weak === [] ? '' : '; '.implode(', ', $weak));
+        $access = EventAccess::LABELS[(string) ($facts['access'] ?? '')] ?? null;
+
+        return self::upperFirst($access === null ? $line : $access.' — '.$line);
     }
 
     private static function run(int $daysLeft): string

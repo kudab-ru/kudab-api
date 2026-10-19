@@ -75,12 +75,6 @@ class EventBroadcastScorer
     /** Вид площадки из справочника, у которой каждый сеанс — отдельное событие. */
     private const QUEST_VENUE_KIND = 'Квесты';
 
-    /** Вид площадки, где концерт или стендап — большая сцена, а не бар. */
-    private const STAGE_VENUE_KIND = 'Сцены';
-
-    /** Спектакль с чужой темой узнаётся по названию: «Спектакль „Имя“» размечен вечеринкой. */
-    private const STAGE_TITLE = '/^(спектакль|моноспектакль|мюзикл|балет|опера|оперетта)(?!\p{L})/iu';
-
     /** Штраф за дальность старта: [максимум_дней => штраф], дальше последнего порога — FRESHNESS_FAR. */
     private const FRESHNESS_TIERS = [
         2 => 0, // сегодня / завтра / послезавтра
@@ -158,7 +152,7 @@ class EventBroadcastScorer
     /**
      * Что сказать человеку о событии.
      *
-     * @return array{kind: string|null, repeats: int, ticketed: bool, rating: int, multi_day: bool}
+     * @return array{kind: string|null, repeats: int, ticketed: bool, rating: int, multi_day: bool, access: string}
      */
     public function explain(object $e): array
     {
@@ -170,19 +164,20 @@ class EventBroadcastScorer
             'ticketed' => (bool) $s['ticketed'],
             'rating' => (int) $s['rating'],
             'multi_day' => self::isRun($e),
+            'access' => EventAccess::of($s, $e),
         ];
     }
 
-    /** Театр, опера, филармония, цирк, концерт или стендап на сцене: билет туда берут заранее, см. PostTiming::stageDayFits. */
+    /** Как попасть на событие, см. EventAccess. */
+    public function access(object $e): string
+    {
+        return EventAccess::of($this->signal($e), $e);
+    }
+
+    /** Билет на большую сцену берут заранее, см. PostTiming::stageDayFits. */
     public function isBigStage(object $e): bool
     {
-        $s = $this->signal($e);
-        $kind = $s['parent'] ?? $s['slug'];
-
-        return in_array($kind, ['theatre', 'circus-show'], true)
-            || $s['slug'] === 'classical'
-            || (in_array($kind, ['music', 'standup'], true) && $s['venue_kind'] === self::STAGE_VENUE_KIND)
-            || preg_match(self::STAGE_TITLE, trim((string) ($e->title ?? ''))) === 1;
+        return $this->access($e) === EventAccess::STAGE;
     }
 
     /** @param  iterable<Event>  $events */

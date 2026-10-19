@@ -3,6 +3,7 @@
 namespace Tests\Unit\Telegram;
 
 use App\Models\Event;
+use App\Services\Telegram\Scoring\EventAccess;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Services\Telegram\Scoring\EventInterestSignals;
 use Carbon\Carbon;
@@ -53,6 +54,35 @@ class EventBroadcastScorerTest extends TestCase
         $high = $this->event(2, $better, now()->addDay());
 
         $this->assertSame($high, $this->scorer->pickBest([$low, $high], now()));
+    }
+
+    /** @return array<string, array{array<string, mixed>, array<string, mixed>, string}> */
+    public static function accessCases(): array
+    {
+        return [
+            'спектакль с темой вечеринки' => [['slug' => 'parties'], ['title' => 'Спектакль «Имя»'], EventAccess::STAGE],
+            'рок-концерт в зале' => [['slug' => 'rock', 'parent' => 'music', 'venue_kind' => 'Сцены'], [], EventAccess::STAGE],
+            'концерт в баре' => [['slug' => 'music', 'venue_kind' => 'Клубы и бары'], [], EventAccess::BAR],
+            'квест-комната' => [['slug' => 'quiz-games', 'venue_kind' => 'Квесты'], [], EventAccess::SKIP],
+            'ярмарка в парке' => [['slug' => 'markets', 'venue_kind' => 'Парки'], [], EventAccess::OUT],
+            'выставка в музее' => [['slug' => 'exhibitions', 'venue_kind' => 'Музеи'], [], EventAccess::WALK],
+            'лекция в музее' => [['slug' => 'education', 'venue_kind' => 'Музеи'], ['title' => 'Лекция о Нилусе'], EventAccess::SIGN],
+            'бесплатная лекция' => [['slug' => 'education'], ['price_status' => 'free'], EventAccess::WALK],
+            'бесплатная лекция по записи' => [['slug' => 'education'], ['price_status' => 'free', 'price_text' => 'по предварительной регистрации'], EventAccess::SIGN],
+            'квиз в баре' => [['slug' => 'quiz-games', 'venue_kind' => 'Клубы и бары'], [], EventAccess::SIGN],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $signals
+     * @param  array<string, mixed>  $attrs
+     */
+    #[DataProvider('accessCases')]
+    public function test_access_says_how_to_get_in(array $signals, array $attrs, string $access): void
+    {
+        $e = $this->event(1, $signals, now()->addDay(), $attrs + ['title' => 'Событие']);
+
+        $this->assertSame($access, $this->scorer->access($e));
     }
 
     public function test_free_event_rises_only_while_the_week_has_none(): void

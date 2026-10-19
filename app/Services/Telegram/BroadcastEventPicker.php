@@ -8,6 +8,7 @@ use App\Models\Event;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Repositories\EventRepository;
+use App\Services\Telegram\Scoring\EventAccess;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Support\EventStart;
 use App\Support\Telegram\VenueName;
@@ -247,6 +248,8 @@ final class BroadcastEventPicker
             'price' => $this->price($e),
             'cover' => is_array($images) ? ($images[0] ?? null) : null,
             'kind' => self::KINDS[$kind ?? ''] ?? null,
+            'access' => $facts['access'],
+            'access_label' => EventAccess::LABELS[$facts['access']],
             'free' => in_array($e->price_status, ['free', 'donation'], true),
             'kids' => in_array($e->audience, ['kids', 'family'], true) || $kind === 'kids',
             'low' => in_array($kind, self::LOW, true),
