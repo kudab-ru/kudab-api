@@ -8,9 +8,9 @@ use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Снять сеанс выставки без часа в выходной день её площадки (`venues.closed_weekdays`): выставка заведена днём
- * на каждую дату, и сайт показывал бы закрытый понедельник и писал «ежедневно». Событие с часом остаётся:
- * в выходной музея бывает лекция или концерт.
+ * Снять день выставки в выходной день её площадки (`venues.closed_weekdays`): выставка заведена днём на каждую
+ * дату, и сайт показывал бы закрытый понедельник и писал «ежедневно». День выставки узнаём по серии, где есть
+ * и другие дни без часа. Разовое событие остаётся, даже без часа: в выходной музея бывает церемония или лекция.
  */
 class HideClosedDaySessionsCommand extends Command
 {
@@ -28,6 +28,12 @@ class HideClosedDaySessionsCommand extends Command
             ->whereNotNull('v.closed_weekdays')
             ->where('e.start_date', '>=', now()->setTimezone('Europe/Moscow')->toDateString())
             ->whereRaw('v.closed_weekdays @> jsonb_build_array(extract(isodow from e.start_date)::int)')
+            ->whereExists(fn ($q) => $q->from('events as s')
+                ->whereColumn('s.event_group_id', 'e.event_group_id')
+                ->whereColumn('s.start_date', '<>', 'e.start_date')
+                ->whereNull('s.start_time')
+                ->where('s.time_precision', 'date')
+                ->whereNull('s.deleted_at'))
             ->pluck('e.id');
 
         if ($ids->isNotEmpty()) {

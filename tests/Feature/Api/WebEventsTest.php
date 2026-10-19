@@ -514,17 +514,26 @@ class WebEventsTest extends TestCase
         $museum = $this->createVenue($city->id, 'Музей', 'museum');
         $museum->forceFill(['closed_weekdays' => [1]])->save();
 
-        foreach (['2026-09-14' => 'Выставка в понедельник', '2026-09-15' => 'Выставка во вторник'] as $day => $title) {
-            $session = $this->createEvent($city->id, $community->id, $title, Carbon::parse($day, 'Europe/Moscow'), $museum->id);
-            $session->forceFill(['start_time' => null, 'start_date' => $day, 'time_precision' => 'date'])->save();
+        $group = DB::table('event_groups')->insertGetId([
+            'community_id' => $community->id, 'city_id' => $city->id, 'group_key' => 'eg:test:exhibition',
+            'title_norm' => 'выставка', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $days = ['2026-09-14' => 'Выставка', '2026-09-15' => 'Выставка', '2026-09-16' => 'Выставка', '2026-09-21' => 'Церемония без часа'];
+        foreach ($days as $day => $title) {
+            $event = $this->createEvent($city->id, $community->id, $title, Carbon::parse($day, 'Europe/Moscow'), $museum->id);
+            $event->forceFill(['start_time' => null, 'start_date' => $day, 'time_precision' => 'date'])->save();
+            if ($title === 'Выставка') {
+                DB::table('events')->where('id', $event->id)->update(['event_group_id' => $group]);
+            }
         }
         $this->createEvent($city->id, $community->id, 'Лекция в понедельник', Carbon::parse('2026-09-14 18:00', 'Europe/Moscow'), $museum->id);
 
         $this->artisan('events:hide-closed-days')->assertSuccessful();
 
         $this->assertSame(
-            ['Выставка во вторник', 'Лекция в понедельник'],
-            Event::query()->orderBy('title')->pluck('title')->all(),
+            ['Выставка 15.09', 'Выставка 16.09', 'Лекция в понедельник 14.09', 'Церемония без часа 21.09'],
+            Event::query()->orderBy('title')->orderBy('start_date')->get()
+                ->map(fn (Event $e) => $e->title.' '.$e->start_date->format('d.m'))->all(),
         );
         Carbon::setTestNow();
     }
