@@ -623,6 +623,7 @@ return [
             'stop_list' => false,
             'window_from_days' => 1,
             'window_days' => 6,
+            'this_week' => true,
             'named' => [4, 5],
             'auto' => false,
             'count' => false,

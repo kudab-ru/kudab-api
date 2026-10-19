@@ -2012,10 +2012,13 @@ final class BroadcastDigestComposer
 
         $skip = (int) ($theme['window_from_days'] ?? 0);
         if ($skip > 0) {
-            return [
-                $at->copy()->addDays($skip)->startOfDay(),
-                $at->copy()->addDays((int) ($theme['window_days'] ?? $skip))->endOfDay(),
-            ];
+            $until = $at->copy()->addDays((int) ($theme['window_days'] ?? $skip))->endOfDay();
+            // «На этой неделе» не заходит в следующую, на какой бы день недели её ни поставили
+            if (! empty($theme['this_week'])) {
+                $until = $until->min($at->copy()->endOfWeek(Carbon::SUNDAY));
+            }
+
+            return [$at->copy()->addDays($skip)->startOfDay(), $until];
         }
 
         return [null, $at->copy()->addDays(

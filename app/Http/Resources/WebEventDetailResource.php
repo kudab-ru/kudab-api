@@ -111,7 +111,7 @@ class WebEventDetailResource extends JsonResource
             'price_text' => $this->price_text,
             'price_url' => $this->price_url,
             'free' => ($this->price_status === 'free') || ($priceMin === 0),
-            'entry' => EventAccess::entry($this->access, $this->price_status),
+            'entry' => EventAccess::entry($this->access, $this->price_status, $priceMin === 0),
 
             // детальное для страницы
             'description' => $this->description,

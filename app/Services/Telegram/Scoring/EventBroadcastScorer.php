@@ -97,7 +97,7 @@ class EventBroadcastScorer
     private const TZ = 'Europe/Moscow';
 
     private const NO_SIGNALS = [
-        'slug' => null, 'parent' => null, 'repeats' => 1, 'ticketed' => false,
+        'slug' => null, 'parent' => null, 'repeats' => 1, 'run_until' => null, 'ticketed' => false,
         'rating' => 0, 'photo' => false, 'venue_kind' => null,
     ];
 
@@ -153,18 +153,20 @@ class EventBroadcastScorer
     /**
      * Что сказать человеку о событии.
      *
-     * @return array{kind: string|null, repeats: int, ticketed: bool, rating: int, multi_day: bool, access: string}
+     * @return array{kind: string|null, repeats: int, ticketed: bool, rating: int, multi_day: bool, run_until: string|null, access: string}
      */
     public function explain(object $e): array
     {
         $s = $this->signal($e);
+        $runEnd = $this->runEnd($e);
 
         return [
             'kind' => $s['parent'] ?? $s['slug'],
             'repeats' => (int) $s['repeats'],
             'ticketed' => (bool) $s['ticketed'],
             'rating' => (int) $s['rating'],
-            'multi_day' => self::isRun($e),
+            'multi_day' => $runEnd !== null,
+            'run_until' => $runEnd?->copy()->setTimezone('Europe/Moscow')->toDateString(),
             'access' => EventAccess::of($s, $e),
         ];
     }
@@ -269,7 +271,7 @@ class EventBroadcastScorer
 
         return [
             'kind' => self::KIND_WEIGHTS[$s['slug'] ?? ''] ?? self::KIND_WEIGHTS[$s['parent'] ?? ''] ?? 0,
-            'dates' => self::isRun($e) ? $this->lastChance($e, $at) : match (true) {
+            'dates' => ($runEnd = $this->runEnd($e)) !== null ? $this->lastChance($runEnd, $at) : match (true) {
                 $repeats <= 1 => self::W_ONE_OFF,
                 $repeats < self::WEEKLY_FROM => self::W_FEW_DATES,
                 $repeats < self::PERMANENT_FROM => self::W_WEEKLY,
@@ -317,22 +319,29 @@ class EventBroadcastScorer
         }
     }
 
-    /** Прокат — от недели: фестиваль на два-три дня редок, как разовое событие. */
-    private static function isRun(object $e): bool
+    /**
+     * Конец проката; null — не прокат. Прокат одной строкой — от недели: фестиваль на два-три дня редок,
+     * как разовое событие. Выставка, заведённая днём на каждую дату, — прокат до последнего своего дня.
+     */
+    private function runEnd(object $e): ?Carbon
     {
-        if (empty($e->start_time) || empty($e->end_time)) {
-            return false;
-        }
+        if (! empty($e->start_time) && ! empty($e->end_time)) {
+            $end = Carbon::parse($e->end_time);
 
-        return Carbon::parse($e->end_time)->gte(Carbon::parse($e->start_time)->addDays(PostTiming::RUN_MIN_DAYS));
+            return $end->gte(Carbon::parse($e->start_time)->addDays(PostTiming::RUN_MIN_DAYS)) ? $end : null;
+        }
+        $last = $this->signal($e)['run_until'] ?? null;
+
+        return empty($e->start_time) && ($e->time_precision ?? null) === 'date' && $last !== null
+            ? Carbon::parse($last, 'Europe/Moscow')->endOfDay()
+            : null;
     }
 
-    private function lastChance(object $e, ?Carbon $at): int
+    private function lastChance(Carbon $end, ?Carbon $at): int
     {
         if ($at === null) {
             return 0;
         }
-        $end = Carbon::parse($e->end_time);
 
         return $end->gte($at) && $end->lte($at->copy()->addDays(self::LAST_CHANCE_DAYS)) ? self::W_ONE_OFF : 0;
     }

@@ -98,6 +98,22 @@ class AdminVenuesTest extends TestCase
         $this->assertTrue($meta['manual_point'] ?? false, 'точка помечена как ручная');
     }
 
+    public function test_saving_the_form_marks_only_what_changed(): void
+    {
+        $this->actingAsSuperadmin();
+        $cityId = $this->seedCity();
+        $id = $this->seedVenue($cityId, 'Караоке-холл', 'karaoke');
+        DB::update('UPDATE venues SET location = ST_SetSRID(ST_Point(39.202908, 51.673517), 4326) WHERE id = ?', [$id]);
+
+        // окно площадки присылает и прежнюю точку
+        $this->patchJson("/api/admin/venues/{$id}", ['kind' => 'Клубы и бары', 'lat' => 51.673517, 'lon' => 39.202908, 'closed_weekdays' => [1]])
+            ->assertOk();
+
+        $meta = json_decode((string) DB::table('venues')->where('id', $id)->value('source_meta'), true) ?: [];
+        $this->assertTrue($meta['manual_kind'] ?? false);
+        $this->assertArrayNotHasKey('manual_point', $meta);
+    }
+
     public function test_moving_the_point_takes_pinned_events_along(): void
     {
         $this->actingAsSuperadmin();

@@ -267,6 +267,11 @@ class AdminVenuesController extends Controller
         $lat = isset($data['lat']) ? (float) $data['lat'] : null;
         $lon = isset($data['lon']) ? (float) $data['lon'] : null;
         unset($data['lat'], $data['lon']);
+        // окно площадки присылает и прежнюю точку: ручной она становится, только если её сдвинули
+        if ($lat !== null && $venue->latitude !== null && abs($lat - (float) $venue->latitude) <= 0.000001
+            && abs($lon - (float) $venue->longitude) <= 0.000001) {
+            $lat = $lon = null;
+        }
 
         if (array_key_exists('closed_weekdays', $data)) {
             $days = array_values(array_unique(array_map('intval', (array) $data['closed_weekdays'])));
@@ -275,19 +280,15 @@ class AdminVenuesController extends Controller
         }
 
         $update = $data + ['updated_at' => now()];
+        $meta = [];
 
-        // Метка «тип поставлен руками» — по образцу manual_point выше. Сегодня
-        // venues:infer-kind без --overwrite трогает только пустые и ручной тип не
-        // затрёт, но команда переживёт эту правку: пусть признак лежит заранее.
-        if (array_key_exists('kind', $data)) {
-            $update['source_meta'] = DB::raw(sprintf(
-                "COALESCE(source_meta, '{}'::jsonb) || '%s'::jsonb",
-                json_encode([
-                    'manual_kind' => true,
-                    'manual_kind_at' => now()->toIso8601String(),
-                    'manual_kind_by' => $request->user()?->id,
-                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-            ));
+        // тип поставлен руками, в том числе снят: перетипирование по имени (`parser:venues:infer-kind --overwrite`) его не трогает
+        if (array_key_exists('kind', $data) && ($data['kind'] ?: null) !== ($venue->kind ?: null)) {
+            $meta += [
+                'manual_kind' => true,
+                'manual_kind_at' => now()->toIso8601String(),
+                'manual_kind_by' => $request->user()?->id,
+            ];
         }
 
         if ($lat !== null && $lon !== null) {
@@ -295,13 +296,17 @@ class AdminVenuesController extends Controller
             // Метка «поставлено руками»: по ней парсер пропускает площадку в
             // venues:refine-point, venues:verify-point и перегеокоде. Без неё
             // ночная цепочка вернула бы прежнюю неверную точку.
+            $meta += [
+                'manual_point' => true,
+                'manual_point_at' => now()->toIso8601String(),
+                'manual_point_by' => $request->user()?->id,
+            ];
+        }
+
+        if ($meta !== []) {
             $update['source_meta'] = DB::raw(sprintf(
                 "COALESCE(source_meta, '{}'::jsonb) || '%s'::jsonb",
-                json_encode([
-                    'manual_point' => true,
-                    'manual_point_at' => now()->toIso8601String(),
-                    'manual_point_by' => $request->user()?->id,
-                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
             ));
         }
 

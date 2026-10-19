@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\DB;
 /**
  * Снять день выставки в выходной день её площадки (`venues.closed_weekdays`): выставка заведена днём на каждую
  * дату, и сайт показывал бы закрытый понедельник и писал «ежедневно». День выставки узнаём по серии, где есть
- * и другие дни без часа. Разовое событие остаётся, даже без часа: в выходной музея бывает церемония или лекция.
+ * день без часа, когда площадка открыта. Разовое событие без часа остаётся: в выходной бывает церемония.
  */
 class HideClosedDaySessionsCommand extends Command
 {
@@ -33,7 +33,8 @@ class HideClosedDaySessionsCommand extends Command
                 ->whereColumn('s.start_date', '<>', 'e.start_date')
                 ->whereNull('s.start_time')
                 ->where('s.time_precision', 'date')
-                ->whereNull('s.deleted_at'))
+                ->whereNull('s.deleted_at')
+                ->whereRaw('not (v.closed_weekdays @> jsonb_build_array(extract(isodow from s.start_date)::int))'))
             ->pluck('e.id');
 
         if ($ids->isNotEmpty()) {

@@ -48,13 +48,19 @@ final class EventAccess
 
     private const MUSEUM_CLASS_TITLE = '/мастер-класс|экскурси|квест|занятие|лекци/iu';
 
-    private const BROADCAST_TITLE = '/трансляци|лига чемпионов/iu';
+    private const BROADCAST_TITLE = '/трансляци|лиг\p{L}* чемпионов/iu';
 
     private const SIGNUP_WORDS = '/регистрац|запис/iu';
 
+    /** Бар — это недорого: концерт от этой цены берут заранее, как на большую сцену. */
+    private const STAGE_PRICE_FROM = 1500;
+
+    /** В описании «регистрация» бывает и про участников, поэтому там нужно явное требование. */
+    private const SIGNUP_REQUIRED = '/(нужна|необходима|обязательна|предварительная) (регистрац|запис)|(регистрац\p{L}*|запись) обязательн|по (предварительной )?(регистрац|запис)/iu';
+
     /**
      * @param  array{slug?: string|null, parent?: string|null, venue_kind?: string|null}  $signal
-     * @param  object  $e  событие или строка выборки: title, price_status, price_text
+     * @param  object  $e  событие или строка выборки: title, price_status, price_text, description (без неё запись ищется только в цене)
      */
     public static function of(array $signal, object $e): string
     {
@@ -63,7 +69,8 @@ final class EventAccess
         $venue = $signal['venue_kind'] ?? null;
         $title = trim((string) ($e->title ?? ''));
         $free = in_array($e->price_status ?? null, ['free', 'donation'], true);
-        $signup = preg_match(self::SIGNUP_WORDS, (string) ($e->price_text ?? '')) === 1;
+        $signup = preg_match(self::SIGNUP_WORDS, (string) ($e->price_text ?? '')) === 1
+            || preg_match(self::SIGNUP_REQUIRED, (string) ($e->description ?? '')) === 1;
 
         if ($venue === 'Квесты' || preg_match(self::BROADCAST_TITLE, $title) === 1) {
             return self::SKIP;
@@ -83,17 +90,28 @@ final class EventAccess
         if (in_array($kind, ['quiz-games', 'excursions'], true) || $slug === 'workshops' || preg_match(self::CLASS_TITLE, $title) === 1) {
             return self::SIGN;
         }
+        // платное в театре, зале или на арене и детское шоу без темы театра — это билет, а не запись
+        if (! $free && ! $signup && ($venue === 'Сцены' || $kind === 'kids')) {
+            return self::STAGE;
+        }
         if (in_array($kind, ['music', 'standup', 'parties', 'festival'], true)) {
+            if (! $free && (int) ($e->price_min ?? 0) >= self::STAGE_PRICE_FROM) {
+                return self::STAGE;
+            }
+
             return $free && $kind !== 'parties' && $venue !== 'Клубы и бары' ? self::WALK : self::BAR;
         }
 
         return $free && ! $signup ? self::WALK : self::SIGN;
     }
 
-    /** Подпись для сайта по категории и цене; null — подписывать нечем. Пара к applyEntry, правятся вместе. */
-    public static function entry(?string $access, ?string $priceStatus): ?string
+    /**
+     * Подпись для сайта по категории и цене; null — подписывать нечем. `$freeBadge` — признак «Бесплатно»
+     * у цены на той же странице, иначе рядом встали бы «Бесплатно» и «билет на месте». Пара к applyEntry.
+     */
+    public static function entry(?string $access, ?string $priceStatus, bool $freeBadge = false): ?string
     {
-        $free = in_array($priceStatus, ['free', 'donation'], true);
+        $free = $freeBadge || in_array($priceStatus, ['free', 'donation'], true);
 
         return match ($access) {
             self::WALK, self::OUT, self::BAR => $free ? 'come' : 'door',
@@ -104,18 +122,17 @@ final class EventAccess
     }
 
     /**
-     * Фильтр афиши по подписи, то же правило, что entry().
+     * Фильтр афиши по подписи, то же правило, что entry(); бесплатное — как у значка цены в карточке.
      *
      * @param  \Illuminate\Database\Query\Builder|\Illuminate\Database\Eloquent\Builder  $query
      */
     public static function applyEntry($query, string $entry, string $table = 'events'): void
     {
-        $free = fn ($q) => $q->whereIn($table.'.price_status', ['free', 'donation']);
+        $free = "(coalesce({$table}.price_status, '') in ('free', 'donation') or (coalesce({$table}.price_min, -1) = 0 and {$table}.price_max is null))";
 
         match ($entry) {
-            'come' => $query->whereIn($table.'.access', [self::WALK, self::OUT, self::BAR])->where($free),
-            'door' => $query->whereIn($table.'.access', [self::WALK, self::OUT, self::BAR])
-                ->whereRaw("coalesce({$table}.price_status, '') not in ('free', 'donation')"),
+            'come' => $query->whereIn($table.'.access', [self::WALK, self::OUT, self::BAR])->whereRaw($free),
+            'door' => $query->whereIn($table.'.access', [self::WALK, self::OUT, self::BAR])->whereRaw("not {$free}"),
             'signup' => $query->where($table.'.access', self::SIGN),
             'ahead' => $query->where($table.'.access', self::STAGE),
             default => $query->whereRaw('1 = 0'),

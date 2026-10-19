@@ -105,7 +105,11 @@ class WebEventResource extends JsonResource
                 || ((int) ($this->price_min ?? -1) === 0 && $this->price_max === null),
 
             // как попасть: come, door, signup, ahead; null — ещё не посчитано или подписывать нечем
-            'entry'          => EventAccess::entry($this->access, $this->price_status),
+            'entry'          => EventAccess::entry(
+                $this->access,
+                $this->price_status,
+                (int) ($this->price_min ?? -1) === 0 && $this->price_max === null,
+            ),
 
             'is_past' => (bool) ($this->getAttribute('__is_past') ?? false),
 

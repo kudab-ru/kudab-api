@@ -177,6 +177,44 @@ class VenuePortraitEnqueueTest extends TestCase
         Carbon::setTestNow();
     }
 
+    /** @return array<string, array{array<string, mixed>, int}> */
+    public static function idlePlaceRoles(): array
+    {
+        return [
+            'час не в сетке' => [['slots' => [10, 19]], 12],
+            'час «по возможности»' => [['slots' => [10, 19], 'optional_slots' => [19]], 19],
+        ];
+    }
+
+    /** @param  array<string, mixed>  $settings */
+    #[DataProvider('idlePlaceRoles')]
+    public function test_place_role_on_an_idle_hour_keeps_regular_portraits(array $settings, int $hour): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 16:05:00', 'UTC')); // вт 19:05 МСК
+
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $this->createVenue($city->id, 'Зелёный театр', 'zeleny-teatr', 'Открытая летняя сцена.');
+        $community = $this->createCommunity($city->id, 'Организатор');
+        for ($i = 0; $i < 4; $i++) {
+            $this->createEvent($city->id, $community->id, 'Событие '.$i, now()->addDays(3 + $i));
+        }
+
+        $chat = $this->createChannelChat($city->id, -3016);
+        $broadcast = $this->createBroadcast($chat->id, 'daily_10');
+        $broadcast->settings = array_merge($broadcast->settings, $settings);
+        $broadcast->slot_roles = [['weekday' => 3, 'hour' => $hour, 'role' => 'place']];
+        $broadcast->save();
+
+        app(TelegramChatBroadcastService::class)->fillFeedDays($broadcast->fresh('chat'), now());
+
+        $this->assertTrue(TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
+            ->exists(), 'портрет по сроку встал');
+
+        Carbon::setTestNow();
+    }
+
     #[DataProvider('pickModes')]
     public function test_due_portrait_goes_before_the_regular_posts(string $mode): void
     {

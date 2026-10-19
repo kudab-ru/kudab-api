@@ -20,7 +20,7 @@ final class EventInterestSignals
 
     /**
      * @param  list<int>  $eventIds
-     * @return array<int, array{slug: string|null, parent: string|null, repeats: int, ticketed: bool, rating: int, photo: bool, venue_kind: string|null}>
+     * @return array<int, array{slug: string|null, parent: string|null, repeats: int, run_until: string|null, ticketed: bool, rating: int, photo: bool, venue_kind: string|null}>
      */
     public function forEvents(array $eventIds): array
     {
@@ -39,6 +39,7 @@ final class EventInterestSignals
                 'slug' => null,
                 'parent' => null,
                 'repeats' => 1,
+                'run_until' => null,
                 'ticketed' => false,
                 'rating' => 0,
                 'photo' => false,
@@ -65,16 +66,26 @@ final class EventInterestSignals
         }
 
         if ($groups !== []) {
+            $today = now()->setTimezone('Europe/Moscow')->startOfDay();
             $dates = DB::table('events')
                 ->whereIn('event_group_id', array_values(array_unique($groups)))
                 ->where('status', 'active')
                 ->whereNull('deleted_at')
-                ->whereBetween('start_time', [now()->utc(), now()->addDays(self::REPEATS_DAYS)->utc()])
+                ->where(fn ($q) => $q->whereBetween('start_time', [now()->utc(), now()->addDays(self::REPEATS_DAYS)->utc()])
+                    ->orWhere(fn ($d) => $d->whereNull('start_time')->where('time_precision', 'date')
+                        ->whereBetween('start_date', [$today->toDateString(), $today->copy()->addDays(self::REPEATS_DAYS)->toDateString()])))
                 ->groupBy('event_group_id')
                 ->selectRaw('event_group_id, count(*) as n')
-                ->pluck('n', 'event_group_id');
+                ->selectRaw("count(*) filter (where start_time is null) as days, max(start_date) filter (where start_time is null) as last_day")
+                ->get()
+                ->keyBy('event_group_id');
             foreach ($groups as $id => $group) {
-                $out[$id]['repeats'] = max(1, (int) ($dates[$group] ?? 1));
+                $row = $dates[$group] ?? null;
+                $out[$id]['repeats'] = max(1, (int) ($row->n ?? 1));
+                // выставка, заведённая днём на каждую дату, — прокат до своего последнего дня
+                if ($row !== null && (int) $row->days > 1) {
+                    $out[$id]['run_until'] = substr((string) $row->last_day, 0, 10);
+                }
             }
         }
 

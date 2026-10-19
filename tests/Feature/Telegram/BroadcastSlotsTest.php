@@ -11,6 +11,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\TelegramUser;
 use App\Services\Telegram\PickReason;
+use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -1171,11 +1172,46 @@ class BroadcastSlotsTest extends TestCase
         $this->assertSame([$picked], $this->pickedTitles($broadcast->id));
     }
 
+    /** @return array<string, array{int, int}> */
+    public static function exhibitionRuns(): array
+    {
+        return [
+            'идёт ещё месяц' => [30, 0],
+            'последняя неделя' => [4, EventBroadcastScorer::W_ONE_OFF],
+        ];
+    }
+
+    #[DataProvider('exhibitionRuns')]
+    public function test_exhibition_days_without_hour_score_as_a_run(int $daysLeft, int $dates): void
+    {
+        [, $city] = $this->roleChannel('walk');
+        $days = [];
+        for ($i = 0; $i < $daysLeft; $i++) {
+            $day = Carbon::parse('2026-09-15', 'Europe/Moscow')->addDays($i);
+            $days[] = $this->eventAt($city->id, 'Выставка «Палех»', $day->copy()->utc(), rich: true);
+            end($days)->forceFill(['start_time' => null, 'start_date' => $day->toDateString(), 'time_precision' => 'date'])->save();
+        }
+        $group = DB::table('event_groups')->insertGetId([
+            'community_id' => $days[0]->community_id, 'city_id' => $city->id, 'group_key' => 'eg:test:palekh',
+            'title_norm' => 'выставка палех', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('events')->whereIn('id', array_map(fn (Event $e) => $e->id, $days))->update(['event_group_id' => $group]);
+
+        $scorer = app(EventBroadcastScorer::class);
+        $today = $days[0]->fresh();
+
+        $this->assertTrue($scorer->explain($today)['multi_day'], 'не «разовое»');
+        $this->assertSame($dates, $scorer->breakdown($today, Carbon::parse('2026-09-15 10:00', 'Europe/Moscow'))['dates']);
+    }
+
     public function test_role_without_a_fitting_event_takes_the_best_of_the_rest(): void
     {
         [$broadcast, $city] = $this->roleChannel('bar');
         $show = $this->eventAt($city->id, 'Три сестры', Carbon::parse('2026-09-18 19:00', 'Europe/Moscow')->utc(), rich: true);
         $this->tag($show->id, $this->interestNamed('theatre'));
+        // трансляция того же спектакля сегодня свежее и обошла бы его, но в канал она не годится
+        $broadcastShow = $this->eventAt($city->id, 'Трансляция спектакля «Три сестры»', Carbon::parse('2026-09-15 19:00', 'Europe/Moscow')->utc(), rich: true);
+        $this->tag($broadcastShow->id, $this->interestNamed('theatre'));
 
         $this->service()->fillFeedDays($broadcast->fresh(), now());
 

@@ -77,8 +77,11 @@ final class BroadcastEventPicker
         if ($search) {
             $this->applySearch($q, (string) $query);
         } else {
-            PostTiming::applyFits($q, $at, 0, strictRuns: true);
-            $q->where('events.start_time', '<', $until)->orderBy('events.start_time')->orderBy('events.id');
+            PostTiming::applyFits($q, $at, 0, strictRuns: true, wholeDay: true);
+            // день выставки без часа — только за день слота, иначе одна выставка встала бы строкой на каждый день
+            $q->where(fn ($w) => $w->where('events.start_time', '<', $until)
+                ->orWhere(fn ($d) => $d->whereNull('events.start_time')->where('events.start_date', $at->copy()->setTimezone(self::TZ)->toDateString())))
+                ->orderBy('events.start_time')->orderBy('events.id');
         }
         $events = $this->load($q);
 
@@ -234,7 +237,8 @@ final class BroadcastEventPicker
         $kind = $facts['kind'];
         $repeats = $facts['repeats'];
         $start = EventStart::of($e)?->setTimezone(self::TZ);
-        $runsUntil = PostTiming::runningUntil($e, $at)?->setTimezone(self::TZ);
+        $runsUntil = PostTiming::runningUntil($e, $at)?->setTimezone(self::TZ)
+            ?? ($facts['run_until'] !== null ? Carbon::parse($facts['run_until'], self::TZ) : null);
         $images = $e->getAttribute('images');
 
         return [

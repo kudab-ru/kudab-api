@@ -1155,13 +1155,14 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->retag($quiz, 'quiz-games');
         $this->retag($this->event('Выставка', 2, free: true), 'exhibitions');
         $this->event('Спектакль сегодня', 0, free: false, priceMin: 1500, hour: 21);
+        $this->event('Спектакль в следующий понедельник', 6, free: false, priceMin: 1500);
         $this->event('Спектакль через неделю', 8, free: false, priceMin: 1500);
 
         $composer = app(BroadcastDigestComposer::class);
         $theme = collect(config('broadcast_digest.themes'))->firstWhere('slug', 'na-nedele');
         $out = $composer->compose($this->channel(), Carbon::now(), null, 'na-nedele');
 
-        $this->assertSame(count($taken), $composer->poolSize($this->channel(), $theme, Carbon::now())['events'], 'без выставки, сегодняшнего и дальше недели');
+        $this->assertSame(count($taken), $composer->poolSize($this->channel(), $theme, Carbon::now())['events'], 'без выставки, сегодняшнего и следующей недели');
         $this->assertSame([], array_diff($out['event_ids'], $taken));
     }
 

@@ -12,6 +12,7 @@ use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\Venue;
+use App\Services\Telegram\Scoring\EventAccess;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Support\BroadcastSafety;
 use App\Support\EventStart;
@@ -1649,8 +1650,8 @@ class TelegramChatBroadcastService
             return $fitting;
         }
 
-        // для роли часа ничего не нашлось: час не пустеет, берётся лучшее из остального
-        return array_map(fn (array $c) => $c + ['role_missed' => $role], $this->rankCandidates(...$args));
+        // для роли часа ничего не нашлось: час не пустеет, берётся лучшее из остального, кроме «не для канала»
+        return array_map(fn (array $c) => $c + ['role_missed' => $role], $this->rankCandidates(...$args, dropSkip: true));
     }
 
     /**
@@ -1668,6 +1669,7 @@ class TelegramChatBroadcastService
         int $limit = 4,
         bool $optional = false,
         ?string $role = null,
+        bool $dropSkip = false,
     ): array {
         $query = $this->channelCandidates($chat, $broadcastId);
 
@@ -1675,11 +1677,12 @@ class TelegramChatBroadcastService
             $query->whereNotIn('id', array_values(array_unique(array_map('intval', $excludeEventIds))));
         }
 
-        if ($optional && $notBefore !== null) {
+        // у часа «по возможности» своё окно, но роль, поставленная на него, важнее
+        if ($role !== null && $notBefore !== null) {
+            EventStart::notAfter($query, SlotRole::lastDay($role, $notBefore), 'events');
+        } elseif ($optional && $notBefore !== null) {
             [$from, $until] = $this->optionalWindow($notBefore);
             $query->whereBetween('start_time', [$from, $until]);
-        } elseif ($role !== null && $notBefore !== null) {
-            EventStart::notAfter($query, SlotRole::lastDay($role, $notBefore), 'events');
         } else {
             // горизонт от дня слота: от «сейчас» окно у дальних слотов схлопывается
             $query->where(
@@ -1767,6 +1770,9 @@ class TelegramChatBroadcastService
                     continue;
                 }
                 if ($role !== null && ! SlotRole::fits($role, $this->scorer->access($e), $e, $at, (array) ($e->venue?->closed_weekdays ?? []))) {
+                    continue;
+                }
+                if ($dropSkip && $this->scorer->access($e) === EventAccess::SKIP) {
                     continue;
                 }
                 $ranked[] = [
@@ -2457,6 +2463,7 @@ class TelegramChatBroadcastService
                         $taken[$slotKey] = null;
                         $summary['filled']++;
                         $summary['picks'][] = $this->pickRow($publishAt, $portrait, 'portrait', 'portrait_role');
+                        $prevTheme = null;
 
                         continue;
                     }

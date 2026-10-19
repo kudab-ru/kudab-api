@@ -415,10 +415,20 @@ class TelegramChatBroadcast extends Model
         $this->settings = $settings;
     }
 
-    /** Портреты встают в часы с ролью «место», а не раз в `portrait_every_days`. */
+    /**
+     * Портреты встают в часы с ролью «место», а не раз в `portrait_every_days`. Роль на часе вне сетки
+     * или «по возможности» не в счёт: портрет там не встанет, а по сроку они бы замолчали.
+     */
     public function hasPlaceRole(): bool
     {
-        return in_array(SlotRole::PLACE, array_column($this->slot_roles, 'role'), true);
+        $hours = $this->requiredSlotHours();
+        foreach ($this->slot_roles as $r) {
+            if ($r['role'] === SlotRole::PLACE && in_array($r['hour'], $hours, true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** Роль часа, в который встаёт пост; null — у часа роли нет. */

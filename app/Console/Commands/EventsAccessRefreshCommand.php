@@ -29,7 +29,7 @@ class EventsAccessRefreshCommand extends Command
             ->whereNull('deleted_at')
             ->where(fn ($q) => $q->where(fn ($w) => EventStart::notBefore($w, $from, 'events'))
                 ->orWhere('end_time', '>=', now()->utc()))
-            ->select(['id', 'title', 'price_status', 'price_text', 'access'])
+            ->select(['id', 'title', 'price_status', 'price_min', 'price_text', 'description', 'access'])
             ->chunkById(500, function ($rows) use ($signals, &$changed) {
                 $byId = $signals->forEvents($rows->pluck('id')->map(fn ($id) => (int) $id)->all());
                 foreach ($rows as $row) {

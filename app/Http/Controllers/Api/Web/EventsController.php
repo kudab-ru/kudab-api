@@ -6,6 +6,7 @@ use Illuminate\Support\Arr;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\WebEventResource;
 use App\Models\City;
+use App\Models\Event;
 use App\Services\EventService;
 use App\Services\EventSurvivor;
 use App\Services\Telegram\Scoring\EventAccess;
@@ -428,7 +429,7 @@ class EventsController extends Controller
             $event = $this->service->getWeb($id);
         } catch (ModelNotFoundException $missing) {
             // ссылки на склеенное событие живут в постах канала и закладках: говорим, куда оно переехало
-            $survivor = $survivors->find($id)[0] ?? null;
+            $survivor = $survivors->find($id)[0] ?? $this->sameSeriesDay($id);
             if ($survivor !== null && $this->visibleOnWeb((int) $survivor->id)) {
                 return response()->json(['message' => 'Событие переехало.', 'moved_to' => (int) $survivor->id], 404);
             }
@@ -439,6 +440,23 @@ class EventsController extends Controller
         return response()->json([
             'data' => (new WebEventDetailResource($event))->toArray(request()),
         ]);
+    }
+
+    /** Снятый день серии, например выходной музея, ведёт на ближайший живой день той же серии, сначала вперёд. */
+    private function sameSeriesDay(int $id): ?Event
+    {
+        $dead = Event::onlyTrashed()->find($id);
+        if ($dead?->event_group_id === null || $dead->start_date === null) {
+            return null;
+        }
+        $day = $dead->start_date->toDateString();
+
+        return Event::query()
+            ->where('event_group_id', $dead->event_group_id)
+            ->orderByRaw('start_date < ?::date', [$day])
+            ->orderByRaw('abs(start_date - ?::date)', [$day])
+            ->orderBy('id')
+            ->first();
     }
 
     private function visibleOnWeb(int $id): bool

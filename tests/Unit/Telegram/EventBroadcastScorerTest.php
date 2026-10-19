@@ -70,6 +70,15 @@ class EventBroadcastScorerTest extends TestCase
             'бесплатная лекция' => [['slug' => 'education'], ['price_status' => 'free'], EventAccess::WALK],
             'бесплатная лекция по записи' => [['slug' => 'education'], ['price_status' => 'free', 'price_text' => 'по предварительной регистрации'], EventAccess::SIGN],
             'квиз в баре' => [['slug' => 'quiz-games', 'venue_kind' => 'Клубы и бары'], [], EventAccess::SIGN],
+            'платное без темы в театре' => [['venue_kind' => 'Сцены'], ['title' => 'Волшебное кольцо', 'price_status' => 'range'], EventAccess::STAGE],
+            'детское шоу за деньги' => [['slug' => 'kids'], ['title' => 'Новогодняя история игрушек', 'price_status' => 'paid'], EventAccess::STAGE],
+            'матчи Лиги чемпионов' => [['slug' => 'sport'], ['title' => 'Матчи Лиги чемпионов'], EventAccess::SKIP],
+            'концерт дороже бара' => [['slug' => 'rock', 'parent' => 'music'], ['price_status' => 'range', 'price_min' => 2800], EventAccess::STAGE],
+            'регистрация в описании' => [
+                ['slug' => 'exhibitions'],
+                ['price_status' => 'external', 'description' => 'Вход свободный, но нужна регистрация по ссылке'],
+                EventAccess::SIGN,
+            ],
         ];
     }
 

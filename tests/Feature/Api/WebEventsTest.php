@@ -514,27 +514,37 @@ class WebEventsTest extends TestCase
         $museum = $this->createVenue($city->id, 'Музей', 'museum');
         $museum->forceFill(['closed_weekdays' => [1]])->save();
 
-        $group = DB::table('event_groups')->insertGetId([
-            'community_id' => $community->id, 'city_id' => $city->id, 'group_key' => 'eg:test:exhibition',
-            'title_norm' => 'выставка', 'created_at' => now(), 'updated_at' => now(),
+        $day = function (string $title, string $date, ?int $group) use ($city, $community, $museum): int {
+            $event = $this->createEvent($city->id, $community->id, $title, Carbon::parse($date, 'Europe/Moscow'), $museum->id);
+            $event->forceFill(['start_time' => null, 'start_date' => $date, 'time_precision' => 'date', 'event_group_id' => $group])->save();
+
+            return $event->id;
+        };
+        $series = fn (string $key) => DB::table('event_groups')->insertGetId([
+            'community_id' => $community->id, 'city_id' => $city->id, 'group_key' => 'eg:test:'.$key,
+            'title_norm' => $key, 'created_at' => now(), 'updated_at' => now(),
         ]);
-        $days = ['2026-09-14' => 'Выставка', '2026-09-15' => 'Выставка', '2026-09-16' => 'Выставка', '2026-09-21' => 'Церемония без часа'];
-        foreach ($days as $day => $title) {
-            $event = $this->createEvent($city->id, $community->id, $title, Carbon::parse($day, 'Europe/Moscow'), $museum->id);
-            $event->forceFill(['start_time' => null, 'start_date' => $day, 'time_precision' => 'date'])->save();
-            if ($title === 'Выставка') {
-                DB::table('events')->where('id', $event->id)->update(['event_group_id' => $group]);
-            }
-        }
+        $exhibition = $series('выставка');
+        $monday = $day('Выставка', '2026-09-14', $exhibition);
+        $tuesday = $day('Выставка', '2026-09-15', $exhibition);
+        $day('Выставка', '2026-09-16', $exhibition);
+        $club = $series('клуб');
+        $day('Клуб по понедельникам', '2026-09-14', $club);
+        $day('Клуб по понедельникам', '2026-09-21', $club);
+        $day('Церемония без часа', '2026-09-21', null);
         $this->createEvent($city->id, $community->id, 'Лекция в понедельник', Carbon::parse('2026-09-14 18:00', 'Europe/Moscow'), $museum->id);
 
         $this->artisan('events:hide-closed-days')->assertSuccessful();
 
         $this->assertSame(
-            ['Выставка 15.09', 'Выставка 16.09', 'Лекция в понедельник 14.09', 'Церемония без часа 21.09'],
+            [
+                'Выставка 15.09', 'Выставка 16.09', 'Клуб по понедельникам 14.09', 'Клуб по понедельникам 21.09',
+                'Лекция в понедельник 14.09', 'Церемония без часа 21.09',
+            ],
             Event::query()->orderBy('title')->orderBy('start_date')->get()
                 ->map(fn (Event $e) => $e->title.' '.$e->start_date->format('d.m'))->all(),
         );
+        $this->getJson("/api/web/events/{$monday}")->assertNotFound()->assertJsonPath('moved_to', $tuesday);
         Carbon::setTestNow();
     }
 
