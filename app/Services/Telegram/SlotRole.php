@@ -23,11 +23,15 @@ final class SlotRole
 
     public const BAR = 'bar';
 
+    /** Портрет площадки вместо события; площадки нет — час заполнит «зайти сегодня». */
+    public const PLACE = 'place';
+
     public const LABELS = [
         self::WALK => 'зайти сегодня',
         self::SIGN => 'записаться',
         self::STAGE => 'большая сцена заранее',
         self::BAR => 'бар или клуб',
+        self::PLACE => 'место',
     ];
 
     /** Роль => категории «как попасть» и срок в днях от дня поста по Москве: от и до. */

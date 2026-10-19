@@ -116,7 +116,7 @@ class TelegramVenuePortraitService
 
     private function enqueueLockedPortrait(TelegramChatBroadcast $broadcast, Carbon $now, bool $dryRun): string
     {
-        if (! $this->venuePortraitDue($broadcast, $now)) {
+        if ($broadcast->hasPlaceRole() || ! $this->venuePortraitDue($broadcast, $now)) {
             return self::PORTRAIT_NOT_DUE;
         }
 
@@ -155,6 +155,43 @@ class TelegramVenuePortraitService
             return 'skipped_no_slot';
         }
 
+        return $this->placePortrait($broadcast, $chat, $venue, $publishAt, $now, 'portrait_due', $dryRun);
+    }
+
+    /**
+     * Портрет в час с ролью «место», мимо срока `portrait_every_days`: день и час задала сетка.
+     * null — площадки для портрета нет, тогда час заполнит событие.
+     */
+    public function enqueuePortraitAt(TelegramChatBroadcast $broadcast, Carbon $publishAt, Carbon $now): ?TelegramChatBroadcastItem
+    {
+        $chat = $broadcast->chat;
+        if (! $chat instanceof TelegramChat || ! $chat->city_id || ! $chat->telegram_chat_id) {
+            return null;
+        }
+
+        $venue = $this->pickNextVenueForChat((int) $chat->city_id, (int) $broadcast->id, $now);
+        if ($venue === null || $this->placePortrait($broadcast, $chat, $venue, $publishAt, $now, 'portrait_role', false) !== self::PORTRAIT_ENQUEUED) {
+            return null;
+        }
+
+        return TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('venue_id', $venue->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_VENUE)
+            ->latest('id')
+            ->first();
+    }
+
+    /** @return string PORTRAIT_ENQUEUED или skipped_no_reviewer */
+    private function placePortrait(
+        TelegramChatBroadcast $broadcast,
+        TelegramChat $chat,
+        Venue $venue,
+        Carbon $publishAt,
+        Carbon $now,
+        string $rule,
+        bool $dryRun,
+    ): string {
         $caption = $this->buildVenueCaption($venue, $publishAt);
         $photoUrl = $this->venueCoverUrl((int) $venue->id);
 
@@ -173,14 +210,14 @@ class TelegramVenuePortraitService
                     'review_reviewer_telegram_id' => (int) $reviewerTelegramId,
                     'review_deadline_at' => $deadline,
                     'publish_at' => $publishAt->copy()->utc(),
-                    'pick_meta' => PickReason::meta(PickReason::BY_PORTRAIT, 'portrait_due'),
+                    'pick_meta' => PickReason::meta(PickReason::BY_PORTRAIT, $rule),
                 ], captionAt: $publishAt);
             }
         } elseif (! $dryRun) {
             $this->persist($broadcast->id, $venue->id, $caption, $photoUrl, [
                 'status' => TelegramChatBroadcastItem::STATUS_PENDING,
                 'publish_at' => $publishAt->copy()->utc(),
-                'pick_meta' => PickReason::meta(PickReason::BY_PORTRAIT, 'portrait_due'),
+                'pick_meta' => PickReason::meta(PickReason::BY_PORTRAIT, $rule),
             ], captionAt: $publishAt);
         }
 

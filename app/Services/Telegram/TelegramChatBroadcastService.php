@@ -1638,6 +1638,8 @@ class TelegramChatBroadcastService
         ?string $role = null,
     ): array {
         $args = compact('chat', 'broadcastId', 'excludeEventIds', 'notBefore', 'repeatCap', 'avoidInterestId', 'replacedItemId', 'limit', 'optional');
+        // событие в час «место» встаёт, когда площадки для портрета нет
+        $role = $role === SlotRole::PLACE ? SlotRole::WALK : $role;
         if ($role === null || $notBefore === null) {
             return $this->rankCandidates(...$args);
         }
@@ -2448,6 +2450,19 @@ class TelegramChatBroadcastService
                     continue;
                 }
 
+                $role = $broadcast->roleAt($publishAt);
+                if ($role === SlotRole::PLACE) {
+                    $portrait = $this->venuePortraitService->enqueuePortraitAt($broadcast, $publishAt, $now);
+                    if ($portrait !== null) {
+                        $taken[$slotKey] = null;
+                        $summary['filled']++;
+                        $summary['picks'][] = $this->pickRow($publishAt, $portrait, 'portrait', 'portrait_role');
+
+                        continue;
+                    }
+                    $role = SlotRole::WALK;
+                }
+
                 // Предел ленты канала (`feed_limit`), а не нехватка кандидатов (то — `no_candidate`). В `eve` не действует:
                 // автопостов там не больше чем на сутки, а предел считает и ручные посты на дальние дни.
                 if (! $eve && $openEvents >= $broadcast->feed_limit) {
@@ -2474,7 +2489,7 @@ class TelegramChatBroadcastService
                     $this->venueRepeatCap($broadcast),
                     $prevTheme,
                     limit: 1,
-                    role: $broadcast->roleAt($publishAt),
+                    role: $role,
                 )[0] ?? null;
 
                 if ($best === null) {

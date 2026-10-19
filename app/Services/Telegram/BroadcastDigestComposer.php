@@ -722,7 +722,7 @@ final class BroadcastDigestComposer
         // конфиге («fre» вместо «free») тихо превращала бы рубрику про деньги
         // в подборку всего подряд, и заметить это можно было бы только в
         // канале.
-        if (! in_array($pick, ['interest', 'free', 'price_max', 'tod', 'all', 'ahead', 'words', 'views'], true)) {
+        if (! in_array($pick, ['interest', 'free', 'price_max', 'tod', 'all', 'ahead', 'words', 'views', 'access'], true)) {
             Log::warning('broadcast.digest.unknown_pick', [
                 'theme' => $theme['slug'] ?? null, 'pick' => $pick,
             ]);
@@ -835,6 +835,10 @@ final class BroadcastDigestComposer
         }
         if ($pick === 'views') {
             $rows = $this->withViews($rows, $theme, $publishAt);
+        }
+        if ($pick === 'access') {
+            $this->scorer->prepare($rows);
+            $rows = $rows->filter(fn ($r) => in_array($this->scorer->access($r), (array) ($theme['access'] ?? []), true))->values();
         }
 
         // Жанровые отсечки — ТОЛЬКО тематическим рубрикам. Они спрашивают «не

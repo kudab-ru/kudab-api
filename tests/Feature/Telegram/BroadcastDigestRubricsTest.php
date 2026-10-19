@@ -1144,6 +1144,28 @@ class BroadcastDigestRubricsTest extends TestCase
     }
 
     #[Test]
+    public function the_week_rubric_takes_tickets_and_sign_ups_from_tomorrow_on(): void
+    {
+        $this->onlyRubric('na-nedele');
+        $taken = [];
+        foreach ([1, 2, 3, 4, 5] as $day) {
+            $taken[] = $this->event('Спектакль '.$day, $day, free: false, priceMin: 1500);
+        }
+        $taken[] = $quiz = $this->event('Квиз в баре', 2, free: false, priceMin: 500);
+        $this->retag($quiz, 'quiz-games');
+        $this->retag($this->event('Выставка', 2, free: true), 'exhibitions');
+        $this->event('Спектакль сегодня', 0, free: false, priceMin: 1500, hour: 21);
+        $this->event('Спектакль через неделю', 8, free: false, priceMin: 1500);
+
+        $composer = app(BroadcastDigestComposer::class);
+        $theme = collect(config('broadcast_digest.themes'))->firstWhere('slug', 'na-nedele');
+        $out = $composer->compose($this->channel(), Carbon::now(), null, 'na-nedele');
+
+        $this->assertSame(count($taken), $composer->poolSize($this->channel(), $theme, Carbon::now())['events'], 'без выставки, сегодняшнего и дальше недели');
+        $this->assertSame([], array_diff($out['event_ids'], $taken));
+    }
+
+    #[Test]
     public function the_tickets_rubric_prefers_the_dearer_ticket_among_equals(): void
     {
         $this->onlyRubric('bilety-zaranee');

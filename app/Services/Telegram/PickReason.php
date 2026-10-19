@@ -104,7 +104,7 @@ final class PickReason
             self::BY_AUTO => self::auto($meta),
             self::BY_WAITING => self::waiting($meta),
             self::BY_HAND => self::hand($meta),
-            self::BY_PORTRAIT => 'Подошёл срок портрета площадки',
+            self::BY_PORTRAIT => ($meta['rule'] ?? null) === 'portrait_role' ? 'Час «место» в сетке' : 'Подошёл срок портрета площадки',
             self::BY_DIGEST => 'Подборка по расписанию канала',
             default => 'Выбрано до перехода',
         };
