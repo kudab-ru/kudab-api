@@ -8,6 +8,7 @@ use App\Http\Resources\WebEventResource;
 use App\Models\City;
 use App\Services\EventService;
 use App\Services\EventSurvivor;
+use App\Services\Telegram\Scoring\EventAccess;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use App\Support\KeyboardLayout;
 use App\Support\SearchLog;
@@ -71,6 +72,7 @@ class EventsController extends Controller
             'price_min'    => ['sometimes','integer','min:0'],
             'price_max'    => ['sometimes','integer','min:0'],
             'tod'          => ['sometimes', Rule::in(['morning','day','evening','night'])],
+            'entry'        => ['sometimes', Rule::in(EventAccess::ENTRIES)],
 
             'sort'         => ['sometimes', Rule::in(['start_at','start_date','start_time','created_at','price_min','top'])],
             'dir'          => ['sometimes', Rule::in(['asc','desc'])],
@@ -271,6 +273,7 @@ class EventsController extends Controller
             'price_min'    => ['sometimes','integer','min:0'],
             'price_max'    => ['sometimes','integer','min:0'],
             'tod'          => ['sometimes', Rule::in(['morning','day','evening','night'])],
+            'entry'        => ['sometimes', Rule::in(EventAccess::ENTRIES)],
         ]);
         $validator->after(fn ($v) => $this->rejectMixedInterests($request, $v));
         $v = $validator->validate();
@@ -474,6 +477,7 @@ class EventsController extends Controller
             'price_min'    => ['sometimes', 'integer', 'min:0'],
             'price_max'    => ['sometimes', 'integer', 'min:0'],
             'tod'          => ['sometimes', Rule::in(['morning', 'day', 'evening', 'night'])],
+            'entry'        => ['sometimes', Rule::in(EventAccess::ENTRIES)],
             'exclude_ids'  => ['sometimes', 'array', 'max:50'],
             'exclude_ids.*' => ['integer'],
             'seen_ids'     => ['sometimes', 'array', 'max:50'],

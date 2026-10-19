@@ -7,6 +7,7 @@ use App\Models\Event;
 use App\Models\Interest;
 use App\Models\Venue;
 use App\Services\Recommendations\NextEventsPicker;
+use App\Services\Telegram\Scoring\EventAccess;
 use App\Support\SearchMatch;
 use App\Support\VenueKindLabel;
 use Carbon\CarbonImmutable;
@@ -657,6 +658,10 @@ class EventRepository
                 ->orderBy('events.id', 'asc');
         }
 
+        if (! empty($filters['entry'])) {
+            EventAccess::applyEntry($q, (string) $filters['entry']);
+        }
+
         if (! empty($filters['tod'])) {
             $tod = (string) $filters['tod'];
             $q->whereNotNull('events.start_time');
@@ -1151,6 +1156,10 @@ class EventRepository
             });
         } elseif ($priced) {
             $q->where($knownPrice);
+        }
+
+        if (! empty($filters['entry'])) {
+            EventAccess::applyEntry($q, (string) $filters['entry']);
         }
 
         if (! empty($filters['tod'])) {

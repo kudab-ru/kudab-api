@@ -106,3 +106,16 @@ Schedule::command('afisha:now')
     ->everyThirtyMinutes()
     ->onOneServer()
     ->withoutOverlapping(10);
+
+// «Как попасть» у будущих событий: подпись на сайте и фильтр афиши. Новые события ждут не дольше часа.
+Schedule::command('events:access:refresh')
+    ->hourlyAt(25)
+    ->onOneServer()
+    ->withoutOverlapping(30);
+
+// Сеансы выставок в выходной день музея. Ночью идёт раньше разбора серий в парсере (04:14),
+// иначе «ежедневно» на сайте посчиталось бы по закрытым дням.
+Schedule::command('events:hide-closed-days')
+    ->hourlyAt(5)
+    ->onOneServer()
+    ->withoutOverlapping(10);

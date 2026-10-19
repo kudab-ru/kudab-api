@@ -3,6 +3,7 @@
 namespace App\Http\Resources;
 
 use App\Http\Resources\Concerns\BuildsEventGroup;
+use App\Services\Telegram\Scoring\EventAccess;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -110,6 +111,7 @@ class WebEventDetailResource extends JsonResource
             'price_text' => $this->price_text,
             'price_url' => $this->price_url,
             'free' => ($this->price_status === 'free') || ($priceMin === 0),
+            'entry' => EventAccess::entry($this->access, $this->price_status),
 
             // детальное для страницы
             'description' => $this->description,

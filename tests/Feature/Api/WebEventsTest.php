@@ -466,6 +466,69 @@ class WebEventsTest extends TestCase
 
     /* ===================== interests filter (Этап 2) ===================== */
 
+    /** @return array<string, array{string, list<string>}> */
+    public static function entryCases(): array
+    {
+        return [
+            'можно просто прийти' => ['come', ['Выставка даром', 'Концерт в баре даром']],
+            'билет на месте' => ['door', ['Выставка за деньги']],
+            'нужно записаться' => ['signup', ['Квиз']],
+            'лучше брать билеты заранее' => ['ahead', ['Спектакль']],
+        ];
+    }
+
+    /** @param  list<string>  $titles */
+    #[DataProvider('entryCases')]
+    public function test_feed_filters_by_how_to_get_in(string $entry, array $titles): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Организатор');
+        $bar = $this->createVenue($city->id, 'Бар', 'bar');
+        $bar->forceFill(['kind' => 'Клубы и бары'])->save();
+
+        foreach ([
+            ['Выставка даром', 'exhibitions', 'free', null],
+            ['Выставка за деньги', 'exhibitions', 'range', null],
+            ['Квиз', 'quiz-games', 'range', null],
+            ['Спектакль', 'theatre', 'range', null],
+            ['Концерт в баре даром', 'music', 'free', $bar->id],
+        ] as $i => [$title, $topic, $price, $venueId]) {
+            $event = $this->createEvent($city->id, $community->id, $title, now()->addDays(1 + $i), $venueId);
+            $event->forceFill(['price_status' => $price, 'price_min' => $price === 'free' ? 0 : 500])->save();
+            $interest = Interest::query()->where('slug', $topic)->first() ?? $this->createInterest($topic, $topic);
+            DB::table('event_interest')->insert(['event_id' => $event->id, 'interest_id' => $interest->id, 'rank' => 0, 'created_at' => now(), 'updated_at' => now()]);
+        }
+        $this->artisan('events:access:refresh')->assertSuccessful();
+
+        $found = collect($this->getJson('/api/web/events?city=voronezh&entry='.$entry)->assertOk()->json('data'))
+            ->pluck('title')->sort()->values()->all();
+
+        $this->assertSame($titles, $found);
+    }
+
+    public function test_exhibition_day_is_dropped_when_its_museum_is_closed(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-13 12:00', 'Europe/Moscow'));
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Музей');
+        $museum = $this->createVenue($city->id, 'Музей', 'museum');
+        $museum->forceFill(['closed_weekdays' => [1]])->save();
+
+        foreach (['2026-09-14' => 'Выставка в понедельник', '2026-09-15' => 'Выставка во вторник'] as $day => $title) {
+            $session = $this->createEvent($city->id, $community->id, $title, Carbon::parse($day, 'Europe/Moscow'), $museum->id);
+            $session->forceFill(['start_time' => null, 'start_date' => $day, 'time_precision' => 'date'])->save();
+        }
+        $this->createEvent($city->id, $community->id, 'Лекция в понедельник', Carbon::parse('2026-09-14 18:00', 'Europe/Moscow'), $museum->id);
+
+        $this->artisan('events:hide-closed-days')->assertSuccessful();
+
+        $this->assertSame(
+            ['Выставка во вторник', 'Лекция в понедельник'],
+            Event::query()->orderBy('title')->pluck('title')->all(),
+        );
+        Carbon::setTestNow();
+    }
+
     public function test_filter_by_leaf_slug_returns_only_tagged_events(): void
     {
         $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);

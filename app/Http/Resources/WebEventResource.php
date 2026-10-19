@@ -3,6 +3,7 @@
 namespace App\Http\Resources;
 
 use App\Http\Resources\Concerns\BuildsEventGroup;
+use App\Services\Telegram\Scoring\EventAccess;
 use Carbon\CarbonInterface;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -102,6 +103,9 @@ class WebEventResource extends JsonResource
 
             'free'           => ($this->price_status === 'free')
                 || ((int) ($this->price_min ?? -1) === 0 && $this->price_max === null),
+
+            // как попасть: come, door, signup, ahead; null — ещё не посчитано или подписывать нечем
+            'entry'          => EventAccess::entry($this->access, $this->price_status),
 
             'is_past' => (bool) ($this->getAttribute('__is_past') ?? false),
 

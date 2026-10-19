@@ -37,6 +37,9 @@ final class EventAccess
         self::SKIP => 'не для канала',
     ];
 
+    /** Подпись на сайте: можно просто прийти, билет на месте, нужно записаться, лучше брать билеты заранее. */
+    public const ENTRIES = ['come', 'door', 'signup', 'ahead'];
+
     /** Спектакль с чужой темой узнаётся по названию: «Спектакль „Имя“» размечен вечеринкой. */
     private const STAGE_TITLE = '/^(спектакль|моноспектакль|мюзикл|балет|опера|оперетта)(?!\p{L})/iu';
 
@@ -85,5 +88,37 @@ final class EventAccess
         }
 
         return $free && ! $signup ? self::WALK : self::SIGN;
+    }
+
+    /** Подпись для сайта по категории и цене; null — подписывать нечем. Пара к applyEntry, правятся вместе. */
+    public static function entry(?string $access, ?string $priceStatus): ?string
+    {
+        $free = in_array($priceStatus, ['free', 'donation'], true);
+
+        return match ($access) {
+            self::WALK, self::OUT, self::BAR => $free ? 'come' : 'door',
+            self::SIGN => 'signup',
+            self::STAGE => 'ahead',
+            default => null,
+        };
+    }
+
+    /**
+     * Фильтр афиши по подписи, то же правило, что entry().
+     *
+     * @param  \Illuminate\Database\Query\Builder|\Illuminate\Database\Eloquent\Builder  $query
+     */
+    public static function applyEntry($query, string $entry, string $table = 'events'): void
+    {
+        $free = fn ($q) => $q->whereIn($table.'.price_status', ['free', 'donation']);
+
+        match ($entry) {
+            'come' => $query->whereIn($table.'.access', [self::WALK, self::OUT, self::BAR])->where($free),
+            'door' => $query->whereIn($table.'.access', [self::WALK, self::OUT, self::BAR])
+                ->whereRaw("coalesce({$table}.price_status, '') not in ('free', 'donation')"),
+            'signup' => $query->where($table.'.access', self::SIGN),
+            'ahead' => $query->where($table.'.access', self::STAGE),
+            default => $query->whereRaw('1 = 0'),
+        };
     }
 }
