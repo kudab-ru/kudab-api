@@ -1726,6 +1726,9 @@ class TelegramChatBroadcastService
                 continue;
             }
             foreach ($this->scorer->rank($events, $at, $freeWanted) as $e) {
+                if ($this->scorer->isBigStage($e) && ! PostTiming::stageDayFits($e, $at)) {
+                    continue;
+                }
                 $ranked[] = [
                     'event' => $e,
                     'score' => $this->scorer->breakdown($e, $at, $freeWanted),

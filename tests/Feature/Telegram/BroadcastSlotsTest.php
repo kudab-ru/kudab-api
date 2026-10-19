@@ -1047,7 +1047,8 @@ class BroadcastSlotsTest extends TestCase
         // бы концерту — именно это и проверяем.
         $a = $this->eventAt($city->id, 'Концерт А', Carbon::parse('2026-09-16 16:00', 'UTC'), rich: true);
         $b = $this->eventAt($city->id, 'Концерт Б', Carbon::parse('2026-09-17 15:00', 'UTC'), rich: true);
-        $c = $this->eventAt($city->id, 'Спектакль', Carbon::parse('2026-09-17 16:00', 'UTC'), rich: true);
+        // не «Спектакль»: по такому названию автомат узнаёт театр и в будни зовёт на него за 2–7 дней
+        $c = $this->eventAt($city->id, 'Творческий вечер', Carbon::parse('2026-09-17 16:00', 'UTC'), rich: true);
 
         $this->tag($a->id, $music);
         $this->tag($b->id, $music);
@@ -1098,6 +1099,45 @@ class BroadcastSlotsTest extends TestCase
             ->where('broadcast_id', $broadcast->id)
             ->whereNotNull('publish_at')
             ->count(), 'оба слота заняты, хотя тема одна на всех');
+    }
+
+    /** @return array<string, array{string, int, bool}> */
+    public static function stageLeadOnWeekdays(): array
+    {
+        return [
+            'вторник, спектакль в тот же день' => ['2026-09-15', 0, false],
+            'вторник, спектакль через три дня' => ['2026-09-15', 3, true],
+            'вторник, спектакль через девять дней' => ['2026-09-15', 9, false],
+            'суббота, спектакль в тот же день' => ['2026-09-19', 0, true],
+        ];
+    }
+
+    #[DataProvider('stageLeadOnWeekdays')]
+    public function test_weekday_slot_calls_to_big_stage_only_days_ahead(string $day, int $inDays, bool $picked): void
+    {
+        Carbon::setTestNow(Carbon::parse($day.' 06:00', 'Europe/Moscow')->utc());
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, ['slots' => [10], 'horizon_days' => 1]);
+        $broadcast->save();
+
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $theatre = (int) DB::table('interests')->insertGetId([
+            'name' => 'Театр', 'slug' => 'theatre', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        // без правила балл театра забрал бы слот у события без темы
+        $show = $this->eventAt($city->id, 'Три сестры', Carbon::parse($day.' 19:00', 'Europe/Moscow')->addDays($inDays)->utc(), rich: true);
+        $this->tag($show->id, $theatre);
+        $this->eventAt($city->id, 'Встреча книжного клуба', Carbon::parse($day.' 19:00', 'Europe/Moscow')->utc(), rich: true);
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame($picked, TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('event_id', $show->id)
+            ->whereNotNull('publish_at')
+            ->exists());
     }
 
     /** @return array<string, array{string, int, bool}> */

@@ -24,6 +24,9 @@ final class PostTiming
     /** Автоподбор считает идущим прокат от недели: короче — это билет на пять дней или каток на сутки. */
     public const RUN_MIN_DAYS = 7;
 
+    /** За сколько дней по календарю автомат зовёт на большую сцену в будни: от и до. */
+    public const STAGE_WEEKDAY_LEAD_DAYS = [2, 7];
+
     /**
      * Успеет ли пост, назначенный на этот момент, к своему событию.
      *
@@ -38,6 +41,24 @@ final class PostTiming
         }
 
         return $publishAt->lte($deadline->copy()->subHours(max(0, $minLeadHours)));
+    }
+
+    /**
+     * Годится ли день поста для большой сцены (EventBroadcastScorer::isBigStage): в будни на театр
+     * в день показа после работы не собираются, и билет берут заранее. В выходные правила нет,
+     * идущий прокат им не меряется.
+     */
+    public static function stageDayFits(Event $event, Carbon $publishAt): bool
+    {
+        $day = $publishAt->copy()->setTimezone('Europe/Moscow')->startOfDay();
+        if ($day->isoWeekday() >= 6 || ! $event->start_time || self::runningUntil($event, $publishAt) !== null) {
+            return true;
+        }
+
+        $lead = (int) $day->diffInDays(Carbon::parse($event->start_time)->setTimezone('Europe/Moscow')->startOfDay(), false);
+        [$from, $to] = self::STAGE_WEEKDAY_LEAD_DAYS;
+
+        return $lead >= $from && $lead <= $to;
     }
 
     /**
