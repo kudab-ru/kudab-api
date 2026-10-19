@@ -406,6 +406,8 @@ class EventsController extends Controller
                     'id'        => (int) $e->id,
                     'title'     => (string) ($e->title ?? ''),
                     'start_at'  => $startAt,
+                    // у события без часа start_at пуст, и день карта берёт отсюда
+                    'start_date' => $e->start_date?->toDateString(),
                     'poster'    => $e->poster !== null ? (string) $e->poster : null,
                     'price_min' => $e->price_min !== null ? (int) $e->price_min : null,
                     'free'      => $free,

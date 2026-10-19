@@ -548,6 +548,22 @@ class WebEventsTest extends TestCase
         Carbon::setTestNow();
     }
 
+    public function test_map_point_of_an_event_without_time_keeps_its_day(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-19 12:00', 'Europe/Moscow'));
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Литера');
+        $event = $this->createEvent($city->id, $community->id, 'Вечеринка', Carbon::parse('2026-10-31', 'Europe/Moscow'));
+        $event->forceFill(['start_time' => null, 'time_precision' => 'date'])->save();
+        DB::update('UPDATE events SET location = ST_SetSRID(ST_Point(39.2, 51.66), 4326) WHERE id = ?', [$event->id]);
+
+        $point = $this->getJson('/api/web/events/map?city=voronezh&date_from=2026-10-28&date_to=2026-11-01')
+            ->assertOk()->json('features.0.properties');
+
+        $this->assertNull($point['start_at']);
+        $this->assertSame('2026-10-31', $point['start_date']);
+    }
+
     public function test_filter_by_leaf_slug_returns_only_tagged_events(): void
     {
         $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
