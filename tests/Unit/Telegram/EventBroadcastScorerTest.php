@@ -74,6 +74,10 @@ class EventBroadcastScorerTest extends TestCase
             'детское шоу за деньги' => [['slug' => 'kids'], ['title' => 'Новогодняя история игрушек', 'price_status' => 'paid'], EventAccess::STAGE],
             'матчи Лиги чемпионов' => [['slug' => 'sport'], ['title' => 'Матчи Лиги чемпионов'], EventAccess::SKIP],
             'концерт дороже бара' => [['slug' => 'rock', 'parent' => 'music'], ['price_status' => 'range', 'price_min' => 2800], EventAccess::STAGE],
+            'кино под открытым небом' => [['slug' => 'cinema'], ['title' => 'Кино под открытым небом: «Вверх»', 'price_status' => 'free'], EventAccess::OUT],
+            'забег по регистрации' => [['slug' => 'sport'], ['title' => 'Забег по набережной', 'price_text' => 'регистрация на сайте'], EventAccess::SIGN],
+            'open air в баре' => [['slug' => 'parties', 'venue_kind' => 'Клубы и бары'], ['title' => 'Open Air на веранде'], EventAccess::BAR],
+            'дорогой фестиваль в парке' => [['slug' => 'festival', 'venue_kind' => 'Парки'], ['price_status' => 'paid', 'price_min' => 2500], EventAccess::STAGE],
             'регистрация в описании' => [
                 ['slug' => 'exhibitions'],
                 ['price_status' => 'external', 'description' => 'Вход свободный, но нужна регистрация по ссылке'],

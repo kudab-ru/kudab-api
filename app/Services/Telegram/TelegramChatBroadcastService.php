@@ -1695,8 +1695,8 @@ class TelegramChatBroadcastService
         // нижняя граница от момента публикации, а не от «сейчас»: к дню поста событие может пройти.
         // upcoming() тут не нужен — он отрезал бы идущие выставки. Срок проката — закрытие, см. PostTiming
         if ($notBefore !== null) {
-            // у «зайти сегодня» и события без часа: выставка заведена днём на каждую дату
-            PostTiming::applyFits($query, $notBefore, self::MIN_LEAD_HOURS, strictRuns: true, wholeDay: $role === SlotRole::WALK);
+            // у «зайти сегодня» и «на улице» и события без часа: выставка и ярмарка заведены днём на каждую дату
+            PostTiming::applyFits($query, $notBefore, self::MIN_LEAD_HOURS, strictRuns: true, wholeDay: in_array($role, [SlotRole::WALK, SlotRole::OUT], true));
             $this->weekendHold->applyTo($query, $broadcastId, $notBefore);
         } else {
             $query->upcoming();

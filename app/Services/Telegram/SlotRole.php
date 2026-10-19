@@ -26,12 +26,16 @@ final class SlotRole
     /** Портрет площадки вместо события; площадки нет — час заполнит «зайти сегодня». */
     public const PLACE = 'place';
 
+    /** Под открытым небом сегодня вечером или завтра: для выходных днём, когда таких событий много. */
+    public const OUT = 'out';
+
     public const LABELS = [
         self::WALK => 'зайти сегодня',
         self::SIGN => 'записаться',
         self::STAGE => 'большая сцена заранее',
         self::BAR => 'бар или клуб',
         self::PLACE => 'место',
+        self::OUT => 'на улице',
     ];
 
     /** Роль => категории «как попасть» и срок в днях от дня поста по Москве: от и до. */
@@ -40,6 +44,7 @@ final class SlotRole
         self::SIGN => [[EventAccess::SIGN], 1, 3],
         self::STAGE => [[EventAccess::STAGE], 2, 7],
         self::BAR => [[EventAccess::BAR], 0, 1],
+        self::OUT => [[EventAccess::OUT], 0, 1],
     ];
 
     private const TZ = 'Europe/Moscow';

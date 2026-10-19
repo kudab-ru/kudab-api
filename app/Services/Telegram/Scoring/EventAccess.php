@@ -22,7 +22,7 @@ final class EventAccess
     /** Билет на большую сцену: театр, опера, филармония, цирк, концерт в зале. Берут заранее. */
     public const STAGE = 'stage';
 
-    /** На улице. Пока узнаётся только по виду площадки «Парки». */
+    /** На улице: площадка вида «Парки» или текст «под открытым небом», забег, прогулка по городу. */
     public const OUT = 'out';
 
     /** В канал не годится: квест-комнаты с сеансом каждый день, трансляции матчей в барах. */
@@ -52,7 +52,12 @@ final class EventAccess
 
     private const SIGNUP_WORDS = '/регистрац|запис/iu';
 
-    /** Бар — это недорого: концерт от этой цены берут заранее, как на большую сцену. */
+    /** Парк узнаётся по площадке, а площадь, набережная и поле — только по тексту. */
+    private const OUTDOOR_TEXT = '/под открытым небом|на открытом воздухе|на свежем воздухе|open[ -]?air|опен[ -]?эйр/iu';
+
+    private const OUTDOOR_TITLE = '/забег|велопробег|скандинавск\p{L}* ходьб|пешеходн\p{L}* прогулк|прогулк\p{L}* историка|прогулк\p{L}* по (городу|центру|набережн|парку|улиц)/iu';
+
+    /** Бар — это недорого: концерт от этой цены берут заранее, как на большую сцену, и на улице тоже. */
     private const STAGE_PRICE_FROM = 1500;
 
     /** В описании «регистрация» бывает и про участников, поэтому там нужно явное требование. */
@@ -71,6 +76,7 @@ final class EventAccess
         $free = in_array($e->price_status ?? null, ['free', 'donation'], true);
         $signup = preg_match(self::SIGNUP_WORDS, (string) ($e->price_text ?? '')) === 1
             || preg_match(self::SIGNUP_REQUIRED, (string) ($e->description ?? '')) === 1;
+        $dear = ! $free && (int) ($e->price_min ?? 0) >= self::STAGE_PRICE_FROM;
 
         if ($venue === 'Квесты' || preg_match(self::BROADCAST_TITLE, $title) === 1) {
             return self::SKIP;
@@ -82,7 +88,15 @@ final class EventAccess
             return self::STAGE;
         }
         if ($venue === 'Парки') {
-            return self::OUT;
+            return $dear ? self::STAGE : self::OUT;
+        }
+        // запись и занятие важнее места: на забег по регистрации записываются заранее
+        $classLike = $signup || preg_match(self::MUSEUM_CLASS_TITLE, $title) === 1
+            || in_array($kind, ['quiz-games', 'excursions'], true) || $slug === 'workshops';
+        $indoor = in_array($venue, ['Клубы и бары', 'Кинотеатры', 'Квесты'], true);
+        if (! $classLike && ! $indoor && (preg_match(self::OUTDOOR_TITLE, $title) === 1
+            || preg_match(self::OUTDOOR_TEXT, $title.' '.($e->description ?? '')) === 1)) {
+            return $dear ? self::STAGE : self::OUT;
         }
         if (in_array($kind, ['exhibitions', 'cinema', 'markets'], true) || in_array($venue, ['Музеи', 'Кинотеатры'], true)) {
             return preg_match(self::MUSEUM_CLASS_TITLE, $title) === 1 || $signup ? self::SIGN : self::WALK;
@@ -95,7 +109,7 @@ final class EventAccess
             return self::STAGE;
         }
         if (in_array($kind, ['music', 'standup', 'parties', 'festival'], true)) {
-            if (! $free && (int) ($e->price_min ?? 0) >= self::STAGE_PRICE_FROM) {
+            if ($dear) {
                 return self::STAGE;
             }
 
