@@ -16,6 +16,7 @@ use App\Support\SearchLog;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use App\Http\Resources\WebEventDetailResource;
+use App\Services\Occasions\OccasionPromo;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Validation\Rule;
@@ -425,7 +426,7 @@ class EventsController extends Controller
         ]);
     }
 
-    public function show(int $id, EventSurvivor $survivors): JsonResponse
+    public function show(int $id, EventSurvivor $survivors, OccasionPromo $occasions): JsonResponse
     {
         try {
             $event = $this->service->getWeb($id);
@@ -439,9 +440,11 @@ class EventsController extends Controller
             throw $missing;
         }
 
-        return response()->json([
-            'data' => (new WebEventDetailResource($event))->toArray(request()),
-        ]);
+        $data = (new WebEventDetailResource($event))->toArray(request());
+        // праздник, в программу которого входит событие; сбой тут не должен ронять страницу события
+        $data['occasion'] = rescue(fn () => $occasions->forEvent($event, Carbon::now('Europe/Moscow')), null);
+
+        return response()->json(['data' => $data]);
     }
 
     /** Снятый день серии, например выходной музея, ведёт на ближайший живой день той же серии, сначала вперёд. */

@@ -17,6 +17,7 @@ use App\Support\EventStart;
 use App\Support\Telegram\KindEmoji;
 use App\Support\Telegram\VenueName;
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -139,8 +140,37 @@ final class OccasionPage
      */
     private function events(array $theme, City $city, array $window): Collection
     {
-        $q = Event::query()
+        $q = $this->eventsQuery($theme, $city, $window)
             ->with(['venue', 'sources:id,event_id,images,published_at', 'interests:id,slug,parent_id'])
+            ->orderByRaw(EventStart::sql('events'))
+            ->limit(400);
+
+        // дальше всё считается от start_time: событию без часа ставим полночь его дня
+        return $q->get()->each(function (Event $e) {
+            $e->start_time ??= EventStart::of($e);
+        });
+    }
+
+    /**
+     * Входит ли событие в программу праздника: те же правила и то же окно, что у страницы.
+     *
+     * @param  array<string, mixed>  $theme
+     */
+    public function includes(array $theme, City $city, int $eventId, Carbon $now): bool
+    {
+        $window = OccasionCalendar::window($theme, $now->copy()->setTimezone(self::TZ));
+
+        return $window !== null && $this->eventsQuery($theme, $city, $window)->where('events.id', $eventId)->exists();
+    }
+
+    /**
+     * @param  array<string, mixed>  $theme
+     * @param  array{0: Carbon, 1: Carbon}  $window
+     * @return Builder<Event>
+     */
+    private function eventsQuery(array $theme, City $city, array $window): Builder
+    {
+        $q = Event::query()
             ->where('events.city_id', $city->id)
             ->where('events.status', 'active')
             ->whereNull('events.deleted_at')
@@ -149,18 +179,13 @@ final class OccasionPage
             ->where(fn ($q) => EventStart::notBefore($q, $window[0], 'events'))
             ->where(fn ($q) => EventStart::notAfter($q, $window[1], 'events'))
             // часам повода событие без часа не годится, см. BroadcastDigestComposer::poolForTheme
-            ->when(isset($theme['hours']), fn ($q) => $q->where('events.time_precision', '<>', 'date'))
-            ->orderByRaw(EventStart::sql('events'))
-            ->limit(400);
+            ->when(isset($theme['hours']), fn ($q) => $q->where('events.time_precision', '<>', 'date'));
 
         if (in_array($theme['pick'] ?? '', ['words', 'all'], true)) {
             OccasionCalendar::applyWords($q, $theme, 'events');
         }
 
-        // дальше всё считается от start_time: событию без часа ставим полночь его дня
-        return $q->get()->each(function (Event $e) {
-            $e->start_time ??= EventStart::of($e);
-        });
+        return $q;
     }
 
     /**

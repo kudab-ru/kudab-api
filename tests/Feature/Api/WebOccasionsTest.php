@@ -11,6 +11,7 @@ use App\Models\TelegramUser;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Test;
 use Tests\TestCase;
 
@@ -131,6 +132,34 @@ class WebOccasionsTest extends TestCase
 
         $this->assertSame('noch-iskusstv', $next['page']);
         $this->assertSame(1, $next['total']);
+    }
+
+    #[Test]
+    public function an_event_page_names_the_holiday_whose_program_it_is_in(): void
+    {
+        $party = $this->event('Хэллоуинская вечеринка', '2026-10-31 18:00');
+        $concert = $this->event('Концерт органной музыки', '2026-10-31 19:00');
+
+        $this->assertSame('halloween', $this->getJson("/api/web/events/{$party}")->assertOk()->json('data.occasion.page'));
+        $this->assertNull($this->getJson("/api/web/events/{$concert}")->assertOk()->json('data.occasion'));
+    }
+
+    #[Test]
+    #[DataProvider('searches')]
+    public function a_search_naming_a_holiday_finds_it(string $query, ?string $page): void
+    {
+        $found = $this->getJson('/api/web/occasions?city=voronezh&q='.urlencode($query))->assertOk()->json('match.page');
+
+        $this->assertSame($page, $found);
+    }
+
+    public static function searches(): array
+    {
+        return [
+            'слово программы' => ['halloween вечеринки', 'halloween'],
+            'название сильнее слова программы' => ['новый год', 'novyj-god'],
+            'не праздник' => ['концерт', null],
+        ];
     }
 
     private function event(string $title, string $at): int
