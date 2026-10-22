@@ -1,4 +1,6 @@
-FROM php:8.2-fpm-alpine
+# Версия точная: выкат собирает без --pull, и с плавающей меткой взял бы старый образ с сервера.
+# Менять вместе с Dockerfile парсера.
+FROM php:8.2.35-fpm-alpine
 
 # зеркало можно оставить — так сборка быстрее
 RUN sed -i 's|dl-cdn.alpinelinux.org/alpine|mirrors.aliyun.com/alpine|g' /etc/apk/repositories
