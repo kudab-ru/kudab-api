@@ -153,7 +153,7 @@ final class SliceBuilder
      */
     private function row(array $row, array $until, array $score): array
     {
-        $out = array_diff_key($row, ['score' => true, 'series' => true, 'lat' => true, 'lng' => true]);
+        $out = array_diff_key($row, ['score' => true, 'series' => true]);
         $out['times'] = $this->clock((array) $row['times']);
         $out['until'] = $until[$row['id']] ?? $row['until'] ?? null;
         $out['rank'] = (int) round((float) ($score[$row['id']] ?? 0));
