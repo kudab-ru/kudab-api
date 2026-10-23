@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\DB;
 use PHPUnit\Framework\Attributes\Test;
 use Tests\TestCase;
 
-class WebWeekendsTest extends TestCase
+class WebSlicePagesTest extends TestCase
 {
     use RefreshDatabase;
 
@@ -108,6 +108,24 @@ class WebWeekendsTest extends TestCase
         $this->assertSame(['Спектакль «Чайка»'], array_column($page['picks'], 'title'));
         $this->assertSame([['date' => '2026-10-25', 'time' => '18:00']], $page['picks'][0]['also']);
         $this->assertSame(['Концерт органной музыки'], array_column(array_merge(...array_column($page['days'], 'events')), 'title'));
+    }
+
+    #[Test]
+    public function today_drops_what_has_passed_and_keeps_all_day_exhibitions_apart(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-23 19:00', 'Europe/Moscow'));
+        $this->withTheme($this->withPhoto($this->event('Концерт группы Сова', '2026-10-23 12:00')), 'music');
+        $this->event('Спектакль «Чайка»', '2026-10-23 20:00');
+        foreach (['Выставка «Миг свободы»', 'Кавер-группа в баре'] as $title) {
+            Event::query()->whereKey($this->event($title, '2026-10-23 00:00'))
+                ->update(['start_time' => null, 'time_precision' => 'date']);
+        }
+
+        $day = $this->getJson('/api/web/days?city=voronezh')->assertOk()->json('data.current');
+
+        $this->assertSame([], $day['picks']);
+        $this->assertSame(['Спектакль «Чайка»', 'Кавер-группа в баре'], array_column(array_merge(...array_column($day['days'], 'events')), 'title'));
+        $this->assertSame(['Выставка «Миг свободы»'], array_column($day['both'], 'title'));
     }
 
     /** тема даёт основной вес оценки интереса: без неё событие до главного не дотягивает */

@@ -324,7 +324,7 @@ final class OccasionPage
 
         $ids = match (true) {
             $item !== null => DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->orderBy('position')->pluck('event_id')->map(fn ($v) => (int) $v)->all(),
-            ! empty($theme['site_pick']) => $this->sitePick($events, $limit),
+            ! empty($theme['site_pick']) => $this->sitePick($events, $limit, $now),
             default => $this->autoPick($theme, $city, $day, $events, $now),
         };
 
@@ -414,18 +414,18 @@ final class OccasionPage
     }
 
     /**
-     * Главное сайта, когда поста в канале нет: по интересу, без правил поста (дешёвой строки, длины описания),
-     * не больше двух событий одного вида, одно с площадки, без занятий и встреч из стоп-листа подборок.
-     * Ниже `SITE_PICK_FLOOR` событие не берётся, даже если места остались: лучше меньше главного, чем мусор.
+     * Главное сайта, когда поста в канале нет: по интересу, без правил поста, не больше двух событий одного вида,
+     * одно с площадки, без занятий из стоп-листа подборок. Прошедшее и то, что ниже `SITE_PICK_FLOOR`, не берётся,
+     * даже если места остались: лучше меньше главного, чем мусор.
      *
      * @param  Collection<int, Event>  $events
      * @return list<int>
      */
-    private function sitePick(Collection $events, int $limit): array
+    private function sitePick(Collection $events, int $limit, Carbon $now): array
     {
         $stop = array_map('mb_strtolower', (array) config('broadcast_digest.title_stop_list', []));
         $ranked = $events
-            ->filter(fn (Event $e) => $e->poster() !== null
+            ->filter(fn (Event $e) => $e->poster() !== null && ! $this->isPast($e, $now)
                 && ! collect($stop)->contains(fn ($w) => str_starts_with(mb_strtolower(trim((string) $e->title)), $w)))
             ->map(fn (Event $e) => [$e, $this->scorer->interest($e)])
             ->filter(fn (array $x) => $x[1] >= self::SITE_PICK_FLOOR)
@@ -481,11 +481,19 @@ final class OccasionPage
             'kind' => ['key' => $kind, 'label' => self::KIND_LABELS[$kind][0]],
             'kids' => $kind === 'kids' || ($e->audience ?? null) === 'kids'
                 || preg_match('/(?<![\p{L}])(для детей|детск)/iu', (string) $e->title) === 1,
-            'is_past' => ($e->time_precision ?? null) === 'date'
-                ? $start->toDateString() < $now->toDateString()
-                : $start->copy()->addHours(3)->lt($now),
+            'is_past' => $this->isPast($e, $now),
             'score' => $this->scorer->interest($e),
         ];
+    }
+
+    /** Прошло: у события без часа — день, у события с часом — три часа от начала. */
+    private function isPast(Event $e, Carbon $now): bool
+    {
+        $start = Carbon::parse($e->start_time)->setTimezone(self::TZ);
+
+        return ($e->time_precision ?? null) === 'date'
+            ? $start->toDateString() < $now->copy()->setTimezone(self::TZ)->toDateString()
+            : $start->copy()->addHours(3)->lt($now);
     }
 
     private function kindOf(Event $e): string
