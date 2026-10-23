@@ -9,7 +9,7 @@ use Carbon\Carbon;
 
 /**
  * Насколько событие интересно каналу, без LLM: вид, разовое или каждую неделю, продаёт ли его касса,
- * сколько у него оценок на Яндекс Афише. Полнота карточки даёт только штрафы: без афиши или точного
+ * сколько у него оценок на Яндекс Афише, крупное ли оно. Полнота карточки даёт только штрафы: без афиши или точного
  * времени пост выходит слабым. Признаки — EventInterestSignals, жёсткие фильтры — в выборке кандидатов.
  */
 class EventBroadcastScorer
@@ -59,6 +59,16 @@ class EventBroadcastScorer
     public const W_NO_TIME = -10;
 
     public const W_NO_VENUE = -5;
+
+    /** Сцена и дорогой билет: без этого звезда в концертном зале весила как группа в баре. */
+    public const W_BIG_STAGE = 15;
+
+    public const BIG_STAGE_PRICE_FROM = 2000;
+
+    public const W_TOUR = 10;
+
+    /** «Прощальный тур», «в рамках тура», «Tour 2026»: гастроли, а не местный вечер. */
+    private const TOUR_TITLE = '/(?<!\p{L})(тур|тура|туре|турне|tour)(?!\p{L})/iu';
 
     public const WEEKLY_FROM = 4;
 
@@ -291,6 +301,8 @@ class EventBroadcastScorer
             // у события без времени в начале полночь, и в посте вышло бы «сб 00:00»
             'time' => ($e->time_precision ?? null) === 'date' ? self::W_NO_TIME : 0,
             'venue' => empty($e->venue_id) ? self::W_NO_VENUE : 0,
+            'scale' => ($s['venue_kind'] === 'Сцены' && (int) ($e->price_min ?? 0) >= self::BIG_STAGE_PRICE_FROM ? self::W_BIG_STAGE : 0)
+                + (preg_match(self::TOUR_TITLE, (string) ($e->title ?? '')) === 1 ? self::W_TOUR : 0),
         ];
     }
 

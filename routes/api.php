@@ -281,6 +281,7 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     // страницы праздников: /afisha/{город}/{page}, реестр поводов — config/broadcast_digest.php
     Route::get('occasions', [\App\Http\Controllers\Api\Web\OccasionsController::class, 'index']);
     Route::get('occasions/{page}', [\App\Http\Controllers\Api\Web\OccasionsController::class, 'show'])->where('page', '[a-z0-9-]+');
+    Route::get('weekends', [\App\Http\Controllers\Api\Web\WeekendsController::class, 'show']);
 
     // Venues (PR4): /map ДО /{id} по той же причине, что у events/map выше.
     Route::get('venues', [\App\Http\Controllers\Api\Web\VenuesController::class, 'index']);

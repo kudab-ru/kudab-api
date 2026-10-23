@@ -215,6 +215,9 @@ final class PickReason
         if ($rating >= EventBroadcastScorer::RATED_FROM) {
             $good[] = $rating.' '.self::plural($rating, 'оценка', 'оценки', 'оценок').' на Яндекс Афише';
         }
+        if ((int) ($score['scale'] ?? 0) > 0) {
+            $good[] = 'крупное событие';
+        }
         if ((int) ($score['free'] ?? 0) > 0) {
             $good[] = 'бесплатное, а на неделе такого ещё нет';
         }

@@ -31,6 +31,9 @@ final class OccasionPage
 
     private const PICKS = 5;
 
+    /** нижняя оценка интереса для главного сайта, см. sitePick */
+    private const SITE_PICK_FLOOR = 35;
+
     /** Больше строк в дне — уже лента, а не программа: остальное ссылкой на афишу дня. */
     private const DAY_LIMIT = 15;
 
@@ -93,16 +96,10 @@ final class OccasionPage
         $day = BroadcastDigestComposer::occasionDate($theme, $now);
         $window = OccasionCalendar::window($theme, $now);
 
-        $events = $window === null ? collect() : $this->events($theme, $city, $window);
-        // признаки оценки одним запросом на все события, а не по запросу на каждое
-        $this->scorer->prepare($events->all());
-        $rows = $this->foldSeries($this->rows($events, $now));
-        $days = $this->days($rows);
-        $picks = $day === null ? [] : $this->picks($theme, $city, $day, $events, $now);
+        ['rows' => $rows, 'days' => $days, 'picks' => $picks, 'kinds' => $kinds] = $this->assemble($theme, $city, $now, $window, $day, self::DAY_LIMIT);
 
         $headline = trim((string) preg_replace('/\s+(?=[:,.]|$)/u', '',
             str_replace('{city}', $cityIn !== null ? 'в '.$cityIn : '', (string) ($theme['headline'] ?? $theme['title']))));
-        $kinds = $this->kinds($rows);
         $total = count($rows);
         $lead = $this->lead($theme, $total, $rows, $kinds);
 
@@ -130,6 +127,31 @@ final class OccasionPage
             'faq' => $this->faq($theme, $cityIn, $day, $picks, $rows),
             'next' => $this->next($theme, $now),
             'seo' => $this->seo($headline, $total, $day, $window, $theme, $lead),
+        ];
+    }
+
+    /**
+     * Программа, главное и виды событий за окно: общая сборка страниц праздника и выходных.
+     * В строках `rows` ещё лежат `score` (оценка интереса) и `series` (ключ серии), в днях их уже нет.
+     *
+     * @param  array<string, mixed>  $theme
+     * @param  array{0: Carbon, 1: Carbon}|null  $window
+     * @return array{rows: list<array<string, mixed>>, days: list<array<string, mixed>>, picks: list<array<string, mixed>>, kinds: list<array{key: string, label: string, count: int}>}
+     */
+    public function assemble(array $theme, City $city, Carbon $now, ?array $window, ?Carbon $day, ?int $dayLimit): array
+    {
+        $now = $now->copy()->setTimezone(self::TZ);
+        $this->city = $city;
+        $events = $window === null ? collect() : $this->events($theme, $city, $window);
+        // признаки оценки одним запросом на все события, а не по запросу на каждое
+        $this->scorer->prepare($events->all());
+        $rows = $this->foldSeries($this->rows($events, $now));
+
+        return [
+            'rows' => $rows,
+            'days' => $this->days($rows, $dayLimit),
+            'picks' => $day === null ? [] : $this->picks($theme, $city, $day, $events, $now),
+            'kinds' => $this->kinds($rows),
         ];
     }
 
@@ -256,7 +278,7 @@ final class OccasionPage
      * @param  list<array<string, mixed>>  $rows
      * @return list<array<string, mixed>>
      */
-    private function days(array $rows): array
+    private function days(array $rows, ?int $limit): array
     {
         $byDay = [];
         foreach ($rows as $row) {
@@ -266,10 +288,10 @@ final class OccasionPage
         $out = [];
         foreach ($byDay as $date => $items) {
             $more = 0;
-            if (count($items) > self::DAY_LIMIT) {
+            if ($limit !== null && count($items) > $limit) {
                 // самое интересное дня, но по порядку времени
-                $keep = collect($items)->sortByDesc('score')->take(self::DAY_LIMIT)->pluck('id')->all();
-                $more = count($items) - self::DAY_LIMIT;
+                $keep = collect($items)->sortByDesc('score')->take($limit)->pluck('id')->all();
+                $more = count($items) - $limit;
                 $items = array_values(array_filter($items, fn ($r) => in_array($r['id'], $keep, true)));
             }
             $d = Carbon::parse($date, self::TZ);
@@ -297,15 +319,19 @@ final class OccasionPage
         $byId = $events->keyBy('id');
         $item = $this->channelItem($theme, $city, $day);
         $meta = (array) ($item?->digest_meta ?? []);
+        // страница выходных берёт кандидатов с запасом: главное прошлых выходных она потом пропускает
+        $limit = (int) ($theme['picks'] ?? self::PICKS);
 
-        $ids = $item !== null
-            ? DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->orderBy('position')->pluck('event_id')->map(fn ($v) => (int) $v)->all()
-            : $this->autoPick($theme, $city, $day, $events, $now);
+        $ids = match (true) {
+            $item !== null => DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->orderBy('position')->pluck('event_id')->map(fn ($v) => (int) $v)->all(),
+            ! empty($theme['site_pick']) => $this->sitePick($events, $limit),
+            default => $this->autoPick($theme, $city, $day, $events, $now),
+        };
 
         $out = [];
         foreach ($ids as $id) {
             $e = $byId->get($id);
-            if ($e === null || count($out) >= self::PICKS) {
+            if ($e === null || count($out) >= $limit) {
                 continue;
             }
             $out[] = $this->dto($e, $now) + [
@@ -325,6 +351,11 @@ final class OccasionPage
     /** Подборка этого повода в канале города: черновик или вышедшая, не снятая и не напоминание. */
     private function channelItem(array $theme, City $city, Carbon $day): ?TelegramChatBroadcastItem
     {
+        // «На выходных» выходит каждую неделю в четверг или пятницу: месяц назад от субботы — это и прошлые выходные
+        [$from, $to] = ($theme['window'] ?? '') === 'weekend'
+            ? [$day->copy()->subDays(5)->startOfDay(), $day->copy()->endOfDay()]
+            : [$day->copy()->subDays(30), $day->copy()->addDays((int) ($theme['window_after'] ?? 0) + 1)];
+
         return TelegramChatBroadcastItem::query()
             ->join('telegram.chat_broadcasts as b', 'b.id', '=', 'telegram.chat_broadcast_items.broadcast_id')
             ->join('telegram.chats as c', 'c.id', '=', 'b.chat_id')
@@ -334,7 +365,7 @@ final class OccasionPage
             ->whereRaw("coalesce(telegram.chat_broadcast_items.digest_meta->>'theme', telegram.chat_broadcast_items.digest_meta->>'theme_wanted') = ?", [(string) $theme['slug']])
             ->whereRaw("telegram.chat_broadcast_items.digest_meta->>'reply_to' is null")
             ->whereRaw('coalesce(telegram.chat_broadcast_items.publish_at, telegram.chat_broadcast_items.posted_at, telegram.chat_broadcast_items.created_at) between ? and ?', [
-                $day->copy()->subDays(30)->utc(), $day->copy()->addDays((int) ($theme['window_after'] ?? 0) + 1)->utc(),
+                $from->copy()->utc(), $to->copy()->utc(),
             ])
             ->whereExists(fn ($s) => $s->selectRaw('1')->from('telegram.chat_broadcast_item_events as l')
                 ->whereColumn('l.item_id', 'telegram.chat_broadcast_items.id'))
@@ -377,6 +408,45 @@ final class OccasionPage
             }
             $venues[$place] = true;
             $ids[] = (int) $e->id;
+        }
+
+        return $ids;
+    }
+
+    /**
+     * Главное сайта, когда поста в канале нет: по интересу, без правил поста (дешёвой строки, длины описания),
+     * не больше двух событий одного вида, одно с площадки, без занятий и встреч из стоп-листа подборок.
+     * Ниже `SITE_PICK_FLOOR` событие не берётся, даже если места остались: лучше меньше главного, чем мусор.
+     *
+     * @param  Collection<int, Event>  $events
+     * @return list<int>
+     */
+    private function sitePick(Collection $events, int $limit): array
+    {
+        $stop = array_map('mb_strtolower', (array) config('broadcast_digest.title_stop_list', []));
+        $ranked = $events
+            ->filter(fn (Event $e) => $e->poster() !== null
+                && ! collect($stop)->contains(fn ($w) => str_starts_with(mb_strtolower(trim((string) $e->title)), $w)))
+            ->map(fn (Event $e) => [$e, $this->scorer->interest($e)])
+            ->filter(fn (array $x) => $x[1] >= self::SITE_PICK_FLOOR)
+            ->sortByDesc(fn (array $x) => $x[1]);
+
+        $ids = [];
+        $seen = [];
+        $kinds = [];
+        foreach ($ranked as [$e]) {
+            $series = 's'.($e->event_group_id ?: mb_strtolower(trim((string) $e->title)));
+            $place = 'p'.($e->venue_id ?: mb_strtolower((string) $e->address));
+            $kind = $this->kindOf($e);
+            if (isset($seen[$series]) || isset($seen[$place]) || ($kinds[$kind] ?? 0) >= 2) {
+                continue;
+            }
+            $seen[$series] = $seen[$place] = true;
+            $kinds[$kind] = ($kinds[$kind] ?? 0) + 1;
+            $ids[] = (int) $e->id;
+            if (count($ids) >= $limit) {
+                break;
+            }
         }
 
         return $ids;

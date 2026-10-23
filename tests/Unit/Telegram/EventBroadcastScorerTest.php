@@ -27,7 +27,7 @@ class EventBroadcastScorerTest extends TestCase
         parent::tearDown();
     }
 
-    /** @return array<string, array{array<string, mixed>, array<string, mixed>}> */
+    /** @return array<string, array<int, array<string, mixed>>> признаки лучшего и худшего, затем поля событий */
     public static function betterThan(): array
     {
         return [
@@ -39,6 +39,13 @@ class EventBroadcastScorerTest extends TestCase
             ],
             'касса и оценки поднимают спектакль' => [['slug' => 'theatre', 'ticketed' => true, 'rating' => 200], ['slug' => 'theatre']],
             'с афишей выше, чем без' => [['slug' => 'music'], ['slug' => 'music', 'photo' => false]],
+            'звезда в зале выше группы в баре' => [
+                ['slug' => 'music', 'venue_kind' => 'Сцены'], ['slug' => 'music', 'venue_kind' => 'Клубы и бары'],
+                ['price_min' => 2500, 'title' => 'Таисия Повалий'], ['price_min' => 2000, 'title' => 'Helvegen'],
+            ],
+            'гастрольный тур выше местного вечера' => [
+                ['slug' => 'music'], ['slug' => 'music'], ['title' => 'Прощальный тур'], ['title' => 'Вечер романса'],
+            ],
         ];
     }
 
@@ -47,11 +54,11 @@ class EventBroadcastScorerTest extends TestCase
      * @param  array<string, mixed>  $worse
      */
     #[DataProvider('betterThan')]
-    public function test_the_more_interesting_event_wins(array $better, array $worse): void
+    public function test_the_more_interesting_event_wins(array $better, array $worse, array $betterAttrs = [], array $worseAttrs = []): void
     {
         // при ничьей победило бы худшее: у него меньше номер
-        $low = $this->event(1, $worse, now()->addDay());
-        $high = $this->event(2, $better, now()->addDay());
+        $low = $this->event(1, $worse, now()->addDay(), $worseAttrs);
+        $high = $this->event(2, $better, now()->addDay(), $betterAttrs);
 
         $this->assertSame($high, $this->scorer->pickBest([$low, $high], now()));
     }
