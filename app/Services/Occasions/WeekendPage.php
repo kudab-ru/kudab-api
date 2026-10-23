@@ -20,7 +20,8 @@ final class WeekendPage
 
     private const WEEKS = 4;
 
-    private const PICKS = 5;
+    /** на сайте «Главное» листается вбок: видно пять карточек, остальные за краем */
+    private const PICKS = 8;
 
     private const CACHE_SECONDS = 300;
 

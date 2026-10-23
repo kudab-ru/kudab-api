@@ -17,7 +17,8 @@ final class DayPage
 {
     private const TZ = 'Europe/Moscow';
 
-    private const PICKS = 5;
+    /** на сайте «Главное» листается вбок: видно пять карточек, остальные за краем */
+    private const PICKS = 8;
 
     private const CACHE_SECONDS = 300;
 
