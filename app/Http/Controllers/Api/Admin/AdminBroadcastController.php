@@ -61,7 +61,7 @@ class AdminBroadcastController extends Controller
      */
     private const SUGGESTIONS_HORIZON_DAYS = 14;
 
-    /** Сколько картинок уходит в пост. Столько же берёт автоподбор. */
+    /** Сколько картинок уходит в пост о событии. Столько же берёт автоподбор, у подборки и портрета см. `photoLimit`. */
     private const PHOTO_LIMIT = 3;
 
     /** Сколько картинок показываем на выбор — из них человек собирает пост. */
@@ -1109,7 +1109,7 @@ class AdminBroadcastController extends Controller
                     // оставался пустым, и любой выбор человека отбивался
                     // ошибкой «среди выбранных есть чужие» — при том, что
                     // сами картинки лента ему показывала.
-                    $item->kind === TelegramChatBroadcastItem::KIND_DIGEST => $this->broadcasts->digestPhotoUrls((int) $item->id, self::PHOTO_CANDIDATES),
+                    $item->kind === TelegramChatBroadcastItem::KIND_DIGEST => $this->digestPhotoPool((int) $item->id),
                     $item->event_id !== null => $this->broadcasts->eventPhotos((int) $item->event_id, self::PHOTO_CANDIDATES),
                     default => [],
                 };
@@ -1129,9 +1129,7 @@ class AdminBroadcastController extends Controller
                     ], 422);
                 }
 
-                // Телеграм принимает в альбом не больше десяти, но постом
-                // уходит три: больше — стена картинок вместо анонса.
-                $item->photo_urls = array_slice($clean, 0, self::PHOTO_LIMIT);
+                $item->photo_urls = array_slice($clean, 0, $this->photoLimit($item));
                 if ($item->photo_urls !== $wasPhotos) {
                     $edited[] = TelegramChatBroadcastItem::EDIT_PHOTOS;
                 }
@@ -1696,15 +1694,7 @@ class AdminBroadcastController extends Controller
                 $cooled = $request->boolean('cool')
                     && $this->coolDownEvent($broadcast->id, (int) $data['out']);
 
-                // Ручной выбор картинок держится белым списком из состава: после
-                // замены прежний набор ему больше не отвечает, и следующая правка
-                // формы отбилась бы 422. Снимаем вместе с пометкой о правке —
-                // иначе карточка обещает правку, которой больше нет.
-                if (is_array($item->photo_urls)) {
-                    $item->photo_urls = null;
-                    $item->forgetEdit(TelegramChatBroadcastItem::EDIT_PHOTOS);
-                    $item->save();
-                }
+                $this->keepRosterPhotos($item);
 
                 return ['item' => $item->fresh(), 'cooled' => $cooled];
             });
@@ -1814,7 +1804,7 @@ class AdminBroadcastController extends Controller
                     throw new DigestRecomposeFailed;
                 }
 
-                $this->dropManualPhotos($item);
+                $this->keepRosterPhotos($item);
 
                 return $item->fresh();
             });
@@ -1880,7 +1870,7 @@ class AdminBroadcastController extends Controller
                 $cooled = $request->boolean('cool')
                     && $this->coolDownEvent($broadcast->id, (int) $data['out']);
 
-                $this->dropManualPhotos($item);
+                $this->keepRosterPhotos($item);
 
                 return ['item' => $item->fresh(), 'cooled' => $cooled];
             });
@@ -2142,18 +2132,57 @@ class AdminBroadcastController extends Controller
     }
 
     /**
-     * Снять ручной выбор картинок после правки состава.
-     *
-     * Белый список картинок держится составом: после правки прежний набор ему
-     * больше не отвечает, и следующая правка формы отбилась бы 422.
+     * После правки состава оставить в ручном выборе картинки тех событий, что в нём остались:
+     * картинка ушедшего события белым списком уже не пройдёт. Не осталось ни одной — снова
+     * автоподбор; осознанное «без картинок» не трогаем.
      */
-    private function dropManualPhotos(TelegramChatBroadcastItem $item): void
+    private function keepRosterPhotos(TelegramChatBroadcastItem $item): void
     {
-        if (is_array($item->photo_urls)) {
-            $item->photo_urls = null;
-            $item->forgetEdit(TelegramChatBroadcastItem::EDIT_PHOTOS);
-            $item->save();
+        if (! is_array($item->photo_urls) || $item->photo_urls === []) {
+            return;
         }
+
+        $pool = $this->digestPhotoPool((int) $item->id);
+        $kept = array_values(array_filter($item->photo_urls, fn ($url) => in_array($url, $pool, true)));
+        if ($kept === $item->photo_urls) {
+            return;
+        }
+
+        $item->photo_urls = $kept === [] ? null : $kept;
+        if ($kept === []) {
+            $item->forgetEdit(TelegramChatBroadcastItem::EDIT_PHOTOS);
+        }
+        $item->save();
+    }
+
+    /**
+     * Все картинки событий подборки: из них можно собрать альбом.
+     *
+     * @return list<string>
+     */
+    private function digestPhotoPool(int $itemId): array
+    {
+        return self::poolOf($this->broadcasts->digestPhotoGroups($itemId, self::PHOTO_CANDIDATES));
+    }
+
+    /**
+     * @param  list<array{photos: list<string>}>  $groups
+     * @return list<string>
+     */
+    private static function poolOf(array $groups): array
+    {
+        return array_values(array_unique(array_merge([], ...array_column($groups, 'photos'))));
+    }
+
+    /**
+     * Сколько картинок уходит в пост. У события три: больше — стена картинок вместо анонса.
+     * Подборка и портрет площадки берут столько же, сколько их автоподбор: по картинке на строку.
+     */
+    private function photoLimit(TelegramChatBroadcastItem $item): int
+    {
+        return in_array($item->kind, [TelegramChatBroadcastItem::KIND_DIGEST, TelegramChatBroadcastItem::KIND_VENUE], true)
+            ? \App\Services\Telegram\TelegramVenuePortraitService::ALBUM_LIMIT
+            : self::PHOTO_LIMIT;
     }
 
     /**
@@ -4622,6 +4651,9 @@ class AdminBroadcastController extends Controller
         // Состав подборки нужен дважды: показать его человеку и решить, про
         // ЭТОТ ли состав написан лежащий текст. Читаем один раз.
         $linked = $i->kind === TelegramChatBroadcastItem::KIND_DIGEST ? $this->linkedEvents($i) : [];
+        $photoGroups = $i->kind === TelegramChatBroadcastItem::KIND_DIGEST
+            ? $this->broadcasts->digestPhotoGroups((int) $i->id, self::PHOTO_CANDIDATES)
+            : null;
 
         return [
             'id' => (int) $i->id,
@@ -4751,7 +4783,10 @@ class AdminBroadcastController extends Controller
                 // сильнее автоподбора.
                 TelegramChatBroadcastItem::KIND_DIGEST => is_array($i->photo_urls)
                     ? array_values(array_filter($i->photo_urls, 'is_string'))
-                    : $this->broadcasts->digestPhotoUrls((int) $i->id, self::PHOTO_CANDIDATES),
+                    : TelegramChatBroadcastService::digestCovers(
+                        (array) $photoGroups,
+                        \App\Services\Telegram\TelegramVenuePortraitService::ALBUM_LIMIT,
+                    ),
                 default => $this->effectivePhotos($i, $event),
             },
             // Всё, из чего можно собрать альбом. У портрета это картинки
@@ -4759,10 +4794,13 @@ class AdminBroadcastController extends Controller
             // упирался в 422 — белый список был пуст по определению.
             'photo_candidates' => match (true) {
                 $i->kind === TelegramChatBroadcastItem::KIND_VENUE && $i->venue_id !== null => $this->venuePortraits->venuePhotoUrls((int) $i->venue_id, self::PHOTO_CANDIDATES),
-                $i->kind === TelegramChatBroadcastItem::KIND_DIGEST => $this->broadcasts->digestPhotoUrls((int) $i->id, self::PHOTO_CANDIDATES),
+                $i->kind === TelegramChatBroadcastItem::KIND_DIGEST => self::poolOf((array) $photoGroups),
                 $i->event_id !== null => $this->candidatePhotos($i, $event),
                 default => [],
             },
+            // у подборки те же кандидаты по событиям, в порядке состава; у остальных null
+            'photo_groups' => $photoGroups,
+            'photo_limit' => $this->photoLimit($i),
             // Состав подборки: что именно она называет. Без этого в карточке
             // виден текст, но не видно, какие события он закрыл для ленты.
             'linked_events' => $linked,

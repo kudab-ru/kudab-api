@@ -9,6 +9,7 @@ use App\Models\TelegramUser;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -924,6 +925,78 @@ class BroadcastDigestPrepareTest extends TestCase
         $this->assertSame('Три повода выйти из дома.', $meta['intro'] ?? null);
         $this->assertEqualsCanonicalizing(array_column($named, 'id'), $meta['roster'] ?? []);
         $this->assertStringContainsString('Три повода выйти из дома.', (string) $item->fresh()->caption);
+    }
+
+    public function test_album_takes_any_photo_of_the_roster_and_the_preview_shows_it(): void
+    {
+        [$item, $named] = $this->composedDigestWithSpare();
+        [$a, $b, $c] = array_column($named, 'id');
+        $this->giveImages($a, ['https://sun9-1.userapi.com/a1.jpg', 'https://sun9-1.userapi.com/a2.jpg', 'https://sun9-1.userapi.com/a3.jpg']);
+        $this->giveImages($b, ['https://sun9-1.userapi.com/b1.jpg', 'https://sun9-1.userapi.com/b2.jpg']);
+        $this->giveImages($c, ['https://sun9-1.userapi.com/c1.jpg']);
+        $album = [
+            'https://sun9-1.userapi.com/b2.jpg',
+            'https://sun9-1.userapi.com/a3.jpg',
+            'https://sun9-1.userapi.com/c1.jpg',
+            'https://sun9-1.userapi.com/a2.jpg',
+        ];
+
+        $res = $this->patchJson("/api/admin/broadcast/items/{$item->id}", ['photo_urls' => $album])->assertOk();
+
+        $this->assertSame($album, $item->fresh()->photo_urls);
+        $res->assertJsonPath('data.photos', $album);
+        $this->assertSame([$a, $b, $c], array_column($res->json('data.photo_groups'), 'event_id'));
+    }
+
+    #[DataProvider('albumsAfterReplace')]
+    public function test_replacing_an_event_keeps_the_photos_of_the_rest(array $chosen, ?array $left): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        [$a, $b] = [$named[0]['id'], $named[1]['id']];
+        $this->giveImages($a, ['https://sun9-1.userapi.com/a1.jpg', 'https://sun9-1.userapi.com/a2.jpg']);
+        $this->giveImages($b, ['https://sun9-1.userapi.com/b1.jpg']);
+        $this->patchJson("/api/admin/broadcast/items/{$item->id}", ['photo_urls' => $chosen])->assertOk();
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $b,
+            'in' => $candidate,
+        ])->assertOk();
+
+        $this->assertSame($left, $item->fresh()->photo_urls);
+    }
+
+    public static function albumsAfterReplace(): array
+    {
+        return [
+            'картинка оставшегося события остаётся' => [
+                ['https://sun9-1.userapi.com/b1.jpg', 'https://sun9-1.userapi.com/a2.jpg'],
+                ['https://sun9-1.userapi.com/a2.jpg'],
+            ],
+            'не осталось ни одной — снова автоподбор' => [['https://sun9-1.userapi.com/b1.jpg'], null],
+        ];
+    }
+
+    /** @param  list<string>  $urls */
+    private function giveImages(int $eventId, array $urls): void
+    {
+        $network = DB::table('social_networks')->where('slug', 'vk')->value('id')
+            ?? DB::table('social_networks')->insertGetId(['name' => 'VK', 'slug' => 'vk', 'created_at' => now(), 'updated_at' => now()]);
+        $link = DB::table('community_social_links')->insertGetId([
+            'community_id' => DB::table('events')->where('id', $eventId)->value('community_id'),
+            'social_network_id' => $network,
+            'url' => 'https://vk.com/club'.$eventId,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('event_sources')->insert([
+            'event_id' => $eventId,
+            'social_link_id' => $link,
+            'source' => 'vk',
+            'post_external_id' => 'post-'.$eventId,
+            'images' => json_encode($urls),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     /** @return list<int> */

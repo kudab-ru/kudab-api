@@ -1484,6 +1484,16 @@ class TelegramChatBroadcastService
      */
     public function digestPhotoUrls(int $itemId, int $limit = 4): array
     {
+        return self::digestCovers($this->digestPhotoGroups($itemId, 1), $limit);
+    }
+
+    /**
+     * Картинки событий подборки по событиям, в порядке состава: из них в админке собирают альбом.
+     *
+     * @return list<array{event_id: int, title: string, photos: list<string>}>
+     */
+    public function digestPhotoGroups(int $itemId, int $perEvent): array
+    {
         $ids = DB::table('telegram.chat_broadcast_item_events')
             ->where('item_id', $itemId)
             ->orderBy('position')
@@ -1493,9 +1503,34 @@ class TelegramChatBroadcastService
 
         $out = [];
         foreach ($ids as $eventId) {
-            $cover = $this->eventPhotos($eventId, 1);
-            if ($cover !== [] && ! in_array($cover[0], $out, true)) {
-                $out[] = $cover[0];
+            try {
+                $event = $this->eventRepository->findWithDetails($eventId);
+            } catch (\Throwable) {
+                continue;
+            }
+            $out[] = [
+                'event_id' => $eventId,
+                'title' => (string) $event->title,
+                'photos' => self::pickPhotos($event->getAttribute('images'), $perEvent),
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * Автоподбор альбома подборки: обложка каждого события по порядку состава, без повторов.
+     *
+     * @param  list<array{photos: list<string>}>  $groups  из `digestPhotoGroups`
+     * @return list<string>
+     */
+    public static function digestCovers(array $groups, int $limit): array
+    {
+        $out = [];
+        foreach ($groups as $group) {
+            $cover = $group['photos'][0] ?? null;
+            if ($cover !== null && ! in_array($cover, $out, true)) {
+                $out[] = $cover;
             }
             if (count($out) >= $limit) {
                 break;
