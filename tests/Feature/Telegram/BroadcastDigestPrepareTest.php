@@ -1048,6 +1048,73 @@ class BroadcastDigestPrepareTest extends TestCase
         $this->assertSame([1, 3, 2], [$rubric['issues'], $rubric['auto_lines'], $rubric['kept']]);
     }
 
+    #[DataProvider('digestOrigins')]
+    public function test_merged_event_is_swapped_for_its_copy_and_the_digest_is_not_picked_again(bool $byHand): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        if ($byHand) {
+            $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+                'out' => $named[2]['id'],
+                'in' => $candidate,
+            ])->assertOk();
+        }
+        $roster = $this->rosterOf($item);
+        $theme = $item->fresh()->digestTheme();
+        $copy = $this->themedEvent('Спектакль, копия', 2);
+        $this->mergeInto($roster[0], $copy);
+
+        $this->deliverNow($item);
+
+        $this->assertEqualsCanonicalizing([$copy, ...array_slice($roster, 1)], $this->rosterOf($item));
+        $this->assertSame($theme, $item->fresh()->digestTheme());
+        $this->assertSame(1, DB::table('roster_edits')->where('item_id', $item->id)->where('action', 'auto')->count());
+    }
+
+    public static function digestOrigins(): array
+    {
+        return ['правленная руками' => [true], 'собранная автоматом' => [false]];
+    }
+
+    public function test_hand_made_digest_left_with_two_lines_waits_for_the_owner(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[2]['id'],
+            'in' => $candidate,
+        ])->assertOk();
+        \App\Models\Event::query()->findOrFail($named[0]['id'])->delete();
+
+        $tasks = $this->deliverNow($item);
+
+        $item->refresh();
+        $this->assertNull(collect($tasks)->firstWhere('item_id', $item->id));
+        $this->assertNull($item->publish_at);
+        $this->assertTrue($item->is_off_grid);
+        $this->assertNotEmpty($item->pick_meta['held'] ?? null);
+        $this->assertCount(2, $this->rosterOf($item));
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function deliverNow(TelegramChatBroadcastItem $item): array
+    {
+        $item->refresh();
+        $item->publish_at = Carbon::now()->subMinute();
+        $item->planned_at = null;
+        $item->text_requested_at = null;
+        $item->save();
+
+        return app(\App\Services\Telegram\TelegramChatBroadcastService::class)->collectDueSingleRuns(Carbon::now());
+    }
+
+    private function mergeInto(int $dead, int $keep): void
+    {
+        \App\Models\Event::query()->findOrFail($dead)->delete();
+        DB::table('event_duplicate_links')->insert([
+            'keep_event_id' => $keep, 'drop_event_id' => $dead, 'score_total' => 1, 'verdict' => 'auto',
+            'merged_at' => now(), 'created_at' => now(), 'updated_at' => now(),
+        ]);
+    }
+
     private function eventOfAnotherInterest(): int
     {
         $concert = DB::table('interests')->insertGetId([

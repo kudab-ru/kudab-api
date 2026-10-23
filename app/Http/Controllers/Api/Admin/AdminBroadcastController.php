@@ -2404,6 +2404,17 @@ class AdminBroadcastController extends Controller
         ]);
     }
 
+    /** Почему подборку сняли с дня и ждут человека, см. `TelegramChatBroadcastService::holdDigest`; null — не ждут. */
+    private function heldReason(TelegramChatBroadcastItem $i): ?string
+    {
+        $reason = ($i->pick_meta ?? [])[TelegramChatBroadcastService::DIGEST_HELD] ?? null;
+
+        return is_string($reason) && $i->publish_at === null && $i->posted_at === null
+            && in_array($i->status, [TelegramChatBroadcastItem::STATUS_PENDING, TelegramChatBroadcastItem::STATUS_PLANNED], true)
+            ? $reason
+            : null;
+    }
+
     /**
      * Почему автомат сам не взял событие, которое человек ставит в подборку. Сбой здесь правку
      * не останавливает: запись в журнале без причины лучше отказа.
@@ -3238,8 +3249,10 @@ class AdminBroadcastController extends Controller
         // 210, собранный под 16 сентября и отправленный 15-го.
         if ($item->kind === TelegramChatBroadcastItem::KIND_DIGEST) {
             $at = $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now();
+            // пропавшее здесь не убираем: это решит доставка, она же придержит похудевшую подборку
+            $this->broadcasts->healDigestRoster($item, $at, false);
             $draft = $this->digestComposer->recompose($item, $broadcast, $at)
-                ?? $this->digestComposer->compose($broadcast, $at, $item);
+                ?? ($this->broadcasts->digestTouchedByHand($item) ? null : $this->digestComposer->compose($broadcast, $at, $item));
 
             if ($draft !== null) {
                 $this->broadcasts->applyDigestDraft($item, $draft);
@@ -4683,6 +4696,23 @@ class AdminBroadcastController extends Controller
             ];
         }
 
+        $held = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $b->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->whereNull('publish_at')
+            ->whereNull('posted_at')
+            ->get()
+            ->filter(fn (TelegramChatBroadcastItem $i) => $this->heldReason($i) !== null)
+            ->count();
+        if ($held > 0) {
+            $out[] = [
+                'level' => 'danger',
+                'text' => $held === 1
+                    ? 'Подборка ждёт проверки и сама не уйдёт — она в группе «Вне очереди», причина на карточке.'
+                    : "Ждут проверки подборки: {$held}. Сами они не уйдут — они в группе «Вне очереди», причины на карточках.",
+            ];
+        }
+
         $unpicked = $this->broadcasts->unpickedEveSlots($b, Carbon::now());
         if ($unpicked !== []) {
             $out[] = [
@@ -4820,6 +4850,7 @@ class AdminBroadcastController extends Controller
             'publish_at' => optional($i->publish_at)?->toIso8601String(),
             'posted_at' => optional($i->posted_at)?->toIso8601String(),
             'pick_reason' => PickReason::forItem($i->pick_meta),
+            'held' => $this->heldReason($i),
             // Причина — и для ошибки, и для автоматического снятия: markSkipped
             // пишет её в то же поле, а человеку нужно понимать, почему поста
             // больше нет в ленте.

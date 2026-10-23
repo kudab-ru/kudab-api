@@ -86,6 +86,13 @@ final class BroadcastDigestBooking
                 continue;
             }
 
+            // подборку этого слота уже ставили, а человек её снял или перенёс: в тот же слот не возвращаем
+            if ($this->slotHadDigest($broadcast, $at)) {
+                $summary['already']++;
+
+                continue;
+            }
+
             // рубрика раз в две недели: слот с ней пропускает неделю, пока рядом такая же подборка
             $theme = collect((array) config('broadcast_digest.themes', []))
                 ->first(fn ($t) => ($t['slug'] ?? null) === ($slot['theme'] ?? null));
@@ -108,13 +115,31 @@ final class BroadcastDigestBooking
             $item->publish_at = $at->utc();
             $item->pick_meta = PickReason::meta(PickReason::BY_DIGEST, 'schedule');
             // Рубрика слота: её возьмёт сборка состава, когда придёт время.
-            if (! empty($slot['theme'])) {
-                $item->digest_meta = ['theme_wanted' => (string) $slot['theme']];
-            }
+            $item->digest_meta = [
+                self::SLOT => self::slotKey($at),
+                ...(empty($slot['theme']) ? [] : ['theme_wanted' => (string) $slot['theme']]),
+            ];
             $item->save();
 
             $summary['booked']++;
         }
+    }
+
+    /** Ключ `digest_meta`: под какой слот поставлена бронь. Держится, когда подборку переносят или снимают. */
+    public const SLOT = 'slot';
+
+    private static function slotKey(Carbon $at): string
+    {
+        return $at->copy()->setTimezone(BroadcastSlotPlanner::TZ)->format('Y-m-d H:i');
+    }
+
+    private function slotHadDigest(TelegramChatBroadcast $broadcast, Carbon $at): bool
+    {
+        return TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->where('digest_meta->'.self::SLOT, self::slotKey($at))
+            ->exists();
     }
 
     /** Есть ли незакрытая подборка, забронированная под ЭТОТ день и час. */

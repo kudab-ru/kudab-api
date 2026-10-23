@@ -12,6 +12,7 @@ use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\Venue;
+use App\Services\EventSurvivor;
 use App\Services\Telegram\Scoring\EventAccess;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Support\BroadcastSafety;
@@ -93,6 +94,7 @@ class TelegramChatBroadcastService
         private readonly BroadcastDigestComposer $digestComposer,
         private readonly BroadcastWeekendHold $weekendHold,
         private readonly DigestRosterJournal $rosterJournal,
+        private readonly EventSurvivor $survivors,
     ) {}
 
     /**
@@ -1091,7 +1093,21 @@ class TelegramChatBroadcastService
             return true;
         }
 
+        $byHand = $this->digestTouchedByHand($item);
+        $dropped = $this->healDigestRoster($item, $now, $byHand);
+        if ($byHand && $dropped > 0 && $this->digestRosterSize($item) < self::HAND_DIGEST_MIN) {
+            $this->holdDigest($item, 'из состава пропали события, осталось строк: '.$this->digestRosterSize($item));
+
+            return false;
+        }
+
         $draft = $this->digestComposer->recompose($item, $broadcast, $now);
+
+        if ($draft === null && $byHand) {
+            $this->holdDigest($item, 'состав не собирается к часу выхода');
+
+            return false;
+        }
 
         if ($draft === null) {
             // состав рассыпался (события удалили или начались): выбираем заново и просим новый текст
@@ -1133,6 +1149,116 @@ class TelegramChatBroadcastService
         }
 
         return true;
+    }
+
+    /** Меньше стольких строк подборка, которую трогал человек, сама не уходит: решает он. */
+    private const HAND_DIGEST_MIN = 3;
+
+    /** Ключ `pick_meta`: почему подборку сняли с дня и ждут человека; показывает админка. */
+    public const DIGEST_HELD = 'held';
+
+    /**
+     * Подборку трогал человек: правил состав, время, текст или картинки, либо поставил её сам. Такую
+     * автомат заново не выбирает, см. `healDigestRoster`.
+     */
+    public function digestTouchedByHand(TelegramChatBroadcastItem $item): bool
+    {
+        return $item->edited_at !== null
+            || (($item->pick_meta ?? [])['by'] ?? null) === PickReason::BY_HAND
+            || $this->rosterJournal->editedByHand((int) $item->id);
+    }
+
+    /**
+     * Привести состав к моменту `$at`: склеенное событие меняется на выжившую копию вместе со своей
+     * строкой текста, а пропавшее без копии убирается, если `$dropLost`.
+     *
+     * @return int сколько строк убрано
+     */
+    public function healDigestRoster(TelegramChatBroadcastItem $item, Carbon $at, bool $dropLost): int
+    {
+        $roster = DB::table('telegram.chat_broadcast_item_events')
+            ->where('item_id', $item->id)
+            ->where('position', '>', 0)
+            ->orderBy('position')
+            ->pluck('event_id')
+            ->map(fn ($v) => (int) $v)
+            ->all();
+        $lost = array_values(array_diff($roster, $this->digestComposer->nameable($roster, $at)));
+
+        $meta = (array) ($item->digest_meta ?? []);
+        $dropped = 0;
+        foreach ($lost as $eventId) {
+            $before = $roster;
+            $survivor = (int) ($this->survivors->find($eventId)[0]->id ?? 0);
+            $usable = $survivor > 0 && ! in_array($survivor, $roster, true)
+                && $this->digestComposer->nameable([$survivor], $at) !== [];
+
+            $links = DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->where('event_id', $eventId);
+            if ($usable) {
+                $links->update(['event_id' => $survivor]);
+                $roster = array_map(fn ($id) => $id === $eventId ? $survivor : $id, $roster);
+                $meta = self::withTextMovedTo($meta, $eventId, $survivor);
+            } elseif ($dropLost) {
+                $links->delete();
+                $roster = array_values(array_diff($roster, [$eventId]));
+                $dropped++;
+            } else {
+                continue;
+            }
+
+            $this->rosterJournal->edited($item, DigestRosterJournal::HEAL, $before, $roster, [
+                'out' => $eventId,
+                'in' => $usable ? $survivor : null,
+            ]);
+            Log::info('broadcast.digest.roster_healed', [
+                'item_id' => $item->id,
+                'lost' => $eventId,
+                'survivor' => $usable ? $survivor : null,
+            ]);
+        }
+
+        if ($meta !== (array) ($item->digest_meta ?? [])) {
+            $item->digest_meta = $meta;
+            $item->save();
+        }
+
+        return $dropped;
+    }
+
+    /**
+     * Текст про событие переходит к его выжившей копии: это то же событие, и заказывать текст заново незачем.
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array<string, mixed>
+     */
+    private static function withTextMovedTo(array $meta, int $from, int $to): array
+    {
+        if (isset($meta['hooks'][(string) $from])) {
+            $meta['hooks'][(string) $to] = $meta['hooks'][(string) $from];
+            unset($meta['hooks'][(string) $from]);
+        }
+        if (isset($meta['roster'])) {
+            $meta['roster'] = array_map(fn ($id) => (int) $id === $from ? $to : (int) $id, (array) $meta['roster']);
+        }
+        if ((int) ($meta['intro_event'] ?? 0) === $from) {
+            $meta['intro_event'] = $to;
+        }
+
+        return $meta;
+    }
+
+    /**
+     * Снять подборку с дня: вне очереди и без дня она уходит только по кнопке. Причину видно в ленте
+     * админки и в сводке канала.
+     */
+    private function holdDigest(TelegramChatBroadcastItem $item, string $reason): void
+    {
+        $item->publish_at = null;
+        $item->is_off_grid = true;
+        $item->pick_meta = [...(array) ($item->pick_meta ?? []), self::DIGEST_HELD => $reason];
+        $item->save();
+
+        Log::warning('broadcast.digest.held', ['item_id' => $item->id, 'reason' => $reason]);
     }
 
     /** Сколько событий уже названо в связи «пост → события». */

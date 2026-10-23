@@ -10,6 +10,7 @@ use App\Services\Telegram\BroadcastDigestBooking;
 use App\Services\Telegram\BroadcastSlotPlanner;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -77,6 +78,37 @@ class BroadcastDigestBookingTest extends TestCase
             ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)->count());
 
         Carbon::setTestNow();
+    }
+
+    #[DataProvider('digestsGoneFromTheirSlot')]
+    public function test_digest_moved_or_removed_by_hand_does_not_come_back_to_its_slot(string $how): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 12:00', 'Europe/Moscow'));
+
+        $broadcast = $this->makeChannel();
+        $broadcast->slots = [10, 19];
+        $broadcast->digest_weekday = 1;
+        $broadcast->save();
+        $this->booking()->bookDue(Carbon::now());
+
+        $item = TelegramChatBroadcastItem::query()->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)->firstOrFail();
+        if ($how === 'moved') {
+            $item->publish_at = Carbon::parse('2026-09-21 10:00', 'Europe/Moscow');
+        } else {
+            $item->removeByHand();
+        }
+        $item->save();
+
+        $this->booking()->bookDue(Carbon::now());
+
+        $this->assertSame(1, TelegramChatBroadcastItem::query()->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)->count());
+
+        Carbon::setTestNow();
+    }
+
+    public static function digestsGoneFromTheirSlot(): array
+    {
+        return ['перенесена на утро' => ['moved'], 'снята из ленты' => ['removed']];
     }
 
     /** Занятый слот не вытесняем — берём следующую неделю. */

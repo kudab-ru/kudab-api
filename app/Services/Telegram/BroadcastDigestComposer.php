@@ -345,10 +345,7 @@ final class BroadcastDigestComposer
         $rows = DB::table('events as e')
             ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
             ->whereIn('e.id', $ids)
-            ->whereNull('e.deleted_at')
-            ->where('e.status', 'active')
-            // Тем же правилом срока, что и пул: многодневка годится, пока идёт.
-            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, 0, 'e', wholeDay: true))
+            ->where(fn ($q) => self::whereNameable($q, $publishAt))
             ->selectRaw(EventStart::sql('e').' as start_time')
             ->addSelect([
                 'e.id', 'e.title', 'e.event_group_id', 'e.venue_id',
@@ -375,6 +372,34 @@ final class BroadcastDigestComposer
         }
 
         return $named;
+    }
+
+    /** Событие ещё можно назвать в подборке: не удалено, не снято и к выходу не прошло, многодневка — пока идёт. */
+    private static function whereNameable($query, Carbon $publishAt): void
+    {
+        $query->whereNull('e.deleted_at')
+            ->where('e.status', 'active')
+            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, 0, 'e', wholeDay: true));
+    }
+
+    /**
+     * Те из событий, что ещё можно назвать к `$publishAt`; строки с остальными `recompose` считает выпавшими.
+     *
+     * @param  list<int>  $eventIds
+     * @return list<int>
+     */
+    public function nameable(array $eventIds, Carbon $publishAt): array
+    {
+        if ($eventIds === []) {
+            return [];
+        }
+
+        return DB::table('events as e')
+            ->whereIn('e.id', $eventIds)
+            ->where(fn ($q) => self::whereNameable($q, $publishAt))
+            ->pluck('e.id')
+            ->map(fn ($v) => (int) $v)
+            ->all();
     }
 
     /**

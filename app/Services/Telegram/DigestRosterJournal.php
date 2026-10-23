@@ -28,6 +28,12 @@ final class DigestRosterJournal
 
     public const REORDER = 'reorder';
 
+    /** Автомат поправил состав перед выходом: склеенное заменил копией или убрал пропавшее, см. `TelegramChatBroadcastService::healDigestRoster`. */
+    public const HEAL = 'heal';
+
+    /** Правки человека: по ним видно, что состав выбран руками. */
+    private const BY_HAND = [self::ADD, self::REMOVE, self::REPLACE, self::REORDER];
+
     /** Сколько последних правок показывает отчёт. */
     private const RECENT = 80;
 
@@ -60,6 +66,16 @@ final class DigestRosterJournal
         $at = DB::table(self::TABLE)->where('item_id', $itemId)->where('action', self::AUTO)->max('created_at');
 
         return $at === null ? null : Carbon::parse($at);
+    }
+
+    public function editedByHand(int $itemId): bool
+    {
+        // своя точка отката, как в `write`: таблицы может ещё не быть, а вызывают и из доставки
+        try {
+            return DB::transaction(fn () => DB::table(self::TABLE)->where('item_id', $itemId)->whereIn('action', self::BY_HAND)->exists());
+        } catch (Throwable) {
+            return false;
+        }
     }
 
     /**
@@ -139,11 +155,20 @@ final class DigestRosterJournal
 
             $s = $stats[$rubric] ?? ['issues' => 0, 'auto_lines' => 0, 'kept' => 0, 'removed' => [], 'added' => [], 'missed' => []];
             $picked = json_decode((string) $auto->roster_after, true) ?: [];
+            $left = $final[$itemId] ?? [];
+            $later = $entries->where('id', '>', $auto->id);
+
+            // склеенное автомат заменил копией: строка та же, хоть номер события и другой
+            foreach ($later->where('action', self::HEAL) as $e) {
+                if ($e->event_in !== null && in_array((int) $e->event_in, $left, true)) {
+                    $left[] = (int) $e->event_out;
+                }
+            }
             $s['issues']++;
             $s['auto_lines'] += count($picked);
-            $s['kept'] += count(array_intersect($picked, $final[$itemId] ?? []));
+            $s['kept'] += count(array_intersect($picked, $left));
 
-            foreach ($entries->where('id', '>', $auto->id) as $e) {
+            foreach ($later->where('action', '!=', self::HEAL) as $e) {
                 if ($e->event_out !== null) {
                     $s['removed'][] = $interests[(int) $e->event_out] ?? 'без темы';
                 }
