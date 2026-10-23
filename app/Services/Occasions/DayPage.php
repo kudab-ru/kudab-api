@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Occasions;
 
 use App\Models\City;
+use App\Services\Weather\CityWeather;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
 
@@ -22,7 +23,10 @@ final class DayPage
 
     private const REL = ['сегодня', 'завтра'];
 
-    public function __construct(private readonly SliceBuilder $slices) {}
+    public function __construct(
+        private readonly SliceBuilder $slices,
+        private readonly CityWeather $weather,
+    ) {}
 
     /**
      * Вкладки дней и один из них целиком: `want` — его дата, иначе сегодня.
@@ -43,8 +47,19 @@ final class DayPage
                 'rel' => $d['rel'], 'days_left' => $d['days_left'], 'total' => $d['total'],
                 'holiday' => $d['holiday'] === null ? null : array_diff_key($d['holiday'], ['ids' => true]),
             ], $all),
-            'current' => $this->slices->withoutPicks(collect($all)->firstWhere('w', $want) ?? $all[0]),
+            'current' => $this->withWeather($city, $this->slices->withoutPicks(collect($all)->firstWhere('w', $want) ?? $all[0]), $now),
         ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $current
+     * @return array<string, mixed>
+     */
+    private function withWeather(City $city, array $current, Carbon $now): array
+    {
+        return $current + ['weather' => $this->weather->forDays(
+            $city, Carbon::parse($current['from'], 'Europe/Moscow'), Carbon::parse($current['to'], 'Europe/Moscow')->endOfDay(), $now,
+        )];
     }
 
     /** @return array<string, mixed> */

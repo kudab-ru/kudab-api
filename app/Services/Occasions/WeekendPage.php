@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Occasions;
 
 use App\Models\City;
+use App\Services\Weather\CityWeather;
 use App\Support\WeekendWindow;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
@@ -25,7 +26,10 @@ final class WeekendPage
 
     private const REL = ['эти выходные', 'следующие выходные', 'через две недели', 'через три недели'];
 
-    public function __construct(private readonly SliceBuilder $slices) {}
+    public function __construct(
+        private readonly SliceBuilder $slices,
+        private readonly CityWeather $weather,
+    ) {}
 
     /**
      * Сводка всех выходных для вкладок и одни из них целиком: `want` — дата их субботы, иначе ближайшие.
@@ -53,8 +57,19 @@ final class WeekendPage
                 'rel' => $w['rel'], 'days_left' => $w['days_left'], 'total' => $w['total'],
                 'holiday' => $w['holiday'] === null ? null : array_diff_key($w['holiday'], ['ids' => true]),
             ], $all),
-            'current' => $this->slices->withoutPicks(collect($all)->firstWhere('w', $want) ?? $all[0]),
+            'current' => $this->withWeather($city, $this->slices->withoutPicks(collect($all)->firstWhere('w', $want) ?? $all[0]), $now),
         ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $current
+     * @return array<string, mixed>
+     */
+    private function withWeather(City $city, array $current, Carbon $now): array
+    {
+        return $current + ['weather' => $this->weather->forDays(
+            $city, Carbon::parse($current['from'], 'Europe/Moscow'), Carbon::parse($current['to'], 'Europe/Moscow')->endOfDay(), $now,
+        )];
     }
 
     /** @return list<array{0: Carbon, 1: Carbon}> */
