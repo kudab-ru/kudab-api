@@ -60,6 +60,32 @@ final class DigestRosterJournal
         $this->write($item, $action, $before, $after, $details);
     }
 
+    /**
+     * Человек поправил программу праздника на сайте: `add` — поставил событие, `remove` — убрал.
+     *
+     * @param  array{rule: string, note: string}|null  $missed  почему правила повода событие не брали
+     */
+    public function occasionEdited(string $slug, string $action, int $eventId, ?string $reason, ?array $missed): void
+    {
+        $reason = trim((string) $reason);
+        try {
+            DB::transaction(fn () => DB::table(self::TABLE)->insert([
+                'scope' => 'occasion',
+                'rubric' => $slug,
+                'action' => $action,
+                'event_in' => $action === self::ADD ? $eventId : null,
+                'event_out' => $action === self::REMOVE ? $eventId : null,
+                'reason' => $reason === '' ? null : mb_substr($reason, 0, 300),
+                'missed_rule' => $missed['rule'] ?? null,
+                'missed_note' => $missed['note'] ?? null,
+                'user_id' => auth()->id(),
+                'created_at' => now(),
+            ]));
+        } catch (Throwable $e) {
+            Log::warning('occasion.program.journal_failed', ['slug' => $slug, 'event_id' => $eventId, 'error' => $e->getMessage()]);
+        }
+    }
+
     /** Когда автомат последний раз выбирал состав записи; null — не выбирал с тех пор, как ведётся журнал. */
     public function pickedAt(int $itemId): ?Carbon
     {
@@ -201,15 +227,21 @@ final class DigestRosterJournal
         }
         usort($rubrics, fn ($a, $b) => $b['issues'] <=> $a['issues']);
 
-        $users = DB::table('users')->whereIn('id', $rows->pluck('user_id')->filter()->unique()->all())->pluck('name', 'id');
+        // правки программ праздников идут общим списком: программа у праздника одна на сайт, а не на канал
+        $recent = $rows->concat(DB::table(self::TABLE)->where('scope', 'occasion')->orderByDesc('id')->limit(self::RECENT)->get())
+            ->sortByDesc('id')
+            ->take(self::RECENT);
+        $titles += $this->titles($recent);
+        $users = DB::table('users')->whereIn('id', $recent->pluck('user_id')->filter()->unique()->all())->pluck('name', 'id');
         $named = fn (array $ids) => array_map(fn ($id) => ['id' => (int) $id, 'title' => $titles[(int) $id] ?? '—'], $ids);
 
         $entries = [];
-        foreach ($rows->sortByDesc('id')->take(self::RECENT) as $e) {
+        foreach ($recent as $e) {
             $entries[] = [
                 'id' => (int) $e->id,
                 'at' => Carbon::parse($e->created_at)->toIso8601String(),
-                'item_id' => (int) $e->item_id,
+                'scope' => (string) $e->scope,
+                'item_id' => $e->item_id !== null ? (int) $e->item_id : null,
                 'rubric' => (string) ($themes[$e->rubric]['title'] ?? $e->rubric ?? ''),
                 'action' => (string) $e->action,
                 'user' => $e->user_id !== null ? ($users[$e->user_id] ?? 'человек') : null,

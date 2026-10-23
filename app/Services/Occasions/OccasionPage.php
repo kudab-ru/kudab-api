@@ -174,6 +174,18 @@ final class OccasionPage
     }
 
     /**
+     * Все события программы, и повторы серии тоже: строки страницы `rows` их сворачивают.
+     *
+     * @param  array<string, mixed>  $theme
+     * @param  array{0: Carbon, 1: Carbon}  $window
+     * @return list<int>
+     */
+    public function programIds(array $theme, City $city, array $window): array
+    {
+        return $this->eventsQuery($theme, $city, $window)->pluck('events.id')->map(fn ($v) => (int) $v)->all();
+    }
+
+    /**
      * Входит ли событие в программу праздника: те же правила и то же окно, что у страницы.
      *
      * @param  array<string, mixed>  $theme
@@ -192,22 +204,75 @@ final class OccasionPage
      */
     private function eventsQuery(array $theme, City $city, array $window): Builder
     {
-        $q = Event::query()
+        [$added, $removed] = $this->handPicks((string) $theme['slug']);
+
+        return Event::query()
             ->where('events.city_id', $city->id)
             ->where('events.status', 'active')
             ->whereNull('events.deleted_at')
-            ->webNotBlacklisted()
-            ->webFeedContentKind()
             ->where(fn ($q) => EventStart::notBefore($q, $window[0], 'events'))
             ->where(fn ($q) => EventStart::notAfter($q, $window[1], 'events'))
-            // часам повода событие без часа не годится, см. BroadcastDigestComposer::poolForTheme
-            ->when(isset($theme['hours']), fn ($q) => $q->where('events.time_precision', '<>', 'date'));
+            // решение человека сильнее правил: добавленное входит вопреки им, убранное не входит вовсе
+            ->where(fn ($q) => $q->where(function ($rules) use ($theme) {
+                foreach ($this->rules($theme) as $rule) {
+                    $rule($rules);
+                }
+            })->orWhereIn('events.id', $added))
+            ->whereNotIn('events.id', $removed);
+    }
 
-        if (in_array($theme['pick'] ?? '', ['words', 'all'], true)) {
-            OccasionCalendar::applyWords($q, $theme, 'events');
+    /**
+     * Правила повода по одному, с именами из `BroadcastDigestComposer::MISS_NOTES`: по ним видно, какое
+     * не прошло событие, добавленное руками.
+     *
+     * @param  array<string, mixed>  $theme
+     * @return array<string, \Closure(Builder<Event>): mixed>
+     */
+    private function rules(array $theme): array
+    {
+        return array_filter([
+            'hidden' => fn ($q) => $q->webNotBlacklisted()->webFeedContentKind(),
+            // часам повода событие без часа не годится, см. BroadcastDigestComposer::poolForTheme
+            'no_time' => isset($theme['hours']) ? fn ($q) => $q->where('events.time_precision', '<>', 'date') : null,
+            'words' => in_array($theme['pick'] ?? '', ['words', 'all'], true)
+                ? fn ($q) => OccasionCalendar::applyWords($q, $theme, 'events')
+                : null,
+        ]);
+    }
+
+    /**
+     * Какое правило повода не проходит событие; null — проходит все.
+     *
+     * @param  array<string, mixed>  $theme
+     */
+    public function brokenRule(array $theme, int $eventId): ?string
+    {
+        foreach ($this->rules($theme) as $name => $rule) {
+            $q = Event::query()->whereKey($eventId);
+            $rule($q);
+            if (! $q->exists()) {
+                return $name;
+            }
         }
 
-        return $q;
+        return null;
+    }
+
+    /**
+     * Решения человека по программе повода, таблица `occasion_picks`.
+     *
+     * @return array{0: list<int>, 1: list<int>} добавленные и убранные события
+     */
+    public function handPicks(string $slug): array
+    {
+        $ids = fn (bool $included) => DB::table('occasion_picks')->where('slug', $slug)->where('included', $included)
+            ->pluck('event_id')->map(fn ($v) => (int) $v)->all();
+        try {
+            return [$ids(true), $ids(false)];
+        } catch (\Throwable) {
+            // таблицы ещё нет: при выкате код встаёт раньше миграции, а праздник спрашивает и страница события
+            return [[], []];
+        }
     }
 
     /**

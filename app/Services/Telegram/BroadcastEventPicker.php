@@ -180,6 +180,41 @@ final class BroadcastEventPicker
         return ['rows' => $rows, 'meta' => ['search' => $search, 'total' => count($rows)]];
     }
 
+    /**
+     * Добавить в программу праздника: без запроса — события его дней, которых в программе нет, с запросом — весь город.
+     *
+     * @param  array{0: Carbon, 1: Carbon}  $window
+     * @param  list<int>  $program  что уже в программе
+     * @return array{rows: list<array<string, mixed>>, meta: array<string, mixed>}
+     */
+    public function forOccasion(int $cityId, array $window, array $program, ?string $query): array
+    {
+        $search = self::isSearch($query);
+        $q = $this->cityEvents($cityId);
+        if ($search) {
+            $this->applySearch($q, (string) $query, wholeDay: true);
+        } else {
+            $q->where(fn ($w) => EventStart::notBefore($w, $window[0], 'events'))
+                ->where(fn ($w) => EventStart::notAfter($w, $window[1], 'events'))
+                ->whereNotIn('events.id', $program)
+                ->orderBy('events.start_time')
+                ->orderBy('events.id');
+        }
+
+        $rows = [];
+        foreach ($this->load($q) as $e) {
+            $start = EventStart::of($e);
+            $verdict = match (true) {
+                in_array((int) $e->id, $program, true) => self::verdict(null, 'в программе', null, 'muted'),
+                $start === null || $start->lt($window[0]) || $start->gt($window[1]) => self::verdict(null, 'не в днях праздника', null, 'no'),
+                default => self::verdict('place', 'Добавить', null, null),
+            };
+            $rows[] = ['soon' => false] + $this->row($e, $window[0]) + $verdict;
+        }
+
+        return ['rows' => $rows, 'meta' => ['search' => $search, 'total' => count($rows)]];
+    }
+
     private function cityEvents(int $cityId): Builder
     {
         [$hiddenSql, $hiddenBindings] = Event::channelHiddenSql();

@@ -29,10 +29,26 @@ final class OccasionPromo
     public function pageData(array $theme, City $city): array
     {
         return Cache::remember(
-            'occasion-page:v2:'.$city->slug.':'.$theme['page'],
+            self::pageKey($theme, $city),
             self::CACHE_SECONDS,
             fn () => $this->page->build($theme, $city, Carbon::now()),
         );
+    }
+
+    /**
+     * Программу поправили руками — страница собирается заново, а не ждёт конца кэша.
+     *
+     * @param  array<string, mixed>  $theme
+     */
+    public static function forgetPage(City $city, array $theme): void
+    {
+        Cache::forget(self::pageKey($theme, $city));
+    }
+
+    /** @param  array<string, mixed>  $theme */
+    private static function pageKey(array $theme, City $city): string
+    {
+        return 'occasion-page:v2:'.$city->slug.':'.$theme['page'];
     }
 
     /** Ближайший праздник для ленты на главной; null — он дальше двух недель или событий у него нет. */

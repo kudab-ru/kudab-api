@@ -55,6 +55,33 @@ class WebOccasionsTest extends TestCase
     }
 
     #[Test]
+    public function the_owner_overrules_the_holiday_words_in_the_program(): void
+    {
+        $party = $this->event('Хэллоуинская вечеринка', '2026-10-31 18:00');
+        $jazz = $this->event('Джазовый вечер', '2026-10-31 20:00');
+        $base = '/api/admin/broadcast/channels/'.$this->channel()->id.'/occasions/povod-halloween/program';
+        \Spatie\Permission\Models\Role::findOrCreate('superadmin', 'web');
+        $admin = \App\Models\User::factory()->create();
+        $admin->assignRole('superadmin');
+        \Laravel\Sanctum\Sanctum::actingAs($admin);
+        $shown = fn () => array_merge(...array_map(
+            fn (array $day) => array_column($day['events'], 'id'),
+            $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data.days'),
+        ));
+
+        $this->postJson($base.'/include', ['event_id' => $jazz])->assertOk();
+        $this->postJson($base.'/exclude', ['event_id' => $party])->assertOk();
+
+        $this->assertSame([$jazz], $shown());
+        $this->assertSame('words', DB::table('roster_edits')->where('event_in', $jazz)->value('missed_rule'));
+
+        $this->postJson($base.'/exclude', ['event_id' => $jazz])->assertOk();
+
+        $this->assertSame([], $shown());
+        $this->assertSame(0, DB::table('occasion_picks')->where('event_id', $jazz)->count());
+    }
+
+    #[Test]
     public function two_sessions_of_one_event_make_one_row(): void
     {
         $group = (int) DB::table('event_groups')->insertGetId([
@@ -192,6 +219,26 @@ class WebOccasionsTest extends TestCase
      */
     private function postedOccasion(array $roster, array $hooks): void
     {
+        $broadcast = $this->channel();
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $broadcast->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->is_off_grid = true;
+        $item->publish_at = Carbon::parse('2026-10-24 12:00', 'Europe/Moscow');
+        $item->digest_meta = ['theme' => 'povod-halloween', 'hooks' => $hooks];
+        $item->save();
+
+        foreach ($roster as $i => $eventId) {
+            DB::table('telegram.chat_broadcast_item_events')->insert([
+                'item_id' => $item->id, 'event_id' => $eventId, 'position' => $i + 1, 'created_at' => now(),
+            ]);
+        }
+    }
+
+    private function channel(): TelegramChatBroadcast
+    {
         $user = TelegramUser::create(['telegram_id' => random_int(10_000, 99_999), 'first_name' => 'Владелец']);
         $chat = new TelegramChat;
         $chat->telegram_user_id = $user->id;
@@ -209,19 +256,6 @@ class WebOccasionsTest extends TestCase
         $broadcast->period = 'daily_19';
         $broadcast->save();
 
-        $item = new TelegramChatBroadcastItem;
-        $item->broadcast_id = $broadcast->id;
-        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
-        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
-        $item->is_off_grid = true;
-        $item->publish_at = Carbon::parse('2026-10-24 12:00', 'Europe/Moscow');
-        $item->digest_meta = ['theme' => 'povod-halloween', 'hooks' => $hooks];
-        $item->save();
-
-        foreach ($roster as $i => $eventId) {
-            DB::table('telegram.chat_broadcast_item_events')->insert([
-                'item_id' => $item->id, 'event_id' => $eventId, 'position' => $i + 1, 'created_at' => now(),
-            ]);
-        }
+        return $broadcast;
     }
 }

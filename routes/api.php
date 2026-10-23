@@ -95,6 +95,10 @@ Route::prefix('admin')
         Route::post('/broadcast/channels/{id}/occasions/{slug}/skip', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'skip']);
         Route::delete('/broadcast/channels/{id}/occasions/{slug}/skip', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'unskip']);
         Route::post('/broadcast/channels/{id}/occasions/{slug}/book', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'book']);
+        Route::get('/broadcast/channels/{id}/occasions/{slug}/program', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'program']);
+        Route::get('/broadcast/channels/{id}/occasions/{slug}/picker', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'picker']);
+        Route::post('/broadcast/channels/{id}/occasions/{slug}/program/include', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'include']);
+        Route::post('/broadcast/channels/{id}/occasions/{slug}/program/exclude', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'exclude']);
         // даты праздников, которые назначают каждый год заново: общие для всех каналов
         Route::post('/broadcast/occasions/{slug}/dates', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'addDate']);
         Route::delete('/broadcast/occasions/{slug}/dates/{date}', [\App\Http\Controllers\Api\Admin\AdminOccasionsController::class, 'removeDate'])->where('date', '\d{4}-\d{2}-\d{2}');

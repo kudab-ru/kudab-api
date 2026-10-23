@@ -5,11 +5,17 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\City;
+use App\Models\Event;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Services\Occasions\OccasionCalendar;
+use App\Services\Occasions\OccasionPage;
+use App\Services\Occasions\OccasionPromo;
 use App\Services\Telegram\BroadcastDigestComposer;
+use App\Services\Telegram\BroadcastEventPicker;
 use App\Services\Telegram\BroadcastOccasions;
+use App\Services\Telegram\DigestRosterJournal;
 use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\PickReason;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
@@ -42,7 +48,147 @@ final class AdminOccasionsController extends Controller
         private readonly BroadcastOccasions $occasions,
         private readonly EventBroadcastScorer $scorer,
         private readonly TelegramChatBroadcastService $broadcasts,
+        private readonly OccasionPage $page,
+        private readonly BroadcastEventPicker $picker,
+        private readonly DigestRosterJournal $journal,
     ) {}
+
+    /** Программа праздника, как её показывает сайт, и что из неё убрано руками. */
+    public function program(int $broadcastId, string $slug): JsonResponse
+    {
+        [$theme, $city, $window] = $this->programScope($broadcastId, $slug);
+        [$added, $removed] = $this->page->handPicks($slug);
+        $rows = $this->page->assemble($theme, $city, Carbon::now(self::TZ), $window, null, null)['rows'];
+
+        return response()->json(['data' => [
+            'rows' => array_map(fn (array $r) => [
+                'id' => $r['id'],
+                'title' => $r['title'],
+                'when' => $this->when($r['start_at'], $r['time_precision']),
+                'venue' => $r['venue'],
+                'by_hand' => in_array($r['id'], $added, true),
+            ], $rows),
+            'removed' => $this->eventLines($removed, (string) $city->name),
+        ]]);
+    }
+
+    /** Что добавить в программу: см. `BroadcastEventPicker::forOccasion`. */
+    public function picker(Request $request, int $broadcastId, string $slug): JsonResponse
+    {
+        $data = $request->validate(['q' => ['nullable', 'string', 'max:300']]);
+        [$theme, $city, $window] = $this->programScope($broadcastId, $slug);
+        $out = $this->picker->forOccasion((int) $city->id, $window, $this->page->programIds($theme, $city, $window), $data['q'] ?? null);
+        $site = rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/');
+
+        return response()->json([
+            'data' => array_map(fn (array $row) => $row + ['url' => $site.'/events/'.$row['id']], $out['rows']),
+            'meta' => $out['meta'],
+        ]);
+    }
+
+    /** Поставить событие в программу праздника вопреки правилам повода. */
+    public function include(Request $request, int $broadcastId, string $slug): JsonResponse
+    {
+        return $this->decide($request, $broadcastId, $slug, true);
+    }
+
+    /** Убрать событие из программы праздника. */
+    public function exclude(Request $request, int $broadcastId, string $slug): JsonResponse
+    {
+        return $this->decide($request, $broadcastId, $slug, false);
+    }
+
+    /**
+     * Хранится только расхождение с правилами: событие, которое правила и так берут, «добавить» лишь
+     * снимает прежнее «убрано», а добавленное руками «убрать» снимает отметку.
+     */
+    private function decide(Request $request, int $broadcastId, string $slug, bool $include): JsonResponse
+    {
+        $data = $request->validate([
+            'event_id' => ['required', 'integer'],
+            'reason' => ['sometimes', 'nullable', 'string', 'max:300'],
+        ]);
+        [$theme, $city, $window] = $this->programScope($broadcastId, $slug);
+        $eventId = (int) $data['event_id'];
+
+        $event = Event::query()->where('city_id', $city->id)->where('status', 'active')->find($eventId);
+        $start = $event !== null ? EventStart::of($event) : null;
+        if ($include && ($start === null || $start->lt($window[0]) || $start->gt($window[1]))) {
+            return response()->json(['error' => 'Событие не в днях праздника — на странице его не будет.'], 422);
+        }
+
+        $rule = $this->page->brokenRule($theme, $eventId);
+        $byRules = $rule === null;
+        if ($include === $byRules) {
+            DB::table('occasion_picks')->where('slug', $slug)->where('event_id', $eventId)->delete();
+        } else {
+            DB::table('occasion_picks')->updateOrInsert(
+                ['slug' => $slug, 'event_id' => $eventId],
+                ['included' => $include, 'user_id' => auth()->id(), 'updated_at' => now(), 'created_at' => now()],
+            );
+        }
+
+        $this->journal->occasionEdited(
+            $slug,
+            $include ? DigestRosterJournal::ADD : DigestRosterJournal::REMOVE,
+            $eventId,
+            $data['reason'] ?? null,
+            $include && ! $byRules ? ['rule' => (string) $rule, 'note' => self::ruleNote((string) $rule)] : null,
+        );
+        OccasionPromo::forgetPage($city, $theme);
+
+        return $this->program($broadcastId, $slug);
+    }
+
+    /** Правило повода, которое не прошло событие, словами для журнала; имена — `OccasionPage::rules`. */
+    private static function ruleNote(string $rule): string
+    {
+        return $rule === 'hidden'
+            ? 'сайт такое не показывает: источник в чёрном списке или вид события скрыт'
+            : (BroadcastDigestComposer::MISS_NOTES[$rule] ?? $rule);
+    }
+
+    /** @return array{0: array<string, mixed>, 1: City, 2: array{0: Carbon, 1: Carbon}} */
+    private function programScope(int $broadcastId, string $slug): array
+    {
+        $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($broadcastId);
+        $theme = collect(OccasionCalendar::themes())->firstWhere('slug', $slug);
+        abort_if($theme === null || empty($theme['page']), 404);
+
+        $city = $broadcast->chat?->city;
+        $window = OccasionCalendar::window($theme, Carbon::now(self::TZ));
+        if ($city === null || $window === null) {
+            abort(response()->json(['error' => 'У праздника нет дат в этом году или у канала не задан город.'], 422));
+        }
+
+        return [$theme, $city, $window];
+    }
+
+    /**
+     * @param  list<int>  $ids
+     * @return list<array{id: int, title: string, when: string, venue: string|null}>
+     */
+    private function eventLines(array $ids, string $city): array
+    {
+        if ($ids === []) {
+            return [];
+        }
+
+        return DB::table('events as e')->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
+            ->whereIn('e.id', $ids)
+            ->whereNull('e.deleted_at')
+            ->orderByRaw(EventStart::sql('e'))
+            ->selectRaw(EventStart::sql('e').' as start_time')
+            ->addSelect(['e.id', 'e.title', 'e.time_precision', 'e.address', 'v.name as venue'])
+            ->get()
+            ->map(fn ($e) => [
+                'id' => (int) $e->id,
+                'title' => $this->title((string) $e->title),
+                'when' => $this->when($e->start_time, (string) $e->time_precision),
+                'venue' => $e->venue !== null ? VenueName::label($e->venue) : EventCaptionBuilder::placeFromAddress((string) $e->address, $city),
+            ])
+            ->all();
+    }
 
     public function index(int $broadcastId): JsonResponse
     {
