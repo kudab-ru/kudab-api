@@ -67,19 +67,37 @@ class WebVenuesTest extends TestCase
         return [
             'дефис и опечатка' => ['попкорн-драмма', 'Попкорн Драма', 'Драмтеатр'],
             'другая форма слова' => ['крамской', 'Художественный музей им. И.Н. Крамского', 'Музей «Арсенал»'],
+            'улица' => ['плехановская', 'Дом архитектора', 'Бар «Гвозди»', 'ул. Плехановская'],
+            'латиница' => ['popcorn', 'Попкорн Драма', 'Драмтеатр'],
+            'похожее слово в запросе из двух' => ['картинная галерея', 'Галерея «Х.Л.А.М.»', 'Картинг клуб ENERGY'],
+            'опечатка в начале слова' => ['консерт', 'Концертный зал', 'Картинг клуб ENERGY'],
         ];
     }
 
     #[DataProvider('nameSearchCases')]
-    public function test_index_finds_venue_by_the_same_rule_as_events(string $q, string $found, string $other): void
+    public function test_index_finds_the_venue_the_query_means(string $q, string $found, string $other, ?string $street = null): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
-        $this->createVenue($vrn->id, $found, 'found');
+        $venue = $this->createVenue($vrn->id, $found, 'found');
         $this->createVenue($vrn->id, $other, 'other');
+        DB::table('venues')->where('id', $venue->id)->update(['street' => $street]);
 
         $data = $this->getJson('/api/web/venues?city_id='.$vrn->id.'&q='.urlencode($q))->assertOk()->json('data');
 
         $this->assertSame([$found], array_column($data, 'name'));
+    }
+
+    public function test_catalog_search_is_recorded_but_the_events_search_strip_is_not(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $this->createVenue($vrn->id, 'Попкорн Драма', 'popcorn');
+        $browser = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+
+        $this->withHeader('User-Agent', $browser)->getJson('/api/web/venues?city_id='.$vrn->id.'&q=popcorn')->assertOk();
+        $this->withHeader('User-Agent', $browser)->getJson('/api/web/venues?city_id='.$vrn->id.'&detail=1&q=popcorn')->assertOk();
+
+        $row = DB::table('search_queries')->sole();
+        $this->assertSame(['popcorn', 1, ['catalog' => 'venues']], [$row->q, (int) $row->found, json_decode($row->filters, true)]);
     }
 
     public function test_index_search_puts_whole_word_before_part_of_word(): void

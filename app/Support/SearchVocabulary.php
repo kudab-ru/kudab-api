@@ -32,14 +32,6 @@ final class SearchVocabulary
     // Формы с такими окончаниями в подсказке звучат странно («музыкальном»): берём другую форму, если она есть.
     private const OBLIQUE = ['ого', 'его', 'ому', 'ему', 'ыми', 'ими', 'ами', 'ями', 'ом', 'ем', 'ым', 'им', 'ах', 'ях', 'ов', 'ев'];
 
-    // Снимается одно, самое длинное окончание: «выставка», «выставки» и «выставке» сводятся в одно слово.
-    private const ENDINGS = [
-        'ого', 'его', 'ому', 'ему', 'ыми', 'ими', 'ами', 'ями',
-        'ая', 'яя', 'ое', 'ее', 'ые', 'ие', 'ый', 'ий', 'ой', 'ей', 'ов', 'ев',
-        'ам', 'ям', 'ах', 'ях', 'ом', 'ем', 'ию', 'ия',
-        'а', 'я', 'ы', 'и', 'у', 'ю', 'е', 'ь', 'й',
-    ];
-
     /**
      * Словарь города: формы слова сведены, у каждого слова и сочетания самая частая форма
      * и число названий. Сочетание — только встреченное хотя бы в двух разных названиях:
@@ -94,7 +86,7 @@ final class SearchVocabulary
                 if (! self::useful($word)) {
                     continue;
                 }
-                $stem = self::stem(self::key($word));
+                $stem = SearchMatch::stem(self::key($word));
                 if (! isset($seenWord[$stem])) {
                     $seenWord[$stem] = true;
                     $forms[$stem][$word] = ($forms[$stem][$word] ?? 0) + 1;
@@ -104,7 +96,7 @@ final class SearchVocabulary
                 if ($next === null || ! $joined || ! self::useful($next) || self::oblique($word)) {
                     continue;
                 }
-                $pair = $stem.' '.self::stem(self::key($next));
+                $pair = $stem.' '.SearchMatch::stem(self::key($next));
                 if (! isset($seenPair[$pair])) {
                     $seenPair[$pair] = true;
                     $pairs[$pair]["$word $next"] = ($pairs[$pair]["$word $next"] ?? 0) + 1;
@@ -179,16 +171,5 @@ final class SearchVocabulary
     private static function key(string $word): string
     {
         return str_replace('ё', 'е', $word);
-    }
-
-    private static function stem(string $word): string
-    {
-        foreach (self::ENDINGS as $end) {
-            if (str_ends_with($word, $end) && mb_strlen($word) - mb_strlen($end) >= 3) {
-                return mb_substr($word, 0, mb_strlen($word) - mb_strlen($end));
-            }
-        }
-
-        return $word;
     }
 }

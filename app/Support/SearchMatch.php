@@ -46,6 +46,17 @@ final class SearchMatch
         ['Клубы и бары', 'паб(ы|ов|а|е)?', 'паб(ы|ов|а|е|у|ом|ах|ами)?([^[:alnum:]]|$)'],
     ];
 
+    // Снимается одно, самое длинное окончание: «выставка», «выставки» и «выставке» сводятся в одно слово.
+    private const ENDINGS = [
+        'ого', 'его', 'ому', 'ему', 'ыми', 'ими', 'ами', 'ями',
+        'ая', 'яя', 'ое', 'ее', 'ые', 'ие', 'ый', 'ий', 'ой', 'ей', 'ов', 'ев',
+        'ам', 'ям', 'ах', 'ях', 'ом', 'ем', 'ию', 'ия',
+        'а', 'я', 'ы', 'и', 'у', 'ю', 'е', 'ь', 'й',
+    ];
+
+    // Служебные слова запроса ничего не ищут: по «бар на плехановской» нужны бар и улица.
+    private const SERVICE_WORDS = ['в', 'во', 'на', 'и', 'у', 'с', 'со', 'по', 'для', 'к', 'из', 'от', 'до', 'за', 'о', 'об'];
+
     private static ?bool $trgm = null;
 
     /** @param list<string> $likes */
@@ -101,6 +112,58 @@ final class SearchMatch
         return [
             "(word_similarity(?, $column) >= ? OR strict_word_similarity(?, $column) >= ?)",
             [$this->token, self::FORM_THRESHOLD, $this->token, self::TYPO_THRESHOLD],
+        ];
+    }
+
+    /**
+     * Слова запроса без служебных и без окончаний: «бар на плехановской» → «бар», «плехановск».
+     *
+     * @return list<string>
+     */
+    public function stems(): array
+    {
+        $out = [];
+        foreach (explode(' ', $this->text) as $word) {
+            if ($word !== '' && ! in_array($word, self::SERVICE_WORDS, true)) {
+                $out[] = self::stem($word);
+            }
+        }
+
+        return array_values(array_unique($out));
+    }
+
+    /** Основа слова: снимается одно окончание, если после него остаётся хотя бы три буквы. */
+    public static function stem(string $word): string
+    {
+        foreach (self::ENDINGS as $end) {
+            if (str_ends_with($word, $end) && mb_strlen($word) - mb_strlen($end) >= 3) {
+                return mb_substr($word, 0, mb_strlen($word) - mb_strlen($end));
+            }
+        }
+
+        return $word;
+    }
+
+    /**
+     * В колонке есть слово, отличающееся от слова запроса одной буквой, у длинных слов двумя:
+     * «консерт» находит «концерт», а «картинная» не находит «картинг» — там три буквы. null — у короткого
+     * запроса опечатки не ищутся, или в базе нет расширения fuzzystrmatch.
+     *
+     * @return array{0: string, 1: list<mixed>}|null [sql, параметры]
+     */
+    public function typo(string $column): ?array
+    {
+        if (! $this->fuzzy || $this->venueKind() !== null || ! self::levenshteinEnabled()) {
+            return null;
+        }
+
+        $max = mb_strlen($this->token) >= 8 ? 2 : 1;
+
+        // и с началом слова той же длины: «консерт» — опечатка в «концертный»
+        return [
+            "EXISTS (SELECT 1 FROM regexp_split_to_table($column, '[^[:alnum:]]+') AS w(word)"
+                .' WHERE levenshtein(w.word, ?) <= ? OR levenshtein(left(w.word, ?), ?) <= ?)',
+            [$this->token, $max, mb_strlen($this->token), $this->token, $max],
         ];
     }
 
@@ -174,6 +237,23 @@ final class SearchMatch
         }
 
         return array_values(array_unique($likes));
+    }
+
+    private static ?bool $levenshtein = null;
+
+    /** Расширение ставит PostGIS для геокодера, но на чужой базе его может не быть. */
+    private static function levenshteinEnabled(): bool
+    {
+        if (self::$levenshtein === null) {
+            try {
+                DB::selectOne("select levenshtein('a', 'b') as d");
+                self::$levenshtein = true;
+            } catch (\Throwable) {
+                self::$levenshtein = false;
+            }
+        }
+
+        return self::$levenshtein;
     }
 
     /** На базе без pg_trgm (свежий стенд, чужая база) поиск остаётся строгим, а не падает. */

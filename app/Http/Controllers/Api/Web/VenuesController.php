@@ -9,6 +9,8 @@ use App\Models\Event;
 use App\Models\Venue;
 use App\Repositories\EventRepository;
 use App\Services\EventService;
+use App\Support\KeyboardLayout;
+use App\Support\SearchLog;
 use App\Support\SearchMatch;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -69,20 +71,29 @@ class VenuesController extends Controller
         $cityId = $this->resolveCityId($request);
 
         $perPage  = max(1, min((int) $request->input('per_page', 20), 50));
-        $rawQ     = $request->input('q');
-        $match    = SearchMatch::from(is_string($rawQ) ? $rawQ : null);
+        $rawQ     = is_string($request->input('q')) ? (string) $request->input('q') : '';
         $kind     = trim((string) $request->input('kind', ''));
         $detail   = $request->boolean('detail');
 
-        $query = $this->baseQuery()
+        $search = fn (?SearchMatch $match) => $this->baseQuery()
             ->when($cityId !== null, fn ($qq) => $qq->where('venues.city_id', $cityId))
             ->when($match !== null, fn ($qq) => $this->whereNameMatches($qq, $match))
             ->when($match !== null, fn ($qq) => $this->liveFirst($qq))
             ->when($kind !== '', fn ($qq) => $qq->where('venues.kind', $kind))
             ->orderByRaw('events_count DESC NULLS LAST')
-            ->orderBy('venues.name');
+            ->orderBy('venues.name')
+            ->paginate($perPage);
 
-        $page = $query->paginate($perPage);
+        $match = SearchMatch::from($rawQ);
+        $page = $search($match);
+        // набрано в английской раскладке: «gjgrjhy» — это «попкорн»
+        if ($match !== null && $page->total() === 0 && ($fixed = KeyboardLayout::toRussian($rawQ)) !== null) {
+            $page = $search(SearchMatch::from($fixed));
+        }
+        // строка мест в поиске афиши ходит сюда же с detail: тот поиск журнал уже записал
+        if ($match !== null && ! $detail && $page->currentPage() === 1) {
+            SearchLog::record($request, $rawQ, $cityId, $page->total(), ['catalog' => 'venues']);
+        }
 
         $this->attachUpcoming($page->items());
         // Поиск показывает единственную подошедшую площадку шапкой, как на её странице.
@@ -577,27 +588,65 @@ class VenuesController extends Controller
     }
 
     /**
-     * Площадка по имени ищется тем же правилом, что события. Слово целиком в имени идёт
-     * раньше, чем внутри другого слова: по «театр» театры раньше кинотеатров. По виду места
-     * («парк») подходит и место этого вида без слова в имени, и такие места идут первыми:
-     * парки раньше кинотеатра «Синема Парк».
+     * Каждое слово запроса ищется без окончания в имени, в латинской записи имени и в улице:
+     * «плехановская» находит места на Плехановской, «popcorn» — «Попкорн Драму». Место, где совпало
+     * больше слов, выше. Опечатку ищем только у запроса из одного слова и только в одну-две буквы:
+     * похожее по буквам слово тянет чужое, «картинная» нашла бы картинг. Место нужного вида («парк») — первым.
      */
     private function whereNameMatches($query, SearchMatch $match): void
     {
         $name = 'public.ru_normalize(venues.name)';
-        [$byName, $args] = $match->like($name);
-        $similar = $match->similar($name);
-        if ($similar !== null) {
-            $byName .= " OR {$similar[0]}";
-            $args = [...$args, ...$similar[1]];
-        }
-        $query->whereRaw(...$match->orKind($byName, $args, 'venues.kind'));
+        [$score, $args] = $this->matchScore($match, $name);
 
-        $wordStart = '(^|[^[:alnum:]])'.$match->text;
+        $where = "$score > 0";
+        $whereArgs = $args;
+        $typo = count($match->stems()) === 1 ? $match->typo($name) : null;
+        if ($typo !== null) {
+            $where .= " OR {$typo[0]}";
+            $whereArgs = [...$whereArgs, ...$typo[1]];
+        }
+        $query->whereRaw(...$match->orKind($where, $whereArgs, 'venues.kind'));
+
         $kind = $match->venueKind();
-        $kind === null
-            ? $query->orderByRaw("CASE WHEN $name ~ ? THEN 1 ELSE 2 END", [$wordStart])
-            : $query->orderByRaw("CASE WHEN venues.kind = ? THEN 0 WHEN $name ~ ? THEN 1 ELSE 2 END", [$kind, $wordStart]);
+        if ($kind !== null) {
+            $query->orderByRaw('CASE WHEN venues.kind = ? THEN 0 ELSE 1 END', [$kind]);
+        }
+        $query->orderByRaw("$score DESC", $args);
+    }
+
+    /** Слова «улица», «проспект», «дом» в адресе есть у всех мест: по ним улица не ищется. */
+    private const STREET_WORDS = ['ул', 'улиц', 'пр', 'просп', 'проспект', 'пер', 'переулок', 'пл', 'площад', 'бульвар', 'шосс', 'набережн', 'д', 'дом'];
+
+    /**
+     * Насколько место подходит под запрос: вся фраза или её синоним в имени — 4, слово с начала слова
+     * имени — 4, внутри слова — 2, в латинской записи имени — 3, в улице и доме — 1. Баллы складываются.
+     *
+     * @return array{0: string, 1: list<string>} [sql, параметры]
+     */
+    private function matchScore(SearchMatch $match, string $name): array
+    {
+        [$phrase, $args] = $match->like($name);
+        $parts = ["(CASE WHEN $phrase THEN 4 ELSE 0 END)"];
+        $street = "public.ru_normalize(concat_ws(' ', venues.street, venues.house))";
+
+        foreach ($match->stems() as $stem) {
+            $case = "CASE WHEN $name ~ ? THEN 4";
+            $args[] = '(^|[^[:alnum:]])'.$stem;
+            // кусок внутри слова — только у длинной основы: «бар» есть в «барине»
+            if (mb_strlen($stem) >= 4) {
+                $case .= " WHEN $name LIKE ? THEN 2";
+                $args[] = '%'.$stem.'%';
+            }
+            $case .= " WHEN public.lat_skeleton(venues.name) ~ ('(^|[^a-z0-9])' || public.lat_skeleton(?)) THEN 3";
+            $args[] = $stem;
+            if (! in_array($stem, self::STREET_WORDS, true)) {
+                $case .= " WHEN $street ~ ? THEN 1";
+                $args[] = '(^|[^[:alnum:]])'.$stem;
+            }
+            $parts[] = "($case ELSE 0 END)";
+        }
+
+        return ['('.implode(' + ', $parts).')', $args];
     }
 
     /**
