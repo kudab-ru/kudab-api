@@ -976,6 +976,109 @@ class BroadcastDigestPrepareTest extends TestCase
         ];
     }
 
+    public function test_journal_keeps_the_automat_pick_and_the_hand_edit_apart(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $picked = $this->rosterOf($item);
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[1]['id'],
+            'in' => $candidate,
+            'cool' => true,
+            'reason' => 'слабое описание',
+        ])->assertOk();
+
+        $rows = DB::table('roster_edits')->where('item_id', $item->id)->orderBy('id')->get();
+        $this->assertSame(['auto', 'replace'], $rows->pluck('action')->all());
+        $this->assertSame($picked, json_decode($rows[0]->roster_after, true));
+
+        $edit = $rows[1];
+        $this->assertSame($picked, json_decode($edit->roster_before, true));
+        $this->assertSame($this->rosterOf($item), json_decode($edit->roster_after, true));
+        $this->assertSame([$candidate, $named[1]['id']], [(int) $edit->event_in, (int) $edit->event_out]);
+        $this->assertTrue((bool) $edit->cooled);
+        $this->assertSame('слабое описание', $edit->reason);
+        $this->assertNotNull($edit->user_id);
+    }
+
+    #[DataProvider('missedRules')]
+    public function test_journal_says_why_the_automat_left_the_added_event_out(string $rule): void
+    {
+        [$item, , $spare] = $this->composedDigestWithSpare();
+
+        $in = match ($rule) {
+            'rank' => $spare,
+            'interest' => $this->eventOfAnotherInterest(),
+            'new' => $this->eventAfterThePick(),
+            'shown' => $this->eventWithItsOwnPost($item, $spare),
+        };
+
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/add", ['in' => $in, 'swap' => true])
+            ->assertOk();
+
+        $this->assertSame($rule, DB::table('roster_edits')->where('action', 'add')->value('missed_rule'));
+    }
+
+    public static function missedRules(): array
+    {
+        return [
+            'был среди кандидатов' => ['rank'],
+            'основная тема другая' => ['interest'],
+            'появилось после сборки' => ['new'],
+            'уже стоит своим постом' => ['shown'],
+        ];
+    }
+
+    public function test_report_counts_the_automat_lines_left_in_posted_digests(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[1]['id'],
+            'in' => $candidate,
+        ])->assertOk();
+        $item->refresh();
+        $item->status = TelegramChatBroadcastItem::STATUS_POSTED;
+        $item->posted_at = now();
+        $item->save();
+
+        $rubric = $this->getJson("/api/admin/broadcast/channels/{$item->broadcast_id}/digest-journal")
+            ->assertOk()
+            ->json('data.rubrics.0');
+
+        $this->assertSame([1, 3, 2], [$rubric['issues'], $rubric['auto_lines'], $rubric['kept']]);
+    }
+
+    private function eventOfAnotherInterest(): int
+    {
+        $concert = DB::table('interests')->insertGetId([
+            'name' => 'Концерт', 'slug' => 'concert', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $id = $this->themedEvent('Концерт', 2);
+        DB::table('event_interest')->where('event_id', $id)->update(['interest_id' => $concert]);
+
+        return $id;
+    }
+
+    private function eventAfterThePick(): int
+    {
+        Carbon::setTestNow(Carbon::now()->addMinutes(5));
+
+        return $this->themedEvent('Новый спектакль', 2);
+    }
+
+    private function eventWithItsOwnPost(TelegramChatBroadcastItem $digest, int $eventId): int
+    {
+        $post = new TelegramChatBroadcastItem;
+        $post->broadcast_id = $digest->broadcast_id;
+        $post->kind = TelegramChatBroadcastItem::KIND_EVENT;
+        $post->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $post->event_id = $eventId;
+        $post->publish_at = Carbon::now()->addDays(2)->setTime(10, 0);
+        $post->save();
+
+        return $eventId;
+    }
+
     /** @param  list<string>  $urls */
     private function giveImages(int $eventId, array $urls): void
     {

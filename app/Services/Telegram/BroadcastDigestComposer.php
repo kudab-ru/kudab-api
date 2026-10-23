@@ -77,6 +77,12 @@ final class BroadcastDigestComposer
      */
     private array $postOrder = [];
 
+    /** Событие, которое ищет `missReason`; null — отбор идёт как обычно. */
+    private ?int $tracing = null;
+
+    /** Правило, на котором искомое событие выпало из отбора. */
+    private ?string $lostAt = null;
+
     /**
      * Лента нужна ради ОДНОГО числа — того же, что читатель увидит, нажав на
      * подвал. Своё считать нельзя: пул рубрики уже прошёл стоп-лист, жанровые
@@ -583,6 +589,92 @@ final class BroadcastDigestComposer
         return $out;
     }
 
+    /** Пояснения к правилам отбора для журнала правок; ключи — имена условий в `poolForTheme`. */
+    public const MISS_NOTES = [
+        'new' => 'появилось в афише после сборки',
+        'gone' => 'снято с публикации',
+        'city' => 'другой город',
+        'window' => 'вне дат рубрики',
+        'no_time' => 'без часа начала',
+        'timing' => 'слишком близко к выходу или уже закончилось',
+        'interest' => 'основная тема события не из этой рубрики',
+        'price' => 'не подходит рубрике по цене',
+        'hour' => 'начинается раньше часа рубрики',
+        'words' => 'в названии и начале описания нет слов праздника',
+        'started' => 'началось до выхода подборки',
+        'sold_out' => 'билеты распроданы',
+        'hidden' => 'скрыто для канала',
+        'base' => 'не прошло условия рубрики',
+        'stop_list' => 'название из стоп-листа',
+        'views' => 'мало просмотров на сайте',
+        'access' => 'не подходит рубрике по тому, как на него попасть',
+        'genre' => 'в начале описания назван другой жанр',
+        'source_rubric' => 'источник относит его к другой рубрике',
+        'rejected' => 'недавно отклонено или снято из ленты',
+        'shown' => 'канал уже показал или покажет его своим постом',
+        'repeat' => 'повтор события, которое уже есть в списке',
+        'no_venue' => 'без площадки автомат строку не ставит',
+        'rank' => 'было среди кандидатов, автомат выбрал другие',
+    ];
+
+    /**
+     * Почему автомат сам не взял событие в эту подборку: первое правило отбора, на котором оно выпало.
+     * `$pickedAt` — когда автомат выбирал состав: событие новее него он видеть не мог.
+     *
+     * @return array{rule: string, note: string}|null null — у записи нет рубрики, судить не по чему
+     */
+    public function missReason(TelegramChatBroadcastItem $item, TelegramChatBroadcast $broadcast, Carbon $publishAt, int $eventId, ?Carbon $pickedAt = null): ?array
+    {
+        $theme = $this->themeOf($item);
+        $cityId = $broadcast->chat?->city_id;
+        if ($theme === null || ! $cityId) {
+            return null;
+        }
+
+        $event = DB::table('events')->where('id', $eventId)->first(['created_at', 'content_kind', 'description']);
+        if ($event === null) {
+            return null;
+        }
+        if ($pickedAt !== null && $event->created_at !== null && Carbon::parse($event->created_at)->gt($pickedAt)) {
+            return ['rule' => 'new', 'note' => self::MISS_NOTES['new']];
+        }
+
+        $this->tracing = $eventId;
+        $this->lostAt = null;
+        try {
+            $pool = $this->poolForTheme($broadcast, (int) $cityId, $theme, $publishAt, $item->id);
+        } finally {
+            $this->tracing = null;
+        }
+        if ($pool === null) {
+            return null;
+        }
+
+        $rule = $this->lostAt;
+        if ($rule === 'hidden') {
+            return ['rule' => $rule, 'note' => self::hiddenNote($event->content_kind)];
+        }
+        if ($rule !== null) {
+            return ['rule' => $rule, 'note' => self::MISS_NOTES[$rule]];
+        }
+
+        $ranked = $this->rankForTheme($pool['rows'], $theme);
+        foreach ($ranked as $i => $row) {
+            if ((int) $row->id !== $eventId) {
+                continue;
+            }
+            $note = sprintf('было среди кандидатов: %d-е по интересу из %d', $i + 1, count($ranked));
+            $min = (int) config('broadcast_digest.min_description', 120);
+            if (mb_strlen(trim((string) $event->description)) < $min) {
+                $note .= ", описание короче {$min} знаков";
+            }
+
+            return ['rule' => 'rank', 'note' => $note];
+        }
+
+        return ['rule' => 'no_venue', 'note' => self::MISS_NOTES['no_venue']];
+    }
+
     /**
      * Окно дат рубрики записи; null у начала — окно от момента выхода.
      *
@@ -742,7 +834,6 @@ final class BroadcastDigestComposer
                 return null;
             }
         }
-        $byInterest = $ids !== [];
 
         // Окно у рубрики может быть своё — и по длине, и по виду. Бесплатное
         // объявляют поздно: замер 25.09.2026 — 35 событий в ближайшую неделю и
@@ -750,68 +841,57 @@ final class BroadcastDigestComposer
         [$since, $until] = $this->themeWindow((array) $theme, $publishAt);
         [$hiddenSql, $hiddenBindings] = Event::channelHiddenSql('e');
 
-        $rows = DB::table('events as e')
-            ->when($byInterest, fn ($q) => $q->join('event_interest as ei', 'ei.event_id', '=', 'e.id'))
-            ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
-            ->join('communities as c', 'c.id', '=', 'e.community_id')
-            ->whereNull('e.deleted_at')
-            ->where('e.status', 'active')
-            ->where('c.city_id', $cityId)
-            ->where(fn ($q) => EventStart::notAfter($q, $until, 'e'))
-            // Нижняя граница нужна только КАЛЕНДАРНОМУ окну: у «N дней вперёд»
-            // низ и так момент выхода, а у «выходных» он суббота, и без этого
-            // условия в подборку на выходные попадал бы вечер пятницы.
-            ->when($since !== null, fn ($q) => EventStart::notBefore($q, $since, 'e'))
+        // условия по одному, с именем правила: по ним `missReason` находит, какое не прошло событие
+        $filters = array_filter([
+            'gone' => fn ($q) => $q->whereNull('e.deleted_at')->where('e.status', 'active'),
+            'city' => fn ($q) => $q->where('c.city_id', $cityId),
+            // нижняя граница только у календарного окна: у «выходных» без неё попадал бы вечер пятницы
+            'window' => fn ($q) => $q->where(fn ($w) => EventStart::notAfter($w, $until, 'e'))
+                ->when($since !== null, fn ($w) => EventStart::notBefore($w, $since, 'e')),
             // часам повода (`hours`) событие без часа не годится: неизвестно, ночью ли оно
-            ->when(isset($theme['hours']), fn ($q) => $q->where('e.time_precision', '<>', 'date'))
-            // Срок — общим правилом ([[PostTiming]]), а не «начнётся позже
-            // поста»: у многодневки успеть надо к ЗАКРЫТИЮ. Из-за своей копии
-            // рубрика «Выставки недели» по построению не могла назвать
-            // выставку, открывшуюся на прошлой неделе и висящую месяц, — то
-            // есть ровно ту, ради которой тема и заведена.
-            ->where(fn ($q) => PostTiming::applyFits($q, $publishAt, PostTiming::MIN_LEAD_HOURS, 'e', wholeDay: true))
-            ->when($byInterest, fn ($q) => $q
-                // ПЕРВИЧНЫЙ интерес внутри дерева темы. Без rank = 0 в спектакли
-                // попадает концерт, которому театр проставлен вторым тегом.
+            'no_time' => isset($theme['hours']) ? fn ($q) => $q->where('e.time_precision', '<>', 'date') : null,
+            // срок общим правилом (`PostTiming`): многодневку берём до закрытия, иначе «Выставки недели»
+            // не назвали бы выставку, открытую неделю назад
+            'timing' => fn ($q) => $q->where(fn ($w) => PostTiming::applyFits($w, $publishAt, PostTiming::MIN_LEAD_HOURS, 'e', wholeDay: true)),
+            // только основной интерес: иначе в спектакли попадёт концерт, у которого театр вторым тегом
+            'interest' => $ids === [] ? null : fn ($q) => $q->join('event_interest as ei', 'ei.event_id', '=', 'e.id')
                 ->where('ei.rank', 0)
-                ->whereIn('ei.interest_id', $ids))
-            ->when($pick === 'free', fn ($q) => $q
-                // donation рядом с free намеренно: «вход свободный, кто сколько
-                // может» читатель считает бесплатным, и он прав.
-                ->whereIn('e.price_status', ['free', 'donation']))
-            ->when($pick === 'price_max', fn ($q) => $q
-                // Только там, где цена ИЗВЕСТНА и это число. `unknown` в рубрику
-                // про деньги пускать нельзя: обещание «дешевле 500» проверят
-                // первым же нажатием.
-                ->whereNotNull('e.price_min')
-                ->where('e.price_min', '>', 0)
-                ->where('e.price_min', '<=', (int) ($theme['price_max'] ?? 500)))
-            ->when($pick === 'tod', fn ($q) => $q
-                ->whereRaw(
-                    "EXTRACT(HOUR FROM e.start_time AT TIME ZONE 'Europe/Moscow') >= ?",
-                    [(int) ($theme['hour_from'] ?? 20)],
-                ))
+                ->whereIn('ei.interest_id', $ids),
+            'price' => match ($pick) {
+                // «вход свободный, кто сколько может» читатель тоже считает бесплатным
+                'free' => fn ($q) => $q->whereIn('e.price_status', ['free', 'donation']),
+                // только известная цена: обещание «дешевле 500» проверят первым же нажатием
+                'price_max' => fn ($q) => $q->whereNotNull('e.price_min')
+                    ->where('e.price_min', '>', 0)
+                    ->where('e.price_min', '<=', (int) ($theme['price_max'] ?? 500)),
+                // бесплатное заранее не покупают; платное — это цена, продажа на чужом сайте или касса среди источников
+                'ahead' => fn ($q) => $q->whereNotIn('e.price_status', ['free', 'donation'])
+                    ->where(fn ($w) => $w->where('e.price_min', '>', 0)
+                        ->orWhere('e.price_status', 'external')
+                        ->orWhereExists(fn ($s) => $s->selectRaw('1')->from('event_sources as es')
+                            ->whereColumn('es.event_id', 'e.id')
+                            ->whereIn('es.source', Scoring\EventInterestSignals::TICKET_SOURCES))),
+                default => null,
+            },
+            'hour' => $pick === 'tod' ? fn ($q) => $q->whereRaw(
+                "EXTRACT(HOUR FROM e.start_time AT TIME ZONE 'Europe/Moscow') >= ?",
+                [(int) ($theme['hour_from'] ?? 20)],
+            ) : null,
             // повод по словам в названии или в начале описания: «Кошмар на улице Кирова» называет Хэллоуин только там
             // у «всего подряд» слов нет, но темы и исключения повода действуют: школьные каникулы — детское
-            ->when($pick === 'words' || $pick === 'all', fn ($q) => OccasionCalendar::applyWords($q, $theme, 'e'))
-            // бесплатное заранее не покупают; платное — это цена, продажа на чужом сайте или касса среди источников
-            ->when($pick === 'ahead', fn ($q) => $q
-                ->whereNotIn('e.price_status', ['free', 'donation'])
-                ->where(fn ($w) => $w->where('e.price_min', '>', 0)
-                    ->orWhere('e.price_status', 'external')
-                    ->orWhereExists(fn ($s) => $s->selectRaw('1')->from('event_sources as es')
-                        ->whereColumn('es.event_id', 'e.id')
-                        ->whereIn('es.source', Scoring\EventInterestSignals::TICKET_SOURCES))))
-            // РУБРИКЕ ПО ПОВОДУ НУЖНО НАЧАЛО ВПЕРЕДИ, а не «идёт до сих пор».
-            // Общее правило срока пропускает многодневку, пока она не
-            // закрылась, — выставке так и надо. А «Вечером» с таким правилом
-            // называет спектакль, начавшийся 8 июля, и строка выходит
-            // «ср 8 июля, 20:00»: дата в прошлом под заголовком про эту неделю.
-            ->when($pick !== 'interest', fn ($q) => EventStart::notBefore($q, $publishAt, 'e'))
-            ->where(function ($q) {
-                $q->whereNull('e.tickets_status')->orWhere('e.tickets_status', '<>', 'sold_out');
-            })
-            ->when(! $keepHidden, fn ($q) => $q->whereRaw('not '.$hiddenSql, $hiddenBindings))
+            'words' => $pick === 'words' || $pick === 'all' ? fn ($q) => OccasionCalendar::applyWords($q, $theme, 'e') : null,
+            // рубрике не по интересу нужно начало впереди: иначе «Вечером» назовёт спектакль, начавшийся месяц назад
+            'started' => $pick === 'interest' ? null : fn ($q) => EventStart::notBefore($q, $publishAt, 'e'),
+            'sold_out' => fn ($q) => $q->where(fn ($w) => $w->whereNull('e.tickets_status')->orWhere('e.tickets_status', '<>', 'sold_out')),
+            'hidden' => $keepHidden ? null : fn ($q) => $q->whereRaw('not '.$hiddenSql, $hiddenBindings),
+        ]);
+
+        $query = self::poolQuery();
+        foreach ($filters as $filter) {
+            $filter($query);
+        }
+
+        $rows = $query
             ->orderByRaw(EventStart::sql('e'))
             ->select([
                 'e.id', 'e.title', 'e.event_group_id', 'e.venue_id',
@@ -829,16 +909,20 @@ final class BroadcastDigestComposer
             ->selectRaw(EventStart::sql('e').' as start_time')
             ->selectRaw($hiddenSql.' as channel_hidden', $hiddenBindings)
             ->get();
+        $this->traceBase($rows, $filters);
 
         if ($theme['stop_list'] ?? true) {
             $rows = $this->rejectStopList($rows);
+            $this->traceLoss($rows, 'stop_list');
         }
         if ($pick === 'views') {
             $rows = $this->withViews($rows, $theme, $publishAt);
+            $this->traceLoss($rows, 'views');
         }
         if ($pick === 'access') {
             $this->scorer->prepare($rows);
             $rows = $rows->filter(fn ($r) => in_array($this->scorer->access($r), (array) ($theme['access'] ?? []), true))->values();
+            $this->traceLoss($rows, 'access');
         }
 
         // Жанровые отсечки — ТОЛЬКО тематическим рубрикам. Они спрашивают «не
@@ -848,23 +932,30 @@ final class BroadcastDigestComposer
         // события в описании найдётся слово чужого жанра.
         if ($pick === 'interest') {
             $rows = $this->rejectForeignGenre($rows, (string) $theme['slug']);
+            $this->traceLoss($rows, 'genre');
             $rows = $this->rejectForeignSourceRubric($rows, (string) $theme['slug']);
+            $this->traceLoss($rows, 'source_rubric');
         }
         // Остывание отказа — и в подборке тоже: см. rejectRecentlyRejected.
         $rows = $this->rejectRecentlyRejected($broadcast, $rows);
+        $this->traceLoss($rows, 'rejected');
 
         // $keepShown — для выдачи «уже в ленте»: там нужны как раз те события,
         // которые эта отсечка и снимает. Автосборка её не отключает никогда.
         // «Что смотрят» называет и то, о чём канал уже писал: это выбор людей, а не новость
         if (! $keepShown && ($theme['keep_shown'] ?? false) === false) {
             $rows = $this->rejectAlreadyShown($broadcast, $rows, $exceptItemId, $theme);
+            $this->traceLoss($rows, 'shown');
         }
 
         // из повторов остаётся первый, и у двух записей одного дня это та, где есть время
         $rows = $rows->sortBy(fn ($r) => self::dayOrder($r))->values();
 
         if (! $keepHidden) {
-            return ['rows' => $this->collapseRepeats($rows)];
+            $rows = $this->collapseRepeats($rows);
+            $this->traceLoss($rows, 'repeat');
+
+            return ['rows' => $rows];
         }
 
         // Из повторов остаётся первый, поэтому открытые ставим вперёд: иначе скрытый
@@ -872,6 +963,44 @@ final class BroadcastDigestComposer
         [$hidden, $open] = $rows->partition(fn ($r) => (bool) $r->channel_hidden);
 
         return ['rows' => $this->collapseRepeats($open->concat($hidden))->sortBy('start_time')->values()];
+    }
+
+    private static function poolQuery(): \Illuminate\Database\Query\Builder
+    {
+        return DB::table('events as e')
+            ->leftJoin('venues as v', 'v.id', '=', 'e.venue_id')
+            ->join('communities as c', 'c.id', '=', 'e.community_id');
+    }
+
+    /**
+     * Искомое событие не попало в выборку: проверяем его каждым условием по отдельности.
+     *
+     * @param  array<string, \Closure>  $filters
+     */
+    private function traceBase(\Illuminate\Support\Collection $rows, array $filters): void
+    {
+        if ($this->tracing === null || $rows->contains(fn ($r) => (int) $r->id === $this->tracing)) {
+            return;
+        }
+
+        foreach ($filters as $rule => $filter) {
+            $one = self::poolQuery()->where('e.id', $this->tracing);
+            $filter($one);
+            if (! $one->exists()) {
+                $this->lostAt = $rule;
+
+                return;
+            }
+        }
+
+        $this->lostAt = 'base';
+    }
+
+    private function traceLoss(\Illuminate\Support\Collection $rows, string $rule): void
+    {
+        if ($this->tracing !== null && $this->lostAt === null && ! $rows->contains(fn ($r) => (int) $r->id === $this->tracing)) {
+            $this->lostAt = $rule;
+        }
     }
 
     /**
@@ -1169,24 +1298,7 @@ final class BroadcastDigestComposer
         [$min, $max] = self::namedRange($theme);
         $onePerDay = (bool) ($theme['one_per_day'] ?? true);
         $bothDays = ($theme['window'] ?? '') === 'weekend';
-
-        // Без площадки не называем: строка «название · дата» без места говорит половину нужного,
-        // а правило «одна площадка — одна строка» её не держит. Повод берёт и адрес: вечеринку в баре
-        // без карточки площадки тоже ищут.
-        $byAddress = ! empty($theme['address_as_place']);
-        $ranked = $this->scorer->rankRows($rows->filter(
-            fn ($r) => $r->venue_id !== null || ($byAddress && trim((string) ($r->address ?? '')) !== ''),
-        )->values()->all());
-        if (! empty($theme['ties_by_price'])) {
-            usort($ranked, fn ($a, $b) => [$this->scorer->interest($b), (int) ($b->price_min ?? 0)]
-                <=> [$this->scorer->interest($a), (int) ($a->price_min ?? 0)]);
-        }
-        if (($theme['pick'] ?? '') === 'views') {
-            usort($ranked, fn ($a, $b) => (int) ($b->views ?? 0) <=> (int) ($a->views ?? 0));
-        }
-        if (isset($theme['occasion'])) {
-            $ranked = $this->byOccasion($ranked, (array) ($theme['words'] ?? []));
-        }
+        $ranked = $this->rankForTheme($rows, $theme);
 
         /** @var array<int, object> $named */
         $named = [];
@@ -1226,6 +1338,34 @@ final class BroadcastDigestComposer
         }
 
         return $named;
+    }
+
+    /**
+     * Кандидаты в строки от самого интересного: в этом порядке их перебирает `pickNamed`.
+     *
+     * @param  array<string, mixed>  $theme
+     * @return list<object>
+     */
+    private function rankForTheme(\Illuminate\Support\Collection $rows, array $theme): array
+    {
+        // без площадки не называем: строка без места говорит половину нужного; повод берёт и адрес,
+        // вечеринку в баре без карточки площадки тоже ищут
+        $byAddress = ! empty($theme['address_as_place']);
+        $ranked = $this->scorer->rankRows($rows->filter(
+            fn ($r) => $r->venue_id !== null || ($byAddress && trim((string) ($r->address ?? '')) !== ''),
+        )->values()->all());
+        if (! empty($theme['ties_by_price'])) {
+            usort($ranked, fn ($a, $b) => [$this->scorer->interest($b), (int) ($b->price_min ?? 0)]
+                <=> [$this->scorer->interest($a), (int) ($a->price_min ?? 0)]);
+        }
+        if (($theme['pick'] ?? '') === 'views') {
+            usort($ranked, fn ($a, $b) => (int) ($b->views ?? 0) <=> (int) ($a->views ?? 0));
+        }
+        if (isset($theme['occasion'])) {
+            $ranked = $this->byOccasion($ranked, (array) ($theme['words'] ?? []));
+        }
+
+        return $ranked;
     }
 
     /** Цена, до которой событие в подборке считается дешёвым. */

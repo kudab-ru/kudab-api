@@ -15,6 +15,7 @@ use App\Models\TelegramChatBroadcastItem;
 use App\Repositories\EventRepository;
 use App\Services\Telegram\BroadcastDigestComposer;
 use App\Services\Telegram\BroadcastEventPicker;
+use App\Services\Telegram\DigestRosterJournal;
 use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\PickReason;
 use App\Services\Telegram\PostTiming;
@@ -107,6 +108,7 @@ class AdminBroadcastController extends Controller
         // записи нет события, из которого их берут событийные посты.
         private readonly \App\Services\Telegram\TelegramVenuePortraitService $venuePortraits,
         private readonly BroadcastEventPicker $picker,
+        private readonly DigestRosterJournal $rosterJournal,
     ) {}
 
     /** Каналы со сводкой: что в ленте, когда последний пост, молчит ли. */
@@ -1564,6 +1566,7 @@ class AdminBroadcastController extends Controller
             'in' => ['required', 'integer', 'different:out'],
             'swap' => ['sometimes', 'boolean'],
             'cool' => ['sometimes', 'boolean'],
+            'reason' => ['sometimes', 'nullable', 'string', 'max:300'],
         ]);
 
         $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
@@ -1661,12 +1664,15 @@ class AdminBroadcastController extends Controller
             ], 409);
         }
 
+        $before = $this->rosterIds($item);
+        $missed = $this->missedByAutomaton($item, $broadcast, $publishAt, (int) $data['in']);
+
         // Провал ВНУТРИ транзакции — только исключением. `return null` из
         // замыкания Laravel считает нормальным завершением и коммитит: состав
         // остался бы подменённым, подпись — про прежнюю тройку, а чужой пост
         // снятым, и всё это под ответом «подборка осталась как была».
         try {
-            $out = DB::transaction(function () use ($item, $broadcast, $data, $publishAt, $taken, $request) {
+            $out = DB::transaction(function () use ($item, $broadcast, $data, $publishAt, $taken, $request, $before, $missed) {
                 if ($taken !== null) {
                     // Снимаем, а не отклоняем: это не отказ по качеству, событие
                     // просто переезжает в подборку. skipped подбору не мешает — и
@@ -1695,6 +1701,13 @@ class AdminBroadcastController extends Controller
                     && $this->coolDownEvent($broadcast->id, (int) $data['out']);
 
                 $this->keepRosterPhotos($item);
+                $this->rosterJournal->edited($item, DigestRosterJournal::REPLACE, $before, $this->rosterIds($item), [
+                    'in' => (int) $data['in'],
+                    'out' => (int) $data['out'],
+                    'cooled' => $cooled,
+                    'reason' => $data['reason'] ?? null,
+                    'missed' => $missed,
+                ]);
 
                 return ['item' => $item->fresh(), 'cooled' => $cooled];
             });
@@ -1776,6 +1789,7 @@ class AdminBroadcastController extends Controller
         $data = $request->validate([
             'in' => ['required', 'integer'],
             'swap' => ['sometimes', 'boolean'],
+            'reason' => ['sometimes', 'nullable', 'string', 'max:300'],
         ]);
 
         $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
@@ -1795,6 +1809,8 @@ class AdminBroadcastController extends Controller
         if ($blocked = $this->digestIncomingGuard($request, $broadcast, $item, (int) $data['in'], $publishAt, $taken)) {
             return $blocked;
         }
+        // до снятия чужого поста: иначе причиной вышло бы не «канал уже показывает его своим постом»
+        $missed = $this->missedByAutomaton($item, $broadcast, $publishAt, (int) $data['in']);
 
         try {
             $fresh = DB::transaction(function () use ($item, $broadcast, $data, $publishAt, $taken) {
@@ -1826,6 +1842,12 @@ class AdminBroadcastController extends Controller
             ], 422);
         }
 
+        $this->rosterJournal->edited($fresh, DigestRosterJournal::ADD, $roster, $this->rosterIds($fresh), [
+            'in' => (int) $data['in'],
+            'reason' => $data['reason'] ?? null,
+            'missed' => $missed,
+        ]);
+
         return response()->json(['data' => $this->itemPayload($fresh, null, null)]);
     }
 
@@ -1840,6 +1862,7 @@ class AdminBroadcastController extends Controller
         $data = $request->validate([
             'out' => ['required', 'integer'],
             'cool' => ['sometimes', 'boolean'],
+            'reason' => ['sometimes', 'nullable', 'string', 'max:300'],
         ]);
 
         $item = TelegramChatBroadcastItem::query()->findOrFail($itemId);
@@ -1862,7 +1885,7 @@ class AdminBroadcastController extends Controller
         $publishAt = $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now();
 
         try {
-            $out = DB::transaction(function () use ($item, $broadcast, $data, $publishAt, $request) {
+            $out = DB::transaction(function () use ($item, $broadcast, $data, $publishAt, $request, $roster) {
                 if (! $this->broadcasts->removeDigestEvent($item, $broadcast, (int) $data['out'], $publishAt)) {
                     throw new DigestRecomposeFailed;
                 }
@@ -1871,6 +1894,11 @@ class AdminBroadcastController extends Controller
                     && $this->coolDownEvent($broadcast->id, (int) $data['out']);
 
                 $this->keepRosterPhotos($item);
+                $this->rosterJournal->edited($item, DigestRosterJournal::REMOVE, $roster, $this->rosterIds($item), [
+                    'out' => (int) $data['out'],
+                    'cooled' => $cooled,
+                    'reason' => $data['reason'] ?? null,
+                ]);
 
                 return ['item' => $item->fresh(), 'cooled' => $cooled];
             });
@@ -1925,11 +1953,12 @@ class AdminBroadcastController extends Controller
         $publishAt = $item->publish_at ? Carbon::parse($item->publish_at) : Carbon::now();
 
         try {
-            $fresh = DB::transaction(function () use ($item, $broadcast, $data, $publishAt) {
+            $fresh = DB::transaction(function () use ($item, $broadcast, $data, $publishAt, $roster) {
                 $ids = array_values(array_unique(array_map('intval', $data['order'])));
                 if (! $this->broadcasts->reorderDigestEvents($item, $broadcast, $ids, $publishAt)) {
                     throw new DigestRecomposeFailed;
                 }
+                $this->rosterJournal->edited($item, DigestRosterJournal::REORDER, $roster, $this->rosterIds($item));
 
                 return $item->fresh();
             });
@@ -1941,6 +1970,18 @@ class AdminBroadcastController extends Controller
         }
 
         return response()->json(['data' => $this->itemPayload($fresh, null, null)]);
+    }
+
+    /**
+     * Журнал состава подборок канала: сколько строк автомата остаётся и последние правки.
+     *
+     * GET /api/admin/broadcast/channels/{id}/digest-journal
+     */
+    public function digestJournal(int $channelId): JsonResponse
+    {
+        $broadcast = TelegramChatBroadcast::query()->findOrFail($channelId);
+
+        return response()->json(['data' => $this->rosterJournal->report((int) $broadcast->id)]);
     }
 
     /**
@@ -2361,6 +2402,27 @@ class AdminBroadcastController extends Controller
             'caption_source' => $item->caption_source,
             'photo_urls' => $item->photo_urls,
         ]);
+    }
+
+    /**
+     * Почему автомат сам не взял событие, которое человек ставит в подборку. Сбой здесь правку
+     * не останавливает: запись в журнале без причины лучше отказа.
+     *
+     * @return array{rule: string, note: string}|null
+     */
+    private function missedByAutomaton(TelegramChatBroadcastItem $item, TelegramChatBroadcast $broadcast, Carbon $publishAt, int $eventId): ?array
+    {
+        try {
+            return $this->digestComposer->missReason($item, $broadcast, $publishAt, $eventId, $this->rosterJournal->pickedAt((int) $item->id));
+        } catch (\Throwable $e) {
+            Log::warning('broadcast.digest.miss_reason_failed', [
+                'item_id' => $item->id,
+                'event_id' => $eventId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
     }
 
     /**

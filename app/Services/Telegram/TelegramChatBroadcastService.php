@@ -92,6 +92,7 @@ class TelegramChatBroadcastService
         private readonly BroadcastSlotPlanner $slotPlanner,
         private readonly BroadcastDigestComposer $digestComposer,
         private readonly BroadcastWeekendHold $weekendHold,
+        private readonly DigestRosterJournal $rosterJournal,
     ) {}
 
     /**
@@ -1423,7 +1424,14 @@ class TelegramChatBroadcastService
         $item->digest_meta = $meta === [] ? null : $meta;
         $item->save();
 
+        $before = $this->digestRosterIds($item);
         $this->syncDigestEvents($item, $draft['event_ids']);
+
+        // состав здесь меняется, только когда его выбрал автомат: правка руками меняет связь раньше
+        $sorted = fn (array $ids) => collect($ids)->map(fn ($v) => (int) $v)->unique()->sort()->values()->all();
+        if ($sorted($before) !== $sorted($roster)) {
+            $this->rosterJournal->picked($item, $before, $roster);
+        }
     }
 
     /**
