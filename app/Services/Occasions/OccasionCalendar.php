@@ -121,7 +121,9 @@ final class OccasionCalendar
 
     /**
      * Слова повода в названии или в начале описания, слова-исключения в названии и темы из `kinds`.
-     * Слово ищется с начала слова, иначе «елк» находится внутри «Щелкунчика».
+     * Слово ищется с начала слова, иначе «елк» находится внутри «Щелкунчика». С `source_words` слово
+     * ищется и в тексте поста или страницы, откуда пришло событие: программу ночи музей пишет одним
+     * постом, а в описаниях её отдельных событий слов праздника нет.
      *
      * @param  \Illuminate\Contracts\Database\Query\Builder  $q
      * @param  array<string, mixed>  $theme
@@ -131,10 +133,22 @@ final class OccasionCalendar
     {
         $words = array_values(array_filter(array_map('strval', (array) ($theme['words'] ?? []))));
         if ($words !== []) {
-            $q->where(function ($w) use ($words, $table) {
+            $inSource = ! empty($theme['source_words']);
+            $q->where(function ($w) use ($words, $table, $inSource) {
                 foreach ($words as $word) {
                     $w->orWhere($table.'.title', '~*', self::wordStart($word))
                         ->orWhereRaw('left('.$table.'.description, 300) ~* ?', [self::wordStart($word)]);
+                }
+                if ($inSource) {
+                    $w->orWhereExists(fn ($s) => $s->selectRaw('1')
+                        ->from('event_sources as ws')
+                        ->join('context_posts as wp', 'wp.id', '=', 'ws.context_post_id')
+                        ->whereColumn('ws.event_id', $table.'.id')
+                        ->where(function ($t) use ($words) {
+                            foreach ($words as $word) {
+                                $t->orWhere('wp.text', '~*', self::wordStart($word));
+                            }
+                        }));
                 }
             });
         }

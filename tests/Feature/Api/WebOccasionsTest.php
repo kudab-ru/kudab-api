@@ -172,6 +172,25 @@ class WebOccasionsTest extends TestCase
     }
 
     #[Test]
+    #[DataProvider('sourcePosts')]
+    public function a_night_takes_events_whose_post_names_it(string $page, string $at, string $post, bool $taken): void
+    {
+        $this->fromPost($this->event('Квартирник «Серебряный век русского рока»', $at), $post);
+
+        $total = $this->getJson("/api/web/occasions/{$page}?city=voronezh")->assertOk()->json('data.occasion.total');
+
+        $this->assertSame($taken ? 1 : 0, $total);
+    }
+
+    public static function sourcePosts(): array
+    {
+        return [
+            'программа ночи одним постом' => ['noch-iskusstv', '2026-11-03 19:00', 'Приглашаем на мероприятия «Ночи искусств»: квартирник и экскурсия.', true],
+            'у хэллоуина только своё название' => ['halloween', '2026-10-31 19:00', 'В субботу Хэллоуин, а у нас квартирник.', false],
+        ];
+    }
+
+    #[Test]
     #[DataProvider('searches')]
     public function a_search_naming_a_holiday_finds_it(string $query, ?string $page): void
     {
@@ -211,6 +230,24 @@ class WebOccasionsTest extends TestCase
         $event->save();
 
         return (int) $event->id;
+    }
+
+    private function fromPost(int $eventId, string $text): void
+    {
+        $community = (int) Event::query()->whereKey($eventId)->value('community_id');
+        $postId = (int) DB::table('context_posts')->insertGetId([
+            'external_id' => 'post-'.$eventId, 'source' => 'vk', 'community_id' => $community, 'status' => 'parsed',
+            'text' => $text, 'published_at' => now(), 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $networkId = DB::table('social_networks')->insertGetId(['name' => 'vk', 'slug' => 'vk-'.$eventId]);
+        $linkId = DB::table('community_social_links')->insertGetId([
+            'community_id' => $community, 'social_network_id' => $networkId,
+            'url' => 'https://vk.com/src_'.$eventId, 'status' => 'active',
+        ]);
+        DB::table('event_sources')->insert([
+            'event_id' => $eventId, 'social_link_id' => $linkId, 'context_post_id' => $postId,
+            'source' => 'vk', 'post_external_id' => 'post-'.$eventId,
+        ]);
     }
 
     /**
