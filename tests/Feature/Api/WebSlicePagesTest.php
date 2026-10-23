@@ -131,6 +131,21 @@ class WebSlicePagesTest extends TestCase
         $this->assertSame(['Выставка «Миг свободы»'], array_column($day['both'], 'title'));
     }
 
+    #[Test]
+    public function the_holiday_events_stay_in_the_programme_while_its_card_leads_the_main(): void
+    {
+        $party = $this->withPhoto($this->event('Хэллоуинская вечеринка', '2026-10-31 18:00'));
+        $this->withTheme($party, 'parties');
+        $play = $this->withPhoto($this->event('Спектакль «Чайка»', '2026-10-31 19:00'));
+        $this->withTheme($play, 'theatre');
+
+        $page = $this->getJson('/api/web/weekends?city=voronezh&w=2026-10-31')->assertOk()->json('data.current');
+
+        $this->assertSame('halloween', $page['holiday']['page']);
+        $this->assertSame([$play], array_column($page['picks'], 'id'));
+        $this->assertSame([$party], array_column(array_merge(...array_column($page['days'], 'events')), 'id'));
+    }
+
     /** тема даёт основной вес оценки интереса: без неё событие до главного не дотягивает */
     private function withTheme(int $eventId, string $slug): void
     {

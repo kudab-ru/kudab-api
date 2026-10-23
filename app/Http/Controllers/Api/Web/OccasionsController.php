@@ -53,7 +53,7 @@ final class OccasionsController extends Controller
             ];
         }
 
-        return response()->json(['data' => $data]);
+        return response()->json(['data' => $this->page->forSite($data)]);
     }
 
     private function city(Request $request): City

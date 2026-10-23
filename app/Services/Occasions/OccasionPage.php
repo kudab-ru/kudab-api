@@ -131,6 +131,68 @@ final class OccasionPage
     }
 
     /**
+     * Каждое событие на странице один раз: главное уходит из программы вместе с другими своими сеансами,
+     * а их дни остаются у карточки в `also`.
+     *
+     * @param  array<string, mixed>  $w
+     * @return array<string, mixed>
+     */
+    public function withoutPicks(array $w): array
+    {
+        $index = [];
+        foreach ($w['picks'] as $i => $p) {
+            $index[$this->sameTitle($p['title'])] = $i;
+        }
+        $also = [];
+        foreach ($w['days'] as $d => $day) {
+            $keep = [];
+            foreach ($day['events'] as $e) {
+                $i = $index[$this->sameTitle($e['title'])] ?? null;
+                if ($i === null) {
+                    $keep[] = $e;
+                } elseif ($day['date'] !== $w['picks'][$i]['date']) {
+                    $also[$i][$day['date']] ??= ['date' => $day['date'], 'time' => $e['times'][0] ?? null];
+                }
+            }
+            $w['days'][$d]['events'] = $keep;
+        }
+        if (isset($w['both'])) {
+            $w['both'] = array_values(array_filter($w['both'], fn (array $e) => ! isset($index[$this->sameTitle($e['title'])])));
+        }
+        foreach ($w['picks'] as $i => $p) {
+            $w['picks'][$i]['also'] = array_values($also[$i] ?? []);
+        }
+
+        return $w;
+    }
+
+    /** «Спектакль «Тайные виды…»» и «Тайные виды…» — одно событие: без вида в начале, кавычек и регистра. */
+    public function sameTitle(string $title): string
+    {
+        $t = (string) preg_replace('/^(спектакль|концерт|выставка|фильм|показ фильма|шоу|мюзикл|балет|опера|стендап)\s+/u', '', mb_strtolower(trim($title)));
+
+        return trim((string) preg_replace('/[«»"\'.,!?:]+|\s+/u', ' ', $t));
+    }
+
+    /**
+     * Страница праздника для сайта: главное в программе не повторяется, а плашки видов и «Все» в программе
+     * считают то, что в ней осталось. Ленте на главной и подборкам нужна полная программа, им — `build`.
+     *
+     * @param  array<string, mixed>  $data  результат `build`
+     * @return array<string, mixed>
+     */
+    public function forSite(array $data): array
+    {
+        $data = $this->withoutPicks($data);
+        $left = array_merge(...array_map(fn (array $d) => $d['events'], $data['days']));
+        $data['days'] = array_values(array_filter($data['days'], fn (array $d) => $d['events'] !== [] || $d['more'] > 0));
+        $data['kinds'] = $this->kinds($left);
+        $data['occasion']['program_total'] = count($left) + array_sum(array_column($data['days'], 'more'));
+
+        return $data;
+    }
+
+    /**
      * Программа, главное и виды событий за окно: общая сборка страниц праздника и выходных.
      * В строках `rows` ещё лежат `score` (оценка интереса) и `series` (ключ серии), в днях их уже нет.
      *
@@ -387,11 +449,13 @@ final class OccasionPage
         // страница выходных берёт кандидатов с запасом: главное прошлых выходных она потом пропускает
         $limit = (int) ($theme['picks'] ?? self::PICKS);
 
+        $skip = array_flip(array_map('intval', (array) ($theme['skip'] ?? [])));
         $ids = match (true) {
             $item !== null => DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->orderBy('position')->pluck('event_id')->map(fn ($v) => (int) $v)->all(),
-            ! empty($theme['site_pick']) => $this->sitePick($events, $limit, $now),
+            ! empty($theme['site_pick']) => $this->sitePick($events->reject(fn (Event $e) => isset($skip[(int) $e->id])), $limit, $now),
             default => $this->autoPick($theme, $city, $day, $events, $now),
         };
+        $ids = array_values(array_filter($ids, fn (int $id) => ! isset($skip[$id])));
 
         $out = [];
         foreach ($ids as $id) {

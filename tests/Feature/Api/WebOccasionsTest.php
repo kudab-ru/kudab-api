@@ -55,6 +55,20 @@ class WebOccasionsTest extends TestCase
     }
 
     #[Test]
+    public function a_main_event_is_not_repeated_in_the_programme(): void
+    {
+        $party = $this->event('Хэллоуинская вечеринка', '2026-10-31 18:00');
+        $quiz = $this->event('Квиз: Хэллоуин', '2026-10-29 19:00');
+        $this->postedOccasion([$party], []);
+
+        $page = $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data');
+
+        $this->assertSame([$party], array_column($page['picks'], 'id'));
+        $this->assertSame([$quiz], array_merge(...array_map(fn (array $d) => array_column($d['events'], 'id'), $page['days'])));
+        $this->assertSame(1, $page['occasion']['program_total']);
+    }
+
+    #[Test]
     public function the_owner_overrules_the_holiday_words_in_the_program(): void
     {
         $party = $this->event('Хэллоуинская вечеринка', '2026-10-31 18:00');
@@ -64,10 +78,12 @@ class WebOccasionsTest extends TestCase
         $admin = \App\Models\User::factory()->create();
         $admin->assignRole('superadmin');
         \Laravel\Sanctum\Sanctum::actingAs($admin);
-        $shown = fn () => array_merge(...array_map(
-            fn (array $day) => array_column($day['events'], 'id'),
-            $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data.days'),
-        ));
+        // событие из «Главного» в программе не повторяется: на странице оно там или там
+        $shown = function () {
+            $page = $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data');
+
+            return array_merge(array_column($page['picks'], 'id'), ...array_map(fn (array $day) => array_column($day['events'], 'id'), $page['days']));
+        };
 
         $this->postJson($base.'/include', ['event_id' => $jazz])->assertOk();
         $this->postJson($base.'/exclude', ['event_id' => $party])->assertOk();
@@ -92,6 +108,8 @@ class WebOccasionsTest extends TestCase
         foreach (['2026-10-31 14:00', '2026-10-31 18:00'] as $at) {
             Event::query()->whereKey($this->event('Хэллоуин в театре', $at))->update(['event_group_id' => $group]);
         }
+        // главное — вечеринка, спектакль остаётся в программе
+        $this->postedOccasion([$this->event('Хэллоуинская вечеринка', '2026-10-31 20:00')], []);
 
         $days = $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data.days');
 
@@ -110,6 +128,8 @@ class WebOccasionsTest extends TestCase
         foreach (['2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31'] as $day) {
             Event::query()->whereKey($this->event('Хэллоуин-квест', $day.' 11:00'))->update(['event_group_id' => $group]);
         }
+        // главное — вечеринка, квест остаётся в программе
+        $this->postedOccasion([$this->event('Хэллоуинская вечеринка', '2026-10-31 20:00')], []);
 
         $days = $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data.days');
 

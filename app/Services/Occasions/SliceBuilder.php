@@ -40,7 +40,9 @@ final class SliceBuilder
      */
     public function build(array $theme, City $city, Carbon $from, Carbon $to, Carbon $anchor, Carbon $now, bool $dropPast): array
     {
-        $part = $this->page->assemble($theme, $city, $now, [$from, $to], $anchor, self::DAY_LIMIT);
+        // события праздника не занимают места в «Главном»: туда встаёт карточка праздника, она к ним и ведёт
+        $holiday = $this->holiday($city, $from, $to, $now);
+        $part = $this->page->assemble($theme + ['skip' => $holiday['ids'] ?? []], $city, $now, [$from, $to], $anchor, self::DAY_LIMIT);
         $live = fn (array $r) => ! $dropPast || ! $r['is_past'];
         $rows = array_values(array_filter(array_map(fn (array $r) => ['times' => $this->clock($r['times'])] + $r, $part['rows']), $live));
         $picks = array_values(array_filter(array_map(fn (array $p) => ['times' => $this->clock($p['times'])] + $p, $part['picks']), $live));
@@ -96,50 +98,20 @@ final class SliceBuilder
             'picks' => $picks,
             'days' => $days,
             'both' => $both,
-            'holiday' => $this->holiday($city, $from, $to, $now),
+            'holiday' => $holiday,
         ];
     }
 
-    /**
-     * Каждое событие на странице один раз: главное уходит из программы вместе с другими своими сеансами,
-     * а их дни остаются у карточки в `also`.
-     *
-     * @param  array<string, mixed>  $w
-     * @return array<string, mixed>
-     */
+    /** @see OccasionPage::withoutPicks */
     public function withoutPicks(array $w): array
     {
-        $index = [];
-        foreach ($w['picks'] as $i => $p) {
-            $index[$this->sameTitle($p['title'])] = $i;
-        }
-        $also = [];
-        foreach ($w['days'] as $d => $day) {
-            $keep = [];
-            foreach ($day['events'] as $e) {
-                $i = $index[$this->sameTitle($e['title'])] ?? null;
-                if ($i === null) {
-                    $keep[] = $e;
-                } elseif ($day['date'] !== $w['picks'][$i]['date']) {
-                    $also[$i][$day['date']] ??= ['date' => $day['date'], 'time' => $e['times'][0] ?? null];
-                }
-            }
-            $w['days'][$d]['events'] = $keep;
-        }
-        $w['both'] = array_values(array_filter($w['both'], fn (array $e) => ! isset($index[$this->sameTitle($e['title'])])));
-        foreach ($w['picks'] as $i => $p) {
-            $w['picks'][$i]['also'] = array_values($also[$i] ?? []);
-        }
-
-        return $w;
+        return $this->page->withoutPicks($w);
     }
 
-    /** «Спектакль «Тайные виды…»» и «Тайные виды…» — одно событие: без вида в начале, кавычек и регистра. */
+    /** @see OccasionPage::sameTitle */
     public function sameTitle(string $title): string
     {
-        $t = (string) preg_replace('/^(спектакль|концерт|выставка|фильм|показ фильма|шоу|мюзикл|балет|опера|стендап)\s+/u', '', mb_strtolower(trim($title)));
-
-        return trim((string) preg_replace('/[«»"\'.,!?:]+|\s+/u', ' ', $t));
+        return $this->page->sameTitle($title);
     }
 
     /**
