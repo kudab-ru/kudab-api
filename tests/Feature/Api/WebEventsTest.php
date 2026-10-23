@@ -1892,20 +1892,30 @@ class WebEventsTest extends TestCase
             ->assertJsonPath('data.images', [$poster, $scene]);
     }
 
-    public function test_picture_deleted_at_the_source_is_not_shown_and_the_next_one_becomes_the_poster(): void
+    #[DataProvider('hiddenPictures')]
+    public function test_picture_the_site_cannot_show_is_dropped_and_the_next_one_becomes_the_poster(string $hidden, bool $gone): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $community = $this->createCommunity($vrn->id, 'Театр');
         $event = $this->createEvent($vrn->id, $community->id, 'Вафельное сердце', now()->addDays(3));
-        $deleted = 'https://cdn4.telesco.pe/file/expired.jpg';
         $alive = 'https://sun9-1.userapi.com/poster.jpg';
-        $this->addPostImages($event, ['post-1' => [$deleted, $alive]]);
-        DB::table('image_prints')->insert(['url_md5' => md5($deleted), 'status' => 404, 'gone' => true, 'checked_at' => now()]);
+        $this->addPostImages($event, ['post-1' => [$hidden, $alive]]);
+        if ($gone) {
+            DB::table('image_prints')->insert(['url_md5' => md5($hidden), 'status' => 404, 'gone' => true, 'checked_at' => now()]);
+        }
 
         $this->getJson("/api/web/events/{$event->id}")
             ->assertOk()
             ->assertJsonPath('data.images', [$alive])
             ->assertJsonPath('data.poster', $alive);
+    }
+
+    public static function hiddenPictures(): array
+    {
+        return [
+            'удалена у источника' => ['https://sun9-3.userapi.com/expired.jpg', true],
+            'CDN Телеграма без нашей копии' => ['https://cdn4.telesco.pe/file/no-copy.jpg', false],
+        ];
     }
 
     /** @param array<string, list<string>> $posts пост → его картинки */

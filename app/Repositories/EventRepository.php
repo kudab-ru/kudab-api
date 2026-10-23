@@ -2209,7 +2209,10 @@ class EventRepository
             }
 
             // картинку, которой у источника больше нет, не показываем: постером станет следующая
-            $images = array_values(array_filter($images, fn (string $u) => ! isset($prints['gone'][md5($u)])));
+            $images = array_values(array_filter(
+                $images,
+                fn (string $u) => ! isset($prints['gone'][md5($u)]) && ! Event::telegramCdn($u),
+            ));
 
             // Порядок обложки задаёт `App\Support\CoverPicker` — там же почему.
             if (count($images) > 1) {

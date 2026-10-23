@@ -297,7 +297,7 @@ class Event extends Model
         foreach ($sources as $src) {
             $imgs = is_array($src->images ?? null) ? $src->images : [];
             foreach ($imgs as $u) {
-                if ($u && !isset($out[$u])) {
+                if ($u && !isset($out[$u]) && !self::telegramCdn((string) $u)) {
                     $out[$u] = true;
                     if (count($out) >= $limit) {
                         return array_keys($out);
@@ -306,6 +306,17 @@ class Event extends Model
             }
         }
         return array_keys($out);
+    }
+
+    /**
+     * Ссылка на CDN Телеграма: из России он не отвечает, и вместо постера висело бы пустое место.
+     * Свою копию такой картинки сделает парсер (`images:keep-telegram`), тогда она и покажется.
+     */
+    public static function telegramCdn(string $url): bool
+    {
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+
+        return $host === 'telesco.pe' || str_ends_with($host, '.telesco.pe');
     }
 
     /** Удобный аксессор одной обложки */
