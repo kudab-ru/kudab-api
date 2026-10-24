@@ -146,6 +146,28 @@ class WebSlicePagesTest extends TestCase
         $this->assertSame([$party], array_column(array_merge(...array_column($page['days'], 'events')), 'id'));
     }
 
+    #[Test]
+    public function the_free_week_shows_each_free_event_once(): void
+    {
+        $free = ['price_status' => 'free', 'price_min' => null];
+        foreach (['2026-10-24 11:00', '2026-10-25 11:00'] as $at) {
+            Event::query()->whereKey($this->event('Гаражка издательства', $at))->update($free);
+        }
+        $this->event('Концерт органной музыки', '2026-10-24 19:00');
+        foreach (['2026-10-22', '2026-10-23'] as $day) {
+            Event::query()->whereKey($this->event('Выставка «Миг свободы»', $day.' 00:00'))
+                ->update($free + ['start_time' => null, 'time_precision' => 'date']);
+        }
+
+        $week = $this->getJson('/api/web/free?city=voronezh')->assertOk()->json('data.current');
+        $dated = array_merge(...array_column($week['days'], 'events'));
+
+        $this->assertSame(['Гаражка издательства'], array_column($dated, 'title'));
+        $this->assertSame([['date' => '2026-10-25', 'time' => '11:00']], $dated[0]['also']);
+        $this->assertSame(['Выставка «Миг свободы»'], array_column($week['both'], 'title'));
+        $this->assertSame('2026-10-23', $week['both'][0]['until']);
+    }
+
     /** тема даёт основной вес оценки интереса: без неё событие до главного не дотягивает */
     private function withTheme(int $eventId, string $slug): void
     {

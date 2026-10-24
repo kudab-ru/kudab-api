@@ -299,6 +299,11 @@ final class OccasionPage
             'words' => in_array($theme['pick'] ?? '', ['words', 'all'], true)
                 ? fn ($q) => OccasionCalendar::applyWords($q, $theme, 'events')
                 : null,
+            // бесплатно так же, как у фильтра ленты `free=1` и у поля `free` в dto
+            'price' => ! empty($theme['free'])
+                ? fn ($q) => $q->where(fn ($w) => $w->where('events.price_status', 'free')
+                    ->orWhere(fn ($x) => $x->where('events.price_min', 0)->whereNull('events.price_max')))
+                : null,
         ]);
     }
 

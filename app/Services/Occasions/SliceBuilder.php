@@ -9,9 +9,9 @@ use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Страница подборки на несколько дней подряд («На выходных», «Сегодня»): программа по дням, отдельно то, что
- * идёт без часа все эти дни, главное и праздник на эти дни. Строки собираются так же, как у праздника
- * (OccasionPage::assemble); событие на странице стоит один раз, см. withoutPicks.
+ * Страница подборки на несколько дней подряд («На выходных», «Сегодня», «Бесплатно»): программа по дням,
+ * отдельно то, что идёт без часа все эти дни, главное и праздник на эти дни. Строки собираются так же, как
+ * у праздника (OccasionPage::assemble); событие на странице стоит один раз, см. withoutPicks.
  */
 final class SliceBuilder
 {
@@ -32,16 +32,17 @@ final class SliceBuilder
     ) {}
 
     /**
-     * Дни с `from` по `to`. `anchor` — день, по которому ищется пост рубрики канала; с `dropPast` прошедшего
-     * на странице нет: «Сегодня» вечером не показывает утро.
+     * Дни с `from` по `to`. `anchor` — день, по которому ищется пост рубрики канала; null — у страницы нет
+     * «Главного», а с ним и карточки праздника. С `dropPast` прошедшего на странице нет: «Сегодня» вечером
+     * не показывает утро.
      *
      * @param  array<string, mixed>  $theme
      * @return array<string, mixed>
      */
-    public function build(array $theme, City $city, Carbon $from, Carbon $to, Carbon $anchor, Carbon $now, bool $dropPast): array
+    public function build(array $theme, City $city, Carbon $from, Carbon $to, ?Carbon $anchor, Carbon $now, bool $dropPast): array
     {
         // события праздника не занимают места в «Главном»: туда встаёт карточка праздника, она к ним и ведёт
-        $holiday = $this->holiday($city, $from, $to, $now);
+        $holiday = $anchor === null ? null : $this->holiday($city, $from, $to, $now);
         $part = $this->page->assemble($theme + ['skip' => $holiday['ids'] ?? []], $city, $now, [$from, $to], $anchor, self::DAY_LIMIT);
         $live = fn (array $r) => ! $dropPast || ! $r['is_past'];
         $rows = array_values(array_filter(array_map(fn (array $r) => ['times' => $this->clock($r['times'])] + $r, $part['rows']), $live));
