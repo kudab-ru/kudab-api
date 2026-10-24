@@ -9,6 +9,7 @@ use App\Models\City;
 use App\Services\Occasions\OccasionCalendar;
 use App\Services\Occasions\OccasionPage;
 use App\Services\Occasions\OccasionPromo;
+use App\Services\Weather\CityWeather;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -19,6 +20,7 @@ final class OccasionsController extends Controller
     public function __construct(
         private readonly OccasionPage $page,
         private readonly OccasionPromo $promo,
+        private readonly CityWeather $weather,
     ) {}
 
     /** Календарь праздников, ближайший для ленты на главной и, если передан `q`, праздник из запроса поиска. */
@@ -53,7 +55,14 @@ final class OccasionsController extends Controller
             ];
         }
 
-        return response()->json(['data' => $this->page->forSite($data)]);
+        // прогноз на дни праздника, как у «Выходных»: сайт ставит его у заголовка дня программы
+        $window = $data['occasion']['window'] ?? null;
+        $weather = $window === null ? null : $this->weather->forDays(
+            $city, Carbon::parse($window['from'], 'Europe/Moscow'), Carbon::parse($window['to'], 'Europe/Moscow')->endOfDay(),
+            Carbon::now('Europe/Moscow'),
+        );
+
+        return response()->json(['data' => $this->page->forSite($data) + ['weather' => $weather]]);
     }
 
     private function city(Request $request): City

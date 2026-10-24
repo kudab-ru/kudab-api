@@ -11,6 +11,7 @@ use App\Models\TelegramUser;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Test;
 use Tests\TestCase;
@@ -25,6 +26,8 @@ class WebOccasionsTest extends TestCase
     {
         parent::setUp();
         Carbon::setTestNow(Carbon::parse('2026-10-17 12:00', 'Europe/Moscow'));
+        // страница спрашивает погоду у MET Norway: в тестах без сети, пустой прогноз
+        Http::fake(['api.met.no/*' => Http::response(['properties' => ['timeseries' => []]])]);
 
         DB::insert(
             'INSERT INTO cities (name, country_code, location, status, slug, created_at, updated_at)
