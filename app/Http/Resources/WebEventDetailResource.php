@@ -4,6 +4,7 @@ namespace App\Http\Resources;
 
 use App\Http\Resources\Concerns\BuildsEventGroup;
 use App\Services\Telegram\Scoring\EventAccess;
+use App\Support\SignupNote;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -112,6 +113,11 @@ class WebEventDetailResource extends JsonResource
             'price_url' => $this->price_url,
             'free' => ($this->price_status === 'free') || ($priceMin === 0),
             'entry' => EventAccess::entry($this->access, $this->price_status, $priceMin === 0),
+            // как записаться, строкой организатора из поста; null — запись не нужна или контакта в посте нет
+            'signup_note' => EventAccess::entry($this->access, $this->price_status, $priceMin === 0) === 'signup'
+                && $this->relationLoaded('originalPost') && ! $this->originalIsSitePage()
+                ? SignupNote::from($this->originalPost?->text, (string) $this->title)
+                : null,
 
             // детальное для страницы
             'description' => $this->description,
