@@ -300,11 +300,13 @@ final class OccasionPage
             'words' => in_array($theme['pick'] ?? '', ['words', 'all'], true)
                 ? fn ($q) => OccasionCalendar::applyWords($q, $theme, 'events')
                 : null,
-            // бесплатно так же, как у фильтра ленты `free=1` и у поля `free` в dto
-            'price' => ! empty($theme['free'])
-                ? fn ($q) => $q->where(fn ($w) => $w->where('events.price_status', 'free')
-                    ->orWhere(fn ($x) => $x->where('events.price_min', 0)->whereNull('events.price_max')))
-                : null,
+            // бесплатно так же, как у фильтра ленты `free=1` и у поля `free` в dto; `budget` — платное с входом не дороже
+            'price' => match (true) {
+                ! empty($theme['free']) => fn ($q) => $q->where(fn ($w) => $w->where('events.price_status', 'free')
+                    ->orWhere(fn ($x) => $x->where('events.price_min', 0)->whereNull('events.price_max'))),
+                isset($theme['budget']) => fn ($q) => $q->whereBetween('events.price_min', [1, (int) $theme['budget']]),
+                default => null,
+            },
         ]);
     }
 

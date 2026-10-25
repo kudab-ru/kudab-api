@@ -16,7 +16,7 @@ final class FreeController extends Controller
 {
     public function __construct(private readonly FreePage $page) {}
 
-    /** Вкладки недель и выбранная целиком: `w` — её первый день. */
+    /** Вкладки недель и выбранная целиком: `w` — её первый день, `budget` — монета копилки, см. FreePage::STEPS. */
     public function show(Request $request): JsonResponse
     {
         $slug = (string) $request->query('city', 'voronezh');
@@ -30,6 +30,7 @@ final class FreeController extends Controller
             $city,
             Carbon::now('Europe/Moscow'),
             preg_match('/^\d{4}-\d{2}-\d{2}$/', $want) ? $want : null,
+            (int) $request->query('budget', 0),
         )]);
     }
 }

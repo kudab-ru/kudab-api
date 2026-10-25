@@ -168,6 +168,30 @@ class WebSlicePagesTest extends TestCase
         $this->assertSame('2026-10-23', $week['both'][0]['until']);
     }
 
+    #[Test]
+    public function a_coin_adds_paid_events_up_to_its_price_and_counts_each_step(): void
+    {
+        Event::query()->whereKey($this->event('Лекция о модерне', '2026-10-24 11:00'))
+            ->update(['price_status' => 'free', 'price_min' => null]);
+        $prices = ['Квиз в баре' => ['2026-10-24 19:00', 250], 'Камерный концерт' => ['2026-10-25 18:00', 450],
+            'Большой концерт' => ['2026-10-25 20:00', 1500]];
+        foreach ($prices as $title => [$at, $price]) {
+            Event::query()->whereKey($this->event($title, $at))->update(['price_min' => $price]);
+        }
+
+        $week = $this->getJson('/api/web/free?city=voronezh&budget=500')->assertOk()->json('data.current');
+
+        $this->assertSame(
+            [['2026-10-24', ['Лекция о модерне', 'Квиз в баре']], ['2026-10-25', ['Камерный концерт']]],
+            array_map(fn (array $d) => [$d['date'], array_column($d['events'], 'title')], $week['days']),
+        );
+        $this->assertSame(3, $week['total']);
+        $this->assertSame([[300, 1, 250, 250], [500, 2, 350, 250], [1000, 2, 350, 250]],
+            array_map(fn (array $s) => [$s['max'], $s['more'], $s['avg'], $s['min']], $week['piggy']['steps']));
+        // обычная цена события без темы — медиана трёх платных, 450 ₽, до сотен
+        $this->assertSame(['sum' => 500, 'n' => 1], $week['piggy']['save']);
+    }
+
     /** тема даёт основной вес оценки интереса: без неё событие до главного не дотягивает */
     private function withTheme(int $eventId, string $slug): void
     {
