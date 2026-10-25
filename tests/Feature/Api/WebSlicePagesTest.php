@@ -186,8 +186,9 @@ class WebSlicePagesTest extends TestCase
             array_map(fn (array $d) => [$d['date'], array_column($d['events'], 'title')], $week['days']),
         );
         $this->assertSame(3, $week['total']);
-        $this->assertSame([[300, 1, 250, 250], [500, 2, 350, 250], [1000, 2, 350, 250]],
-            array_map(fn (array $s) => [$s['max'], $s['more'], $s['avg'], $s['min']], $week['piggy']['steps']));
+        $this->assertSame(1, $week['piggy']['free']);
+        $this->assertSame([[300, 1, 250, 250], [500, 1, 450, 450], [1000, 0, 0, null]],
+            array_map(fn (array $s) => [$s['max'], $s['n'], $s['sum'], $s['min']], $week['piggy']['steps']));
         // обычная цена события без темы — медиана трёх платных, 450 ₽, до сотен
         $this->assertSame(['sum' => 500, 'n' => 1], $week['piggy']['save']);
     }

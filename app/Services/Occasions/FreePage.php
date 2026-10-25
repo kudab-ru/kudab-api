@@ -174,28 +174,28 @@ final class FreePage
     }
 
     /**
-     * Копилка недели: `save` — сколько стоили бы бесплатные события по обычной цене таких же платных,
-     * `steps` — что добавляет каждая монета: сколько событий, средняя и самая низкая цена входа.
+     * Копилка недели: `free` — сколько бесплатных, `save` — сколько они стоили бы по обычной цене таких же
+     * платных, `steps` — промежуток каждой монеты от прошлой до неё: сколько событий, сумма и самая низкая цена.
+     * Сумма, а не средняя: монеты на сайте выбираются в любом сочетании, среднюю сайт считает сам.
      *
      * @param  array<string, mixed>  $w
      * @param  list<array<string, mixed>>  $cheap
-     * @return array{save: array{sum: int, n: int}|null, steps: list<array{max: int, more: int, avg: int|null, min: int|null}>}
+     * @return array{free: int, save: array{sum: int, n: int}|null, steps: list<array{max: int, n: int, sum: int, min: int|null}>}
      */
     private function piggy(City $city, Carbon $now, array $w, array $cheap): array
     {
         $steps = [];
+        $low = 0;
         foreach (array_slice(self::STEPS, 1) as $max) {
-            $prices = array_map(fn (array $e) => (int) $e['price_min'], $this->within($w, $cheap, $max));
-            $steps[] = [
-                'max' => $max,
-                'more' => count($prices),
-                // средняя до 50 рублей: «437 ₽» читалось бы точным подсчётом, а это прикидка
-                'avg' => $prices === [] ? null : (int) (round(array_sum($prices) / count($prices) / 50) * 50),
-                'min' => $prices === [] ? null : min($prices),
-            ];
+            $prices = array_values(array_filter(
+                array_map(fn (array $e) => (int) $e['price_min'], $this->within($w, $cheap, $max)),
+                fn (int $p) => $p > $low,
+            ));
+            $steps[] = ['max' => $max, 'n' => count($prices), 'sum' => array_sum($prices), 'min' => $prices === [] ? null : min($prices)];
+            $low = $max;
         }
 
-        return ['save' => $this->save($city, $now, $w), 'steps' => $steps];
+        return ['free' => count($this->cards($w)), 'save' => $this->save($city, $now, $w), 'steps' => $steps];
     }
 
     /**
