@@ -188,8 +188,9 @@ class WebSlicePagesTest extends TestCase
     {
         Event::query()->whereKey($this->event('Лекция о модерне', '2026-10-24 11:00'))
             ->update(['price_status' => 'free', 'price_min' => null]);
+        // утренний квиз сегодня уже начался: карточку сайт спрячет, копилка его не считает
         $prices = ['Квиз в баре' => ['2026-10-24 19:00', 250], 'Камерный концерт' => ['2026-10-25 18:00', 450],
-            'Большой концерт' => ['2026-10-25 20:00', 1500]];
+            'Большой концерт' => ['2026-10-25 20:00', 1500], 'Утренний квиз' => ['2026-10-22 10:00', 200]];
         foreach ($prices as $title => [$at, $price]) {
             Event::query()->whereKey($this->event($title, $at))->update(['price_min' => $price]);
         }
@@ -197,15 +198,15 @@ class WebSlicePagesTest extends TestCase
         $week = $this->getJson('/api/web/free?city=voronezh&budget=500')->assertOk()->json('data.current');
 
         $this->assertSame(
-            [['2026-10-24', ['Лекция о модерне', 'Квиз в баре']], ['2026-10-25', ['Камерный концерт']]],
+            [['2026-10-22', ['Утренний квиз']], ['2026-10-24', ['Лекция о модерне', 'Квиз в баре']], ['2026-10-25', ['Камерный концерт']]],
             array_map(fn (array $d) => [$d['date'], array_column($d['events'], 'title')], $week['days']),
         );
-        $this->assertSame(3, $week['total']);
+        $this->assertSame(4, $week['total']);
         $this->assertSame(1, $week['piggy']['free']);
         $this->assertSame([[300, 1, 250, 250], [500, 1, 450, 450], [1000, 0, 0, null]],
             array_map(fn (array $s) => [$s['max'], $s['n'], $s['sum'], $s['min']], $week['piggy']['steps']));
-        // обычная цена события без темы — медиана трёх платных, 450 ₽, до сотен
-        $this->assertSame(['sum' => 500, 'n' => 1], $week['piggy']['save']);
+        // у каждого вида меньше трёх цен: есть только общая обычная цена, медиана четырёх платных
+        $this->assertSame(['' => 350], $week['piggy']['usual']);
     }
 
     /** тема даёт основной вес оценки интереса: без неё событие до главного не дотягивает */

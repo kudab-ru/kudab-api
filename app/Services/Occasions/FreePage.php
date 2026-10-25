@@ -174,47 +174,51 @@ final class FreePage
     }
 
     /**
-     * Копилка недели: `free` — сколько бесплатных, `save` — сколько они стоили бы по обычной цене таких же
-     * платных, `steps` — промежуток каждой монеты от прошлой до неё: сколько событий, сумма и самая низкая цена.
-     * Сумма, а не средняя: монеты на сайте выбираются в любом сочетании, среднюю сайт считает сам.
+     * Копилка недели: `free` — сколько бесплатных; `usual` — обычная цена входа по видам, по ней сайт считает,
+     * сколько стоили бы бесплатные карточки, которые ещё видны; `steps` — промежуток каждой монеты от прошлой
+     * до неё: сколько событий, сумма и самая низкая цена. Сайт сам пересчитывает по своим карточкам, эти числа
+     * нужны монетам, чьи события ещё не загружены.
      *
      * @param  array<string, mixed>  $w
      * @param  list<array<string, mixed>>  $cheap
-     * @return array{free: int, save: array{sum: int, n: int}|null, steps: list<array{max: int, n: int, sum: int, min: int|null}>}
+     * @return array{free: int, usual: array<string, int>, steps: list<array{max: int, n: int, sum: int, min: int|null}>}
      */
     private function piggy(City $city, Carbon $now, array $w, array $cheap): array
     {
+        $live = fn (array $e) => ! $this->begun($e, $now);
         $steps = [];
         $low = 0;
         foreach (array_slice(self::STEPS, 1) as $max) {
             $prices = array_values(array_filter(
-                array_map(fn (array $e) => (int) $e['price_min'], $this->within($w, $cheap, $max)),
+                array_map(fn (array $e) => (int) $e['price_min'], array_filter($this->within($w, $cheap, $max), $live)),
                 fn (int $p) => $p > $low,
             ));
             $steps[] = ['max' => $max, 'n' => count($prices), 'sum' => array_sum($prices), 'min' => $prices === [] ? null : min($prices)];
             $low = $max;
         }
 
-        return ['free' => count($this->cards($w)), 'save' => $this->save($city, $now, $w), 'steps' => $steps];
+        return [
+            'free' => count(array_filter($this->cards($w), $live)),
+            'usual' => (object) $this->usualPrices($city, $now),
+            'steps' => $steps,
+        ];
     }
 
     /**
-     * @param  array<string, mixed>  $w
-     * @return array{sum: int, n: int}|null null — бесплатного на неделе нет или обычные цены неизвестны
+     * Уже не успеть, как на сайте (begunAt): у события с часом последний сеанс начался больше десяти минут назад,
+     * у события без часа решает `is_past`. Такие карточки сайт прячет, и копилка их не считает: иначе числа
+     * под монетами менялись бы, когда приходят сами карточки.
+     *
+     * @param  array<string, mixed>  $e
      */
-    private function save(City $city, Carbon $now, array $w): ?array
+    private function begun(array $e, Carbon $now): bool
     {
-        $cards = $this->cards($w);
-        $usual = $this->usualPrices($city, $now);
-        if ($cards === [] || ! isset($usual[''])) {
-            return null;
+        if ($e['times'] === []) {
+            return (bool) $e['is_past'];
         }
-        $sum = 0;
-        foreach ($cards as $e) {
-            $sum += $usual[$e['kind']['key']] ?? $usual[''];
-        }
+        $last = $e['times'][array_key_last($e['times'])];
 
-        return ['sum' => (int) (round($sum / 100) * 100), 'n' => count($cards)];
+        return Carbon::parse($e['date'].' '.$last, self::TZ)->addMinutes(10)->lte($now);
     }
 
     /**
