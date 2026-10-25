@@ -57,6 +57,21 @@ class WebSlicePagesTest extends TestCase
     }
 
     #[Test]
+    public function a_programme_row_hands_its_pictures_to_the_card_only_when_there_are_several(): void
+    {
+        $many = $this->withPhoto($this->event('Спектакль «Три сестры»', '2026-10-24 19:00'), [
+            'https://example.com/a.jpg', 'https://example.com/b.jpg', 'https://example.com/c.jpg',
+        ]);
+        $one = $this->withPhoto($this->event('Концерт органной музыки', '2026-10-24 20:00'));
+
+        $days = $this->getJson('/api/web/weekends?city=voronezh')->assertOk()->json('data.current.days');
+        $rows = collect(array_merge(...array_column($days, 'events')))->keyBy('id');
+
+        $this->assertCount(3, $rows[$many]['images']);
+        $this->assertNull($rows[$one]['images']);
+    }
+
+    #[Test]
     public function an_exhibition_open_both_days_is_one_row_with_its_last_date(): void
     {
         $group = (int) DB::table('event_groups')->insertGetId([
@@ -203,7 +218,8 @@ class WebSlicePagesTest extends TestCase
         ]);
     }
 
-    private function withPhoto(int $eventId): int
+    /** @param  list<string>  $images */
+    private function withPhoto(int $eventId, array $images = ['https://example.com/poster.jpg']): int
     {
         $community = (int) Event::query()->whereKey($eventId)->value('community_id');
         $networkId = DB::table('social_networks')->insertGetId(['name' => 'vk', 'slug' => 'vk-'.$eventId]);
@@ -213,7 +229,7 @@ class WebSlicePagesTest extends TestCase
         ]);
         DB::table('event_sources')->insert([
             'event_id' => $eventId, 'social_link_id' => $linkId, 'source' => 'vk',
-            'post_external_id' => 'post-'.$eventId, 'images' => json_encode(['https://example.com/poster.jpg']),
+            'post_external_id' => 'post-'.$eventId, 'images' => json_encode($images),
         ]);
 
         return $eventId;

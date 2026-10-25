@@ -8,6 +8,7 @@ use App\Models\City;
 use App\Models\Event;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
+use App\Repositories\EventRepository;
 use App\Services\Telegram\BroadcastDigestComposer;
 use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\Scoring\EventAccess;
@@ -37,6 +38,9 @@ final class OccasionPage
 
     /** Больше строк в дне — уже лента, а не программа: остальное ссылкой на афишу дня. */
     private const DAY_LIMIT = 15;
+
+    /** столько картинок листает карточка под мышью: дальше обычно повторы и случайные кадры */
+    private const SLIDES = 4;
 
     private const WEEKDAYS = [1 => 'понедельник', 2 => 'вторник', 3 => 'среда', 4 => 'четверг', 5 => 'пятница', 6 => 'суббота', 7 => 'воскресенье'];
 
@@ -86,6 +90,7 @@ final class OccasionPage
     public function __construct(
         private readonly BroadcastDigestComposer $composer,
         private readonly EventBroadcastScorer $scorer,
+        private readonly EventRepository $repo,
     ) {}
 
     /** @param  array<string, mixed>  $theme */
@@ -231,9 +236,13 @@ final class OccasionPage
             ->limit(400);
 
         // дальше всё считается от start_time: событию без часа ставим полночь его дня
-        return $q->get()->each(function (Event $e) {
+        $events = $q->get()->each(function (Event $e) {
             $e->start_time ??= EventStart::of($e);
         });
+        // картинки для листания в карточке под мышью — тем же правилом, что в ленте афиши, см. slides
+        $this->repo->hydrateImagesFor($events);
+
+        return $events;
     }
 
     /**
@@ -618,6 +627,7 @@ final class OccasionPage
             'age_restriction' => $e->age_restriction !== null ? (int) $e->age_restriction : null,
             'entry' => EventAccess::entry($e->access, $e->price_status, (int) ($e->price_min ?? -1) === 0 && $e->price_max === null),
             'poster' => $e->poster(),
+            'images' => $this->slides($e),
             'interests' => $e->interests->pluck('slug')->values()->all(),
             'kind' => ['key' => $kind, 'label' => self::KIND_LABELS[$kind][0]],
             'kids' => $kind === 'kids' || ($e->audience ?? null) === 'kids'
@@ -625,6 +635,19 @@ final class OccasionPage
             'is_past' => $this->isPast($e, $now),
             'score' => $this->scorer->interest($e),
         ];
+    }
+
+    /**
+     * Картинки, которые листает карточка под мышью в программе: без удалённых у источника и повторов
+     * одного фото, лучшая обложка первой. Одна картинка — null: карточке хватает `poster`, а ответ не растёт.
+     *
+     * @return list<string>|null
+     */
+    private function slides(Event $e): ?array
+    {
+        $all = $e->getAttribute('images');
+
+        return is_array($all) && count($all) > 1 ? array_slice($all, 0, self::SLIDES) : null;
     }
 
     /** Что это парой фраз: короткое описание без тегов, без него — начало описания, как в ленте афиши. */
