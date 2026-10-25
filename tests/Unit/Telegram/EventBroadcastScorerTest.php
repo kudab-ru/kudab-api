@@ -72,6 +72,7 @@ class EventBroadcastScorerTest extends TestCase
             'концерт в баре' => [['slug' => 'music', 'venue_kind' => 'Клубы и бары'], [], EventAccess::BAR],
             'квест-комната' => [['slug' => 'quiz-games', 'venue_kind' => 'Квесты'], [], EventAccess::SKIP],
             'ярмарка в парке' => [['slug' => 'markets', 'venue_kind' => 'Парки'], [], EventAccess::OUT],
+            'экскурсия в парке' => [['venue_kind' => 'Парки'], ['title' => 'Экскурсия с дегустацией бананасов', 'price_status' => 'paid', 'price_min' => 500], EventAccess::SIGN],
             'выставка в музее' => [['slug' => 'exhibitions', 'venue_kind' => 'Музеи'], [], EventAccess::WALK],
             'лекция в музее' => [['slug' => 'education', 'venue_kind' => 'Музеи'], ['title' => 'Лекция о Нилусе'], EventAccess::SIGN],
             'бесплатная лекция' => [['slug' => 'education'], ['price_status' => 'free'], EventAccess::WALK],

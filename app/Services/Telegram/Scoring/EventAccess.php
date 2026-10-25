@@ -87,12 +87,12 @@ final class EventAccess
             || preg_match(self::STAGE_TITLE, $title) === 1) {
             return self::STAGE;
         }
-        if ($venue === 'Парки') {
-            return $dear ? self::STAGE : self::OUT;
-        }
-        // запись и занятие важнее места: на забег по регистрации записываются заранее
+        // запись и занятие важнее места: на забег по регистрации и на экскурсию в саду записываются заранее
         $classLike = $signup || preg_match(self::MUSEUM_CLASS_TITLE, $title) === 1
             || in_array($kind, ['quiz-games', 'excursions'], true) || $slug === 'workshops';
+        if ($venue === 'Парки') {
+            return $classLike ? self::SIGN : ($dear ? self::STAGE : self::OUT);
+        }
         $indoor = in_array($venue, ['Клубы и бары', 'Кинотеатры', 'Квесты'], true);
         if (! $classLike && ! $indoor && (preg_match(self::OUTDOOR_TITLE, $title) === 1
             || preg_match(self::OUTDOOR_TEXT, $title.' '.($e->description ?? '')) === 1)) {
