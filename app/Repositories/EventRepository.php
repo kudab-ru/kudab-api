@@ -796,12 +796,13 @@ class EventRepository
                     ) as __grp_rn
                 ');
 
-            $repIds = DB::query()
+            // Представителей подставляем готовым списком, а не подзапросом: вложенный подзапрос с номером
+            // строки база считает за одну строку и пересчитывает его для каждой строки внешнего запроса.
+            $q->whereIntegerInRaw('events.id', DB::query()
                 ->fromSub($ranked, 'r')
-                ->select('r.id')
-                ->where('r.__grp_rn', 1);
-
-            $q->whereIn('events.id', $repIds);
+                ->where('r.__grp_rn', 1)
+                ->pluck('r.id')
+                ->all());
         }
 
         // grouped_by_post: ось B. Кластеризуем filtered-events по
@@ -915,12 +916,14 @@ class EventRepository
                     ) AS __post_rn
                 ");
 
+            // готовым списком по той же причине, что представители серий выше
             $postRepIds = DB::query()
                 ->fromSub($ranked, 'r')
-                ->select('r.event_id')
-                ->where('r.__post_rn', 1);
+                ->where('r.__post_rn', 1)
+                ->pluck('r.event_id')
+                ->all();
 
-            $q->whereIn('events.id', $postRepIds);
+            $q->whereIntegerInRaw('events.id', $postRepIds);
 
             // Из снимка выкидываем прошедшие события, которые на странице не
             // видны: past siblings отсеивает hydrateSiblings (siblingIsFuture),
@@ -931,7 +934,7 @@ class EventRepository
                         (events.start_time IS NOT NULL AND events.start_time < (now() - interval '{$graceHours} hours'))
                         OR (events.start_time IS NULL AND events.start_date IS NOT NULL AND events.start_date < (now() AT TIME ZONE 'Europe/Moscow')::date)
                     )")
-                    ->orWhereIn('events.id', clone $postRepIds);
+                    ->orWhereIntegerInRaw('events.id', $postRepIds);
             });
         }
 
@@ -976,7 +979,8 @@ class EventRepository
                 $topicTotal = $ranks->filter(fn ($r) => (int) $r === 4)->count();
                 $placeTotal = $ranks->filter(fn ($r) => (int) $r === 0)->count();
             } else {
-                $eligibleEventIds = $uncollapsedQ->toBase()->pluck('events.id')
+                // `pluck` оставляет уже выбранные колонки ленты: без `select` база считала бы для снимка все её признаки и порядок
+                $eligibleEventIds = $uncollapsedQ->toBase()->reorder()->select('events.id')->pluck('id')
                     ->map(fn ($v) => (int) $v)
                     ->all();
             }

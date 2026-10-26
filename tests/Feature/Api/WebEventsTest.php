@@ -1816,6 +1816,39 @@ class WebEventsTest extends TestCase
         $this->assertSame(2, (int) ($fest[0]['group']['count'] ?? 0), 'group.count считается по всей федерации');
     }
 
+    public function test_feed_folds_series_and_shared_post_together(): void
+    {
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Клуб');
+        $this->createSessions($city->id, $community->id, 'Квест', 3);
+        $lecture = $this->createEvent($city->id, $community->id, 'Лекция', now()->addDays(2));
+        $concert = $this->createEvent($city->id, $community->id, 'Концерт', now()->addDays(3));
+        $networkId = DB::table('social_networks')->insertGetId(['name' => 'vk', 'slug' => 'vk']);
+        $linkId = DB::table('community_social_links')->insertGetId([
+            'community_id' => $community->id,
+            'social_network_id' => $networkId,
+            'url' => 'https://vk.com/club1',
+            'status' => 'active',
+        ]);
+        foreach ([$lecture, $concert] as $event) {
+            DB::table('event_sources')->insert([
+                'event_id' => $event->id,
+                'social_link_id' => $linkId,
+                'source' => 'vk',
+                'post_external_id' => '-1_5',
+                'images' => '[]',
+            ]);
+        }
+
+        $response = $this->getJson('/api/web/events?city=voronezh&grouped=1&grouped_by_post=1')->assertOk();
+
+        $this->assertSame(2, $response->json('meta.total'));
+        $this->assertSame(3, $response->json('meta.total_events'));
+        $cards = collect($response->json('data'))->keyBy('title');
+        $this->assertSame(3, $cards['Квест']['group']['count']);
+        $this->assertSame([$concert->id], array_column($cards['Лекция']['siblings'], 'id'));
+    }
+
     public function test_sort_top_freshness_bonus_lifts_recently_added(): void
     {
         $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
