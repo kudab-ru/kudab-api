@@ -45,6 +45,16 @@ final class OccasionsController extends Controller
 
         $city = $this->city($request);
         $data = $this->promo->pageData($theme, $city);
+
+        $day = (string) $request->query('day', '');
+        if ($day !== '') {
+            abort_unless((bool) preg_match('/^\d{4}-\d{2}-\d{2}$/', $day), 404);
+            $rest = $this->page->forSiteDay($data, $day);
+            abort_if($rest === null, 404);
+
+            return response()->json(['data' => ['date' => $day, 'events' => $rest]]);
+        }
+
         // лента следующего праздника внизу страницы говорит, есть ли у него уже события
         $next = isset($data['next'][0]) ? OccasionCalendar::byPage($data['next'][0]['page']) : null;
         if ($next !== null) {

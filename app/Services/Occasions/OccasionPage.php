@@ -36,7 +36,7 @@ final class OccasionPage
     /** нижняя оценка интереса для главного сайта, см. sitePick */
     private const SITE_PICK_FLOOR = 35;
 
-    /** Больше строк в дне — уже лента, а не программа: остальное ссылкой на афишу дня. */
+    /** Больше строк в дне — уже лента, а не программа: остальное сайт показывает по кнопке, см. forSiteDay. */
     private const DAY_LIMIT = 15;
 
     /** столько картинок листает карточка под мышью: дальше обычно повторы и случайные кадры */
@@ -151,16 +151,21 @@ final class OccasionPage
         }
         $also = [];
         foreach ($w['days'] as $d => $day) {
-            $keep = [];
-            foreach ($day['events'] as $e) {
-                $i = $index[$this->sameTitle($e['title'])] ?? null;
-                if ($i === null) {
-                    $keep[] = $e;
-                } elseif ($day['date'] !== $w['picks'][$i]['date']) {
-                    $also[$i][$day['date']] ??= ['date' => $day['date'], 'time' => $e['times'][0] ?? null];
+            foreach (['events', 'rest'] as $list) {
+                if (! isset($day[$list])) {
+                    continue;
                 }
+                $keep = [];
+                foreach ($day[$list] as $e) {
+                    $i = $index[$this->sameTitle($e['title'])] ?? null;
+                    if ($i === null) {
+                        $keep[] = $e;
+                    } elseif ($day['date'] !== $w['picks'][$i]['date']) {
+                        $also[$i][$day['date']] ??= ['date' => $day['date'], 'time' => $e['times'][0] ?? null];
+                    }
+                }
+                $w['days'][$d][$list] = $keep;
             }
-            $w['days'][$d]['events'] = $keep;
         }
         if (isset($w['both'])) {
             $w['both'] = array_values(array_filter($w['both'], fn (array $e) => ! isset($index[$this->sameTitle($e['title'])])));
@@ -190,12 +195,31 @@ final class OccasionPage
     public function forSite(array $data): array
     {
         $data = $this->withoutPicks($data);
-        $left = array_merge(...array_map(fn (array $d) => $d['events'], $data['days']));
+        $left = [];
+        foreach ($data['days'] as $i => $d) {
+            array_push($left, ...$d['events'], ...($d['rest'] ?? []));
+            // не влезшее в программу сайт просит по кнопке, см. forSiteDay
+            $data['days'][$i]['more'] = count($d['rest'] ?? []);
+            unset($data['days'][$i]['rest']);
+        }
         $data['days'] = array_values(array_filter($data['days'], fn (array $d) => $d['events'] !== [] || $d['more'] > 0));
         $data['kinds'] = $this->kinds($left);
-        $data['occasion']['program_total'] = count($left) + array_sum(array_column($data['days'], 'more'));
+        $data['occasion']['program_total'] = count($left);
 
         return $data;
+    }
+
+    /**
+     * Строки дня, которые не влезли в программу, для кнопки «Показать ещё». null — такого дня на странице нет.
+     *
+     * @param  array<string, mixed>  $data  результат `build`
+     * @return list<array<string, mixed>>|null
+     */
+    public function forSiteDay(array $data, string $date): ?array
+    {
+        $day = collect($this->withoutPicks($data)['days'])->firstWhere('date', $date);
+
+        return $day === null ? null : array_values($day['rest'] ?? []);
     }
 
     /**
@@ -429,13 +453,14 @@ final class OccasionPage
             $byDay[$row['date']][] = $row;
         }
 
+        $strip = fn (array $r) => array_diff_key($r, ['score' => true, 'series' => true]);
         $out = [];
         foreach ($byDay as $date => $items) {
-            $more = 0;
+            $rest = [];
             if ($limit !== null && count($items) > $limit) {
                 // самое интересное дня, но по порядку времени
                 $keep = collect($items)->sortByDesc('score')->take($limit)->pluck('id')->all();
-                $more = count($items) - $limit;
+                $rest = array_values(array_filter($items, fn ($r) => ! in_array($r['id'], $keep, true)));
                 $items = array_values(array_filter($items, fn ($r) => in_array($r['id'], $keep, true)));
             }
             $d = Carbon::parse($date, self::TZ);
@@ -443,8 +468,9 @@ final class OccasionPage
                 'date' => $date,
                 'weekday' => self::WEEKDAYS[$d->isoWeekday()],
                 'label' => $this->dayMonth($d),
-                'events' => array_map(fn ($r) => array_diff_key($r, ['score' => true, 'series' => true]), $items),
-                'more' => $more,
+                'events' => array_map($strip, $items),
+                'more' => count($rest),
+                'rest' => array_map($strip, $rest),
             ];
         }
 

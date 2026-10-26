@@ -48,7 +48,7 @@ final class OccasionPromo
     /** @param  array<string, mixed>  $theme */
     private static function pageKey(array $theme, City $city): string
     {
-        return 'occasion-page:v2:'.$city->slug.':'.$theme['page'];
+        return 'occasion-page:v3:'.$city->slug.':'.$theme['page'];
     }
 
     /** Ближайший праздник для ленты на главной; null — он дальше двух недель или событий у него нет. */

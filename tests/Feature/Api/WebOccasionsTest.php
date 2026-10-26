@@ -72,6 +72,25 @@ class WebOccasionsTest extends TestCase
     }
 
     #[Test]
+    public function rows_that_do_not_fit_the_day_come_by_a_separate_request(): void
+    {
+        $ids = [];
+        foreach (range(6, 22) as $hour) {
+            $ids[] = $this->event("Хэллоуин в {$hour} часов", sprintf('2026-10-31 %02d:00', $hour));
+        }
+        $this->postedOccasion([$ids[0]], []);
+
+        $page = $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data');
+        $rest = $this->getJson('/api/web/occasions/halloween?city=voronezh&day=2026-10-31')->assertOk()->json('data.events');
+
+        $this->assertNotEmpty($rest);
+        $this->assertCount($page['days'][0]['more'], $rest);
+        $this->assertSame(count($ids) - 1, $page['occasion']['program_total']);
+        $shown = array_merge(array_column($page['picks'], 'id'), array_column($page['days'][0]['events'], 'id'), array_column($rest, 'id'));
+        $this->assertEqualsCanonicalizing($ids, $shown);
+    }
+
+    #[Test]
     public function the_owner_overrules_the_holiday_words_in_the_program(): void
     {
         $party = $this->event('Хэллоуинская вечеринка', '2026-10-31 18:00');
