@@ -192,6 +192,21 @@ class WebOccasionsTest extends TestCase
     }
 
     #[Test]
+    public function a_free_event_on_two_days_is_named_once_in_the_answer(): void
+    {
+        foreach (['2026-10-28 18:00', '2026-10-29 18:00'] as $at) {
+            Event::query()->whereKey($this->event('Коктейли к Хэллоуину', $at))->update(['price_status' => 'free', 'price_min' => 0]);
+        }
+        Event::query()->whereKey($this->event('Хэллоуин в библиотеке', '2026-10-31 12:00'))->update(['price_status' => 'free', 'price_min' => 0]);
+
+        $faq = $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data.faq');
+        $free = collect($faq)->firstWhere('q', 'Есть ли что-то бесплатное?');
+
+        $this->assertSame(1, substr_count($free['a'], 'Коктейли к Хэллоуину'));
+        $this->assertStringContainsString('Хэллоуин в библиотеке', $free['a']);
+    }
+
+    #[Test]
     public function the_next_holiday_tells_how_many_events_it_already_has(): void
     {
         $this->event('Хэллоуинская вечеринка', '2026-10-31 18:00');

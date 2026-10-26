@@ -837,7 +837,14 @@ final class OccasionPage
         $city = $cityIn !== null ? 'в '.$cityIn : '';
         $q = fn (string $key) => trim((string) preg_replace('/\s+(?=\?)/u', '', str_replace('{city}', $city, (string) ($theme[$key] ?? ''))));
         $season = $this->isSeason($theme);
-        $live = array_values(array_filter($rows, fn ($r) => ! $r['is_past']));
+        // событие, которое идёт два дня, в программе двумя строками, а в ответе оно одно
+        $live = [];
+        foreach ($rows as $r) {
+            if (! $r['is_past']) {
+                $live[$this->sameTitle((string) $r['title'])] ??= $r;
+            }
+        }
+        $live = array_values($live);
         $link = fn (array $r) => ['text' => (string) $r['title'], 'url' => (string) $r['url']];
 
         if (($theme['when_question'] ?? '') !== '' && $day !== null) {
