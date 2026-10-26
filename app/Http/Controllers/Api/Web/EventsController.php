@@ -28,6 +28,11 @@ class EventsController extends Controller
 
     private const CACHE_STALE_SECONDS = 300;
 
+    /** То же для карты: точки окна меняются медленно, а считаются по всем сеансам окна сразу. */
+    private const MAP_FRESH_SECONDS = 300;
+
+    private const MAP_STALE_SECONDS = 600;
+
     public function __construct(
         private readonly EventService $service
     ) {}
@@ -252,11 +257,9 @@ class EventsController extends Controller
     }
 
     /**
-     * GET /api/web/events/map
-     * Точки событий для карты города (/map): GeoJSON FeatureCollection, отбор по городу
-     * и окну даты, БЕЗ пагинации (все точки окна разом). Отдельная ручка, потому что
-     * /events режет per_page=50 — карте нужны все точки сразу (по образцу venues/map).
-     * Каждое событие = одна точка (без grouped-схлопывания). properties — превью для карточки.
+     * GET /api/web/events/map — точки событий для карты города (/map), GeoJSON FeatureCollection.
+     * Все точки окна даты разом, без страниц: /events отдаёт не больше 50 за раз (по образцу venues/map).
+     * Одна точка на событие, см. `mapFeatures`; `properties` — превью для карточки.
      */
     public function map(Request $request): JsonResponse
     {
@@ -291,7 +294,8 @@ class EventsController extends Controller
 
         // when -> date_from/date_to (идентично index)
         if (!empty($v['when']) && empty($v['date_from']) && empty($v['date_to'])) {
-            $now = Carbon::now('Europe/Moscow');
+            // до минуты, иначе у «сейчас» каждую секунду был бы свой ключ кэша
+            $now = Carbon::now('Europe/Moscow')->startOfMinute();
             if ($v['when'] === 'today') {
                 $v['date_from'] = $now->copy()->startOfDay()->toDateTimeString();
                 $v['date_to']   = $now->copy()->endOfDay()->toDateTimeString();
@@ -333,14 +337,33 @@ class EventsController extends Controller
         $v['city_id'] = (int) $cityId;
         unset($v['city']);
 
-        // Все точки окна разом: большой per_page (карта не пагинируется, ей нужны все точки).
-        // NB: 5000 — предохранитель; считает СЫРЫЕ строки (серии не схлопнуты здесь, а на фронте).
-        $result = $this->service->listWeb($v, 5000);
-        $items = $result['page']->items();
+        ksort($v);
+        $json = Cache::flexible(
+            'web:events:map:'.md5(json_encode($v)),
+            [self::MAP_FRESH_SECONDS, self::MAP_STALE_SECONDS],
+            // сжато и в base64 по той же причине, что лента в index
+            fn () => base64_encode(gzcompress(json_encode(
+                ['type' => 'FeatureCollection', 'features' => $this->mapFeatures($v)],
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
+            ))),
+            ['seconds' => 30],
+        );
 
-        // Federation-ключ группы: событие, кросс-запощенное в N пабликов, имеет РАЗНЫЕ
-        // event_group_id, но общий federation_id → на карте это ОДНА точка (как в ленте /events,
-        // где read-путь схлопывает по COALESCE(federation_id, event_group_id)). Один доп-запрос.
+        return new JsonResponse(gzuncompress(base64_decode($json)), 200, [], 0, true);
+    }
+
+    /**
+     * Точки карты: одна на событие. Сеансы серии и копии события из разных пабликов (общий
+     * `federation_id`) сходятся в одну точку, её показывает ближайший предстоящий сеанс окна.
+     * `session_ids` — все сеансы точки в окне по времени: по ним сайт узнаёт событие из программы праздника.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function mapFeatures(array $v): array
+    {
+        // 5000 — предохранитель, считает сеансы, а не точки
+        $items = $this->service->listWeb($v, 5000)['page']->items();
+
         $groupIds = [];
         foreach ($items as $e) {
             $g = (int) ($e->event_group_id ?? 0);
@@ -357,45 +380,35 @@ class EventsController extends Controller
                 ->all();
         }
 
-        // Темы точки: карта их не отдавала, и знак темы на метке фронту брать было неоткуда.
-        // Отдаём слоги как есть (включая жанры-листья) — сведение к корню и выбор одной темы
-        // из нескольких живут во фронте, где для этого есть карта алиасов.
-        $eventIds = [];
-        foreach ($items as $e) {
-            $eventIds[] = (int) $e->id;
-        }
-        $interestsById = [];
-        if ($eventIds !== []) {
-            $rows = \Illuminate\Support\Facades\DB::table('event_interest')
-                ->join('interests', 'interests.id', '=', 'event_interest.interest_id')
-                ->whereIn('event_interest.event_id', $eventIds)
-                ->get(['event_interest.event_id as eid', 'interests.slug as slug']);
-            foreach ($rows as $r) {
-                $interestsById[(int) $r->eid][] = (string) $r->slug;
-            }
-        }
-
-        $features = [];
+        $points = [];
         foreach ($items as $e) {
             if ($e->latitude === null || $e->longitude === null) {
                 continue;
             }
+            $gid = (int) ($e->event_group_id ?? 0);
+            $fed = $fedByGroup[$gid] ?? null;
+            $key = $gid > 0 ? ($fed ? 'f'.(int) $fed : 'g'.$gid) : 'e'.$e->id;
+            $points[$key][] = $e;
+        }
 
-            // start_at в МСК с offset — как WebEventResource (фронт извлекает HH:MM из строки)
-            $startAt = $e->start_time !== null
-                ? Carbon::parse($e->start_time)->setTimezone('Europe/Moscow')->toIso8601String()
-                : null;
+        $now = Carbon::now();
+        $today = Carbon::now('Europe/Moscow')->toDateString();
+        // событие без часа встаёт в свой день после событий с часом, как и в списках сайта
+        $order = fn (Event $e) => $e->start_time !== null
+            ? $e->start_time->copy()->setTimezone('Europe/Moscow')->format('Y-m-d H:i')
+            : $e->start_date?->toDateString().' 24';
+
+        $features = [];
+        foreach ($points as $sessions) {
+            usort($sessions, fn (Event $a, Event $b) => [$order($a), $a->id] <=> [$order($b), $b->id]);
+            $ahead = array_filter($sessions, fn (Event $e) => $e->start_time !== null
+                ? $e->start_time->gte($now)
+                : $e->start_date?->toDateString() >= $today);
+            // всё уже началось — показываем последний начавшийся
+            $e = $ahead !== [] ? reset($ahead) : end($sessions);
 
             $free = ($e->price_status === 'free')
                 || ((int) ($e->price_min ?? -1) === 0 && $e->price_max === null);
-
-            // ключ группы для схлопывания на фронте: federation (кросс-пост) → 'f{id}', иначе серия → 'g{id}'
-            $gid = (int) ($e->event_group_id ?? 0);
-            $groupKey = null;
-            if ($gid > 0) {
-                $fed = $fedByGroup[$gid] ?? null;
-                $groupKey = $fed ? ('f' . (int) $fed) : ('g' . $gid);
-            }
 
             $features[] = [
                 'type'       => 'Feature',
@@ -406,24 +419,22 @@ class EventsController extends Controller
                 'properties' => [
                     'id'        => (int) $e->id,
                     'title'     => (string) ($e->title ?? ''),
-                    'start_at'  => $startAt,
+                    // в МСК с поясом, как в WebEventResource: сайт вырезает часы прямо из строки
+                    'start_at'  => $e->start_time?->copy()->setTimezone('Europe/Moscow')->toIso8601String(),
                     // у события без часа start_at пуст, и день карта берёт отсюда
                     'start_date' => $e->start_date?->toDateString(),
                     'poster'    => $e->poster !== null ? (string) $e->poster : null,
                     'price_min' => $e->price_min !== null ? (int) $e->price_min : null,
                     'free'      => $free,
                     'venue_id'  => $e->venue_id !== null ? (int) $e->venue_id : null,
-                    // ключ группы: фронт схлопывает точки одной группы (серия ИЛИ кросс-пост) в одну
-                    'group_key' => $groupKey,
-                    'interests' => $interestsById[(int) $e->id] ?? [],
+                    // слоги как есть, с жанрами-листьями: тему для знака на метке выбирает сайт
+                    'interests' => $e->interests->pluck('slug')->all(),
+                    'session_ids' => array_map(fn (Event $s) => (int) $s->id, $sessions),
                 ],
             ];
         }
 
-        return response()->json([
-            'type'     => 'FeatureCollection',
-            'features' => $features,
-        ]);
+        return $features;
     }
 
     public function show(int $id, EventSurvivor $survivors, OccasionPromo $occasions): JsonResponse

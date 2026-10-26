@@ -564,6 +564,21 @@ class WebEventsTest extends TestCase
         $this->assertSame('2026-10-31', $point['start_date']);
     }
 
+    public function test_map_shows_a_series_once_by_its_next_session(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-26 11:30'));
+        $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($city->id, 'Квесты');
+        $sessions = $this->createSessions($city->id, $community->id, 'Арканум', 3, Carbon::parse('2026-10-26 11:00'));
+        DB::update('UPDATE events SET location = ST_SetSRID(ST_Point(39.2, 51.66), 4326)');
+
+        $points = $this->getJson('/api/web/events/map?city=voronezh')->assertOk()->json('features');
+
+        $this->assertCount(1, $points);
+        $this->assertSame($sessions[1]->id, $points[0]['properties']['id']);
+        $this->assertSame(array_map(fn (Event $e) => $e->id, $sessions), $points[0]['properties']['session_ids']);
+    }
+
     public function test_filter_by_leaf_slug_returns_only_tagged_events(): void
     {
         $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
