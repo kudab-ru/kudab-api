@@ -49,6 +49,7 @@ final class SliceBuilder
         $rows = array_values(array_filter(array_map(fn (array $r) => ['times' => $this->clock($r['times'])] + $r, $part['rows']), $live));
         $picks = array_values(array_filter(array_map(fn (array $p) => ['times' => $this->clock($p['times'])] + $p, $part['picks']), $live));
         $until = $this->lastDates($rows, $to);
+        $slim = ! empty($theme['slim_rows']);
         $score = array_column($rows, 'score', 'id');
 
         // что идёт без часа все эти дни (выставки), одной строкой отдельно: в программе по дням оно стояло бы в каждом
@@ -65,7 +66,7 @@ final class SliceBuilder
             if (! $allDay || array_filter($list, fn (array $r) => $r['times'] !== []) !== []) {
                 continue;
             }
-            $both[] = $this->row($list[0], $until, $score);
+            $both[] = $this->row($list[0], $until, $score, $slim);
             array_push($bothIds, ...array_column($list, 'id'));
         }
         usort($both, fn (array $a, array $b) => $b['rank'] <=> $a['rank']);
@@ -75,7 +76,7 @@ final class SliceBuilder
             $events = array_filter($d['events'], fn (array $e) => $live($e) && ! in_array($e['id'], $bothIds, true));
             $days[] = [
                 'date' => $d['date'], 'weekday' => $d['weekday'], 'label' => $d['label'],
-                'events' => array_values(array_map(fn (array $e) => $this->row($e, $until, $score), $events)),
+                'events' => array_values(array_map(fn (array $e) => $this->row($e, $until, $score, $slim), $events)),
             ];
         }
 
@@ -129,9 +130,10 @@ final class SliceBuilder
      * @param  array<int, int|float>  $score
      * @return array<string, mixed>
      */
-    private function row(array $row, array $until, array $score): array
+    private function row(array $row, array $until, array $score, bool $slim): array
     {
-        $out = array_diff_key($row, ['score' => true, 'series' => true]);
+        // `slim_rows`: картинки строке нужны только для всплывающей карточки, а она приносит их сама
+        $out = array_diff_key($row, ['score' => true, 'series' => true] + ($slim ? ['poster' => true, 'images' => true] : []));
         $out['times'] = $this->clock((array) $row['times']);
         $out['until'] = $until[$row['id']] ?? $row['until'] ?? null;
         $out['rank'] = (int) round((float) ($score[$row['id']] ?? 0));

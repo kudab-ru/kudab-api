@@ -72,18 +72,17 @@ class WebSlicePagesTest extends TestCase
     }
 
     #[Test]
-    public function a_programme_row_hands_its_pictures_to_the_card_only_when_there_are_several(): void
+    public function weekend_programme_rows_come_without_pictures_the_hover_card_brings_them(): void
     {
-        $many = $this->withPhoto($this->event('Спектакль «Три сестры»', '2026-10-24 19:00'), [
+        $show = $this->withPhoto($this->event('Спектакль «Три сестры»', '2026-10-24 19:00'), [
             'https://example.com/a.jpg', 'https://example.com/b.jpg', 'https://example.com/c.jpg',
         ]);
-        $one = $this->withPhoto($this->event('Концерт органной музыки', '2026-10-24 20:00'));
 
         $days = $this->getJson('/api/web/weekends?city=voronezh')->assertOk()->json('data.current.days');
-        $rows = collect(array_merge(...array_column($days, 'events')))->keyBy('id');
+        $row = collect(array_merge(...array_column($days, 'events')))->firstWhere('id', $show);
 
-        $this->assertCount(3, $rows[$many]['images']);
-        $this->assertNull($rows[$one]['images']);
+        $this->assertArrayNotHasKey('poster', $row);
+        $this->assertArrayNotHasKey('images', $row);
     }
 
     #[Test]
