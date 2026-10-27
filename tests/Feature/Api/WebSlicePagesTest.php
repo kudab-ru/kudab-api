@@ -57,6 +57,21 @@ class WebSlicePagesTest extends TestCase
     }
 
     #[Test]
+    public function the_weekend_page_answers_where_to_go_by_day_and_what_is_free(): void
+    {
+        $play = $this->withPhoto($this->event('Спектакль «Чайка»', '2026-10-24 18:00'));
+        $this->withTheme($play, 'theatre');
+        $fair = $this->event('Ярмарка во дворе', '2026-10-25 12:00');
+        Event::query()->whereKey($fair)->update(['price_status' => 'free', 'price_min' => 0]);
+
+        $faq = $this->getJson('/api/web/weekends?city=voronezh')->assertOk()->json('data.current.faq');
+
+        $this->assertSame('Куда сходить в Воронеже на выходных?', $faq[0]['q']);
+        $this->assertStringStartsWith('В субботу: Спектакль «Чайка» в 18:00.', $faq[0]['a']);
+        $this->assertSame('Ярмарка во дворе.', array_column($faq, 'a', 'q')['Что бесплатно?'] ?? null);
+    }
+
+    #[Test]
     public function a_programme_row_hands_its_pictures_to_the_card_only_when_there_are_several(): void
     {
         $many = $this->withPhoto($this->event('Спектакль «Три сестры»', '2026-10-24 19:00'), [

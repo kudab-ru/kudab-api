@@ -94,7 +94,7 @@ final class WeekendPage
         $sat = $from->isSunday() ? $from->copy()->subDay() : $from->copy();
 
         return Cache::remember(
-            'weekend-page:v2:'.$city->slug.':'.$from->toDateString().':'.$to->toDateString(),
+            'weekend-page:v3:'.$city->slug.':'.$from->toDateString().':'.$to->toDateString(),
             self::CACHE_SECONDS,
             fn () => ['w' => $sat->toDateString()]
                 + $this->slices->build($this->theme(), $city, $from, $to, $sat, Carbon::now(self::TZ), false),
@@ -107,7 +107,11 @@ final class WeekendPage
         $rubric = (array) collect((array) config('broadcast_digest.themes', []))->firstWhere('slug', 'na-vyhodnyh');
 
         // пост ищется в неделю этих выходных; без поста главное собирает сайт своими правилами, см. OccasionPage::sitePick
-        return ['page' => 'na-vyhodnyh', 'site_pick' => true, 'picks' => self::PICKS + 3]
+        return ['page' => 'na-vyhodnyh', 'site_pick' => true, 'picks' => self::PICKS + 3,
+            // вопросы «Коротко» — так, как их задают поиску
+            'question' => 'Куда сходить {city} на выходных?',
+            'kids_question' => 'Куда сходить с ребёнком?',
+            'free_question' => 'Что бесплатно?']
             + $rubric
             + ['slug' => 'na-vyhodnyh', 'title' => 'На выходных', 'window' => 'weekend', 'pick' => 'all'];
     }

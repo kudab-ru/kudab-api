@@ -839,7 +839,7 @@ final class OccasionPage
      * @param  list<array<string, mixed>>  $rows
      * @return list<array{q: string, a: string, links: list<array{text: string, url: string}>}>
      */
-    private function faq(array $theme, ?string $cityIn, ?Carbon $day, array $picks, array $rows): array
+    public function faq(array $theme, ?string $cityIn, ?Carbon $day, array $picks, array $rows): array
     {
         $out = [];
         $city = $cityIn !== null ? 'в '.$cityIn : '';
@@ -881,23 +881,25 @@ final class OccasionPage
             $out[] = ['q' => $q('question'), 'a' => implode(' ', $parts), 'links' => array_map($link, $main)];
         }
 
+        // у праздника вопросы «да или нет», у подборки свои — «Куда сходить с ребёнком?», и «Да» там лишнее
+        $yes = isset($theme['kids_question']) ? '' : 'Да, ';
         $kids = array_values(array_filter($live, fn ($r) => $r['kids']));
         if ($kids !== [] && count($kids) * 2 > count($live)) {
-            $out[] = ['q' => 'Можно ли с детьми?', 'links' => [], 'a' => count($kids) === count($live)
-                ? 'Да, все события для детей.'
-                : 'Да, почти всё: '.count($kids).' из '.count($live).' '.$this->plural(count($live), 'события', 'событий', 'событий').' подходят детям.'];
+            $out[] = ['q' => $theme['kids_question'] ?? 'Можно ли с детьми?', 'links' => [], 'a' => count($kids) === count($live)
+                ? $this->capital($yes.'все события для детей.')
+                : $this->capital($yes.'почти всё: ').count($kids).' из '.count($live).' '.$this->plural(count($live), 'события', 'событий', 'событий').' подходят детям.'];
         } elseif ($kids !== []) {
             $two = array_slice($kids, 0, 2);
-            $out[] = ['q' => 'Можно ли с детьми?', 'links' => array_map($link, $two),
-                'a' => 'Да: '.implode('; ', array_map(fn ($r) => $r['title'].', '.$this->at($r, $season), $two)).'.'];
+            $out[] = ['q' => $theme['kids_question'] ?? 'Можно ли с детьми?', 'links' => array_map($link, $two),
+                'a' => ($yes === '' ? '' : 'Да: ').implode('; ', array_map(fn ($r) => $r['title'].', '.$this->at($r, $season), $two)).'.'];
         }
 
         $free = array_values(array_filter($live, fn ($r) => $r['free']));
         $paid = array_values(array_filter($live, fn ($r) => ! $r['free'] && (int) ($r['price_min'] ?? 0) > 0));
         if ($free !== []) {
             $two = array_slice($free, 0, 2);
-            $out[] = ['q' => 'Есть ли что-то бесплатное?', 'links' => array_map($link, $two),
-                'a' => 'Да: '.implode(', ', array_column($two, 'title')).'.'];
+            $out[] = ['q' => $theme['free_question'] ?? 'Есть ли что-то бесплатное?', 'links' => array_map($link, $two),
+                'a' => (isset($theme['free_question']) ? '' : 'Да: ').implode(', ', array_column($two, 'title')).'.'];
         } elseif ($paid !== []) {
             usort($paid, fn ($a, $b) => $a['price_min'] <=> $b['price_min']);
             $lo = (int) $paid[0]['price_min'];

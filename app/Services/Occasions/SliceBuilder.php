@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Occasions;
 
 use App\Models\City;
+use App\Support\CityCase;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -100,6 +101,10 @@ final class SliceBuilder
             'days' => $days,
             'both' => $both,
             'holiday' => $holiday,
+            // «Коротко» — только у подборки с вопросом в теме, см. OccasionPage::faq
+            'faq' => isset($theme['question'])
+                ? $this->page->faq($theme, CityCase::prepositional($city->slug), null, $picks, $rows)
+                : [],
         ];
     }
 
