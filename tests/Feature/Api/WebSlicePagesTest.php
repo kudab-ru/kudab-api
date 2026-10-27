@@ -116,9 +116,13 @@ class WebSlicePagesTest extends TestCase
     #[Test]
     public function a_main_event_leaves_the_programme_and_keeps_its_other_day_on_the_card(): void
     {
+        $shows = [];
         foreach (['2026-10-24 18:00', '2026-10-25 18:00'] as $at) {
-            $this->withTheme($this->withPhoto($this->event('Спектакль «Чайка»', $at)), 'theatre');
+            $shows[] = $id = $this->withPhoto($this->event('Спектакль «Чайка»', $at));
+            $this->withTheme($id, 'theatre');
         }
+        // оба показа на одной сцене: то же название в другом месте — уже другое событие
+        Event::query()->whereKey($shows[1])->update(['venue_id' => Event::query()->whereKey($shows[0])->value('venue_id')]);
         $this->event('Концерт органной музыки', '2026-10-24 19:00');
 
         $page = $this->getJson('/api/web/weekends?city=voronezh')->assertOk()->json('data.current');

@@ -240,6 +240,8 @@ return [
             'words' => ['ночь искусств', 'ночи искусств'],
             // слова ищутся и в посте, откуда пришло событие, см. OccasionCalendar::applyWords
             'source_words' => true,
+            // вечер музеев и библиотек в этот день — программа ночи и без её названия, см. OccasionCalendar::eveningAt
+            'evening_at' => ['kinds' => ['Музеи', 'museum'], 'names' => ['музе', 'библиотек', 'галере']],
             'occasion' => '11-03',
             'lead_days' => 4,
             'hour' => 12,
@@ -504,6 +506,7 @@ return [
             'pick' => 'words',
             'words' => ['ночь музеев', 'ночи музеев', 'ночь в музее'],
             'source_words' => true,
+            'evening_at' => ['kinds' => ['Музеи', 'museum'], 'names' => ['музе', 'галере']],
             'occasion' => 'floating',
             'lead_days' => 4,
             'hour' => 12,
@@ -536,6 +539,7 @@ return [
             'pick' => 'words',
             'words' => ['библионочь', 'библионочи', 'библиосумерки'],
             'source_words' => true,
+            'evening_at' => ['names' => ['библиотек']],
             'occasion' => 'floating',
             'lead_days' => 4,
             'hour' => 12,

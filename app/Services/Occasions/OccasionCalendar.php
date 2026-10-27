@@ -134,7 +134,7 @@ final class OccasionCalendar
         $words = array_values(array_filter(array_map('strval', (array) ($theme['words'] ?? []))));
         if ($words !== []) {
             $inSource = ! empty($theme['source_words']);
-            $q->where(function ($w) use ($words, $table, $inSource) {
+            $q->where(function ($w) use ($words, $table, $inSource, $theme) {
                 foreach ($words as $word) {
                     $w->orWhere($table.'.title', '~*', self::wordStart($word))
                         ->orWhereRaw('left('.$table.'.description, 300) ~* ?', [self::wordStart($word)]);
@@ -149,6 +149,9 @@ final class OccasionCalendar
                                 $t->orWhere('wp.text', '~*', self::wordStart($word));
                             }
                         }));
+                }
+                if (isset($theme['evening_at'])) {
+                    $w->orWhere(fn ($e) => self::eveningAt($e, (array) $theme['evening_at'], $table));
                 }
             });
         }
@@ -170,6 +173,44 @@ final class OccasionCalendar
                 ->where('oi.rank', 0)
                 ->whereIn('oi.interest_id', $ids === [] ? [0] : $ids));
         }
+    }
+
+    /**
+     * Вечер в музее или библиотеке в день ночи. Площадка часто пишет «3 ноября с 15 до 23 во всех отделах»
+     * без названия акции, а вечером в этот день у неё идёт программа ночи. Окно повода задаёт вызывающий.
+     *
+     * @param  array{kinds?: list<string>, names?: list<string>}  $places  виды площадок и основы их названий
+     */
+    private static function eveningAt($q, array $places, string $table): void
+    {
+        $kinds = array_values(array_map('strval', (array) ($places['kinds'] ?? [])));
+        $names = array_values(array_map('strval', (array) ($places['names'] ?? [])));
+        if ($kinds === [] && $names === []) {
+            $q->whereRaw('false');
+
+            return;
+        }
+        $local = fn (string $column) => 'EXTRACT(HOUR FROM '.$table.'.'.$column." AT TIME ZONE '".self::TZ."')";
+
+        $q->where(fn ($t) => $t->whereNull($table.'.time_precision')->orWhere($table.'.time_precision', '<>', 'date'))
+            ->whereExists(fn ($v) => $v->selectRaw('1')->from('venues as ov')
+                ->whereColumn('ov.id', $table.'.venue_id')
+                ->where(function ($p) use ($kinds, $names) {
+                    if ($kinds !== []) {
+                        $p->orWhereIn('ov.kind', $kinds);
+                    }
+                    if ($names !== []) {
+                        // «Музей пива» у бара и квест «Ночь в музее» по имени похожи, но это не музеи
+                        $p->orWhere(fn ($n) => $n->where('ov.name', '~*', implode('|', $names))
+                            ->where(fn ($k) => $k->whereNull('ov.kind')
+                                ->orWhereNotIn('ov.kind', ['Клубы и бары', 'Квесты', 'Кинотеатры', 'Сцены'])));
+                    }
+                }))
+            // многодневная выставка идёт и вечером, но в программу ночи её не ставят
+            ->where(fn ($d) => $d->whereNull($table.'.end_time')
+                ->orWhereRaw($table.'.end_time - '.$table.".start_time <= interval '12 hours'"))
+            ->where(fn ($h) => $h->whereRaw($local('start_time').' >= 18')
+                ->orWhereRaw($local('end_time').' >= 21'));
     }
 
     /** Регулярное выражение базы: слово с начала слова. */

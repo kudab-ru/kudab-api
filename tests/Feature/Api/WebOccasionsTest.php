@@ -72,6 +72,39 @@ class WebOccasionsTest extends TestCase
     }
 
     #[Test]
+    public function an_event_with_the_main_title_at_another_place_stays_in_the_programme(): void
+    {
+        $party = $this->event('Хэллоуинская вечеринка', '2026-10-31 18:00');
+        $elsewhere = $this->event('Хэллоуинская вечеринка', '2026-10-30 20:00');
+        $this->postedOccasion([$party], []);
+
+        $page = $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data');
+
+        $this->assertSame([$elsewhere], array_merge(...array_map(fn (array $d) => array_column($d['events'], 'id'), $page['days'])));
+        $this->assertSame([], $page['picks'][0]['also']);
+    }
+
+    #[Test]
+    public function evening_events_of_museums_and_libraries_join_the_night_without_its_name(): void
+    {
+        $lecture = $this->event('Лекция о русской живописи', '2026-11-03 18:30');
+        $allDay = $this->event('Истории и искусства много не бывает', '2026-11-03 15:00');
+        $reading = $this->event('Вечер поэзии', '2026-11-03 19:00');
+        $this->placeAt($lecture, 'Художественный музей', 'Музеи');
+        $this->placeAt($allDay, 'Краеведческий музей', 'Музеи', '2026-11-03 23:00');
+        $this->placeAt($reading, 'Никитинская библиотека', null);
+        $this->placeAt($this->event('Экскурсия по залам', '2026-11-03 11:00'), 'Музей-диорама', 'Музеи');
+        $this->placeAt($this->event('Спектакль «Гроза»', '2026-11-03 19:00'), 'Театр драмы', 'Сцены');
+        $this->placeAt($this->event('Дегустация', '2026-11-03 20:00'), 'Музей пива', 'Клубы и бары');
+        $this->placeAt($this->event('Выставка графики', '2026-10-20 18:00'), 'Музей-усадьба', 'Музеи', '2026-12-31 18:00');
+
+        $page = $this->getJson('/api/web/occasions/noch-iskusstv?city=voronezh')->assertOk()->json('data');
+        $shown = array_merge(array_column($page['picks'], 'id'), ...array_map(fn (array $d) => array_column($d['events'], 'id'), $page['days']));
+
+        $this->assertEqualsCanonicalizing([$lecture, $allDay, $reading], $shown);
+    }
+
+    #[Test]
     public function rows_that_do_not_fit_the_day_come_by_a_separate_request(): void
     {
         $ids = [];
@@ -287,6 +320,15 @@ class WebOccasionsTest extends TestCase
         $event->save();
 
         return (int) $event->id;
+    }
+
+    private function placeAt(int $eventId, string $venue, ?string $kind, ?string $until = null): void
+    {
+        $venueId = (int) Event::query()->whereKey($eventId)->value('venue_id');
+        DB::table('venues')->where('id', $venueId)->update(['name' => $venue, 'kind' => $kind]);
+        if ($until !== null) {
+            Event::query()->whereKey($eventId)->update(['end_time' => Carbon::parse($until, 'Europe/Moscow')->utc()]);
+        }
     }
 
     private function fromPost(int $eventId, string $text): void

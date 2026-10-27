@@ -138,7 +138,8 @@ final class OccasionPage
 
     /**
      * Каждое событие на странице один раз: главное уходит из программы вместе с другими своими сеансами,
-     * а их дни остаются у карточки в `also`.
+     * а их дни остаются у карточки в `also`. Сеанс — то же название на той же площадке: одноимённая
+     * программа в другом отделе музея — отдельное событие.
      *
      * @param  array<string, mixed>  $w
      * @return array<string, mixed>
@@ -147,8 +148,15 @@ final class OccasionPage
     {
         $index = [];
         foreach ($w['picks'] as $i => $p) {
-            $index[$this->sameTitle($p['title'])] = $i;
+            $index[$this->sameTitle($p['title'])][(string) ($p['venue_id'] ?? '')] = $i;
         }
+        // у записи без площадки сверяем одно название: иначе сеанс главного без места встал бы и в программу
+        $pickOf = function (array $e) use ($index): ?int {
+            $byVenue = $index[$this->sameTitle($e['title'])] ?? [];
+            $venue = (string) ($e['venue_id'] ?? '');
+
+            return $byVenue[$venue] ?? ($venue === '' || isset($byVenue['']) ? (array_values($byVenue)[0] ?? null) : null);
+        };
         $also = [];
         foreach ($w['days'] as $d => $day) {
             foreach (['events', 'rest'] as $list) {
@@ -157,7 +165,7 @@ final class OccasionPage
                 }
                 $keep = [];
                 foreach ($day[$list] as $e) {
-                    $i = $index[$this->sameTitle($e['title'])] ?? null;
+                    $i = $pickOf($e);
                     if ($i === null) {
                         $keep[] = $e;
                     } elseif ($day['date'] !== $w['picks'][$i]['date']) {
@@ -168,7 +176,7 @@ final class OccasionPage
             }
         }
         if (isset($w['both'])) {
-            $w['both'] = array_values(array_filter($w['both'], fn (array $e) => ! isset($index[$this->sameTitle($e['title'])])));
+            $w['both'] = array_values(array_filter($w['both'], fn (array $e) => $pickOf($e) === null));
         }
         foreach ($w['picks'] as $i => $p) {
             $w['picks'][$i]['also'] = array_values($also[$i] ?? []);
