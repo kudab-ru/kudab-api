@@ -1008,9 +1008,10 @@ final class OccasionPage
     private function seo(string $headline, int $total, ?Carbon $day, ?array $window, array $theme, string $lead): array
     {
         $when = $window ? $this->windowLabel($theme, $window) : '';
+        $date = $this->titleDate($theme, $day, $window);
         $title = $total > 0
-            ? $headline.' — '.$total.' '.$this->plural($total, 'событие', 'события', 'событий').($day ? ', '.$this->dayMonth($day).' '.$day->year : '')
-            : $headline.($day ? ' — '.$this->dayMonth($day).' '.$day->year : '');
+            ? $headline.' — '.$total.' '.$this->plural($total, 'событие', 'события', 'событий').($date !== '' ? ', '.$date : '')
+            : $headline.($date !== '' ? ' — '.$date : '');
 
         return [
             'title' => $title,
@@ -1018,6 +1019,25 @@ final class OccasionPage
                 ? $headline.'. '.$lead.' Главное с ценами и вся программа по дням.'
                 : $headline.' '.$when.': программа появится ближе к празднику.',
         ];
+    }
+
+    /**
+     * В заголовке страницы для поиска: день праздника с годом, а у сезона — всё окно с годами,
+     * иначе у ёлок, что идут с декабря по январь, стояло бы одно 31 декабря.
+     *
+     * @param  array{0: Carbon, 1: Carbon}|null  $window
+     */
+    private function titleDate(array $theme, ?Carbon $day, ?array $window): string
+    {
+        if ($window !== null && $this->isSeason($theme)) {
+            [$from, $to] = $window;
+
+            return $from->year === $to->year
+                ? $this->span($from, $to).' '.$to->year
+                : 'с '.$this->dayMonth($from).' '.$from->year.' по '.$this->dayMonth($to).' '.$to->year;
+        }
+
+        return $day ? $this->dayMonth($day).' '.$day->year : '';
     }
 
     /** Над заголовком: день праздника, а у сезона вроде ёлок и каникул — всё окно. */
