@@ -874,7 +874,7 @@ final class BroadcastDigestComposer
             'window' => fn ($q) => $q->where(fn ($w) => EventStart::notAfter($w, $until, 'e'))
                 ->when($since !== null, fn ($w) => EventStart::notBefore($w, $since, 'e')),
             // часам повода (`hours`) событие без часа не годится: неизвестно, ночью ли оно
-            'no_time' => isset($theme['hours']) ? fn ($q) => $q->where('e.time_precision', '<>', 'date') : null,
+            'no_time' => isset($theme['hours']) ? fn ($q) => OccasionCalendar::applyTimed($q, $theme, 'e') : null,
             // срок общим правилом (`PostTiming`): многодневку берём до закрытия, иначе «Выставки недели»
             // не назвали бы выставку, открытую неделю назад
             'timing' => fn ($q) => $q->where(fn ($w) => PostTiming::applyFits($w, $publishAt, PostTiming::MIN_LEAD_HOURS, 'e', wholeDay: true)),

@@ -298,6 +298,68 @@ class WebOccasionsTest extends TestCase
         ];
     }
 
+    #[Test]
+    public function a_new_year_show_joins_the_yolki_by_its_title_and_the_singer_does_not(): void
+    {
+        $show = $this->event('Новогоднее шоу «Ёлка! Кощеево царство»', '2026-12-20 14:00');
+        $this->theme($show, 'music');
+        $this->theme($show, 'kids', 1);
+        $singer = $this->event('Концерт Ёлки', '2026-12-20 19:00');
+        $this->theme($singer, 'music');
+        $this->theme($singer, 'kids', 1);
+        $untagged = $this->event('Новогодняя сказка «12 месяцев»', '2026-12-27 11:00');
+        $puppets = $this->event('Ёлка в театре кукол', '2026-12-26 11:00');
+        $this->theme($puppets, 'theatre');
+
+        $expected = [$show, $untagged, $puppets];
+        sort($expected);
+        $this->assertSame($expected, $this->shown('elki'));
+    }
+
+    #[Test]
+    public function the_yolki_page_opens_before_its_post_window(): void
+    {
+        $early = $this->event('Новогодний спектакль для малышей', '2026-12-02 11:00');
+        $this->theme($early, 'theatre');
+
+        $this->assertSame([$early], $this->shown('elki'));
+    }
+
+    #[Test]
+    public function a_new_year_night_without_an_hour_counts_when_it_names_the_night(): void
+    {
+        $night = $this->event('Новогодняя ночь в ресторане «Балаган»', '2026-12-31 00:00');
+        $matinee = $this->event('Новогодний утренник', '2026-12-31 00:00');
+        foreach ([$night, $matinee] as $id) {
+            Event::query()->whereKey($id)->update(['start_time' => null, 'time_precision' => 'date']);
+            $this->theme($id, 'parties');
+        }
+
+        $this->assertSame([$night], $this->shown('novyj-god'));
+    }
+
+    /** @return list<int> номера событий страницы праздника: главное и программа по дням */
+    private function shown(string $page): array
+    {
+        $data = $this->getJson('/api/web/occasions/'.$page.'?city=voronezh')->assertOk()->json('data');
+        $ids = array_merge(
+            array_column($data['picks'], 'id'),
+            ...array_map(fn (array $d) => array_column($d['events'], 'id'), $data['days']),
+        );
+        sort($ids);
+
+        return $ids;
+    }
+
+    private function theme(int $eventId, string $slug, int $rank = 0): void
+    {
+        $interest = DB::table('interests')->where('slug', $slug)->value('id')
+            ?? DB::table('interests')->insertGetId(['name' => $slug, 'slug' => $slug, 'created_at' => now(), 'updated_at' => now()]);
+        DB::table('event_interest')->insert([
+            'event_id' => $eventId, 'interest_id' => $interest, 'rank' => $rank, 'created_at' => now(), 'updated_at' => now(),
+        ]);
+    }
+
     private function event(string $title, string $at): int
     {
         $start = Carbon::parse($at, 'Europe/Moscow');

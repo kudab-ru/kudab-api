@@ -100,7 +100,7 @@ final class OccasionPage
         $this->city = $city;
         $cityIn = CityCase::prepositional($city->slug);
         $day = BroadcastDigestComposer::occasionDate($theme, $now);
-        $window = OccasionCalendar::window($theme, $now);
+        $window = OccasionCalendar::window(OccasionCalendar::forPage($theme), $now);
 
         ['rows' => $rows, 'days' => $days, 'picks' => $picks, 'kinds' => $kinds] = $this->assemble($theme, $city, $now, $window, $day, self::DAY_LIMIT);
 
@@ -296,7 +296,7 @@ final class OccasionPage
      */
     public function includes(array $theme, City $city, int $eventId, Carbon $now): bool
     {
-        $window = OccasionCalendar::window($theme, $now->copy()->setTimezone(self::TZ));
+        $window = OccasionCalendar::window(OccasionCalendar::forPage($theme), $now->copy()->setTimezone(self::TZ));
 
         return $window !== null && $this->eventsQuery($theme, $city, $window)->where('events.id', $eventId)->exists();
     }
@@ -336,8 +336,8 @@ final class OccasionPage
     {
         return array_filter([
             'hidden' => fn ($q) => $q->webNotBlacklisted()->webFeedContentKind(),
-            // часам повода событие без часа не годится, см. BroadcastDigestComposer::poolForTheme
-            'no_time' => isset($theme['hours']) ? fn ($q) => $q->where('events.time_precision', '<>', 'date') : null,
+            // то же правило у поста, см. `OccasionCalendar::applyTimed`
+            'no_time' => isset($theme['hours']) ? fn ($q) => OccasionCalendar::applyTimed($q, $theme, 'events') : null,
             'words' => in_array($theme['pick'] ?? '', ['words', 'all'], true)
                 ? fn ($q) => OccasionCalendar::applyWords($q, $theme, 'events')
                 : null,
@@ -947,7 +947,7 @@ final class OccasionPage
                 continue;
             }
             $day = BroadcastDigestComposer::occasionDate($t, $now);
-            $window = OccasionCalendar::window($t, $now);
+            $window = OccasionCalendar::window(OccasionCalendar::forPage($t), $now);
             if ($day === null || $window === null) {
                 continue;
             }

@@ -168,11 +168,61 @@ final class OccasionCalendar
                 fn ($slug) => BroadcastDigestComposer::interestTree($slug),
                 $roots,
             ))));
-            $q->whereExists(fn ($s) => $s->selectRaw('1')->from('event_interest as oi')
-                ->whereColumn('oi.event_id', $table.'.id')
-                ->where('oi.rank', 0)
-                ->whereIn('oi.interest_id', $ids === [] ? [0] : $ids));
+            $ids = $ids === [] ? [0] : $ids;
+            $strong = array_values(array_filter(array_map('strval', (array) ($theme['title_words'] ?? []))));
+            $q->where(function ($k) use ($ids, $table, $strong) {
+                $k->whereExists(fn ($s) => $s->selectRaw('1')->from('event_interest as oi')
+                    ->whereColumn('oi.event_id', $table.'.id')
+                    ->where('oi.rank', 0)
+                    ->whereIn('oi.interest_id', $ids));
+                if ($strong === []) {
+                    return;
+                }
+                // `title_words` в названии решают и без главной темы: у события тем нет вовсе или нужная
+                // стоит не первой («Новогоднее шоу «Ёлка!»» — музыка, потом детям; у концерта певицы Ёлки таких слов нет)
+                $k->orWhere(fn ($t) => $t
+                    ->where(function ($n) use ($strong, $table) {
+                        foreach ($strong as $word) {
+                            $n->orWhere($table.'.title', '~*', self::wordStart($word));
+                        }
+                    })
+                    ->where(fn ($any) => $any
+                        ->whereNotExists(fn ($s) => $s->selectRaw('1')->from('event_interest as ni')
+                            ->whereColumn('ni.event_id', $table.'.id'))
+                        ->orWhereExists(fn ($s) => $s->selectRaw('1')->from('event_interest as ai')
+                            ->whereColumn('ai.event_id', $table.'.id')
+                            ->whereIn('ai.interest_id', $ids))));
+            });
         }
+    }
+
+    /**
+     * Часам повода событие без часа не годится, кроме того, что само называет ночь словами `date_words`:
+     * ресторан пишет «Новогодняя ночь в …» одной датой, без часа.
+     */
+    public static function applyTimed($q, array $theme, string $table): void
+    {
+        $words = array_values(array_filter(array_map('strval', (array) ($theme['date_words'] ?? []))));
+        $q->where(function ($w) use ($words, $table) {
+            $w->where($table.'.time_precision', '<>', 'date');
+            foreach ($words as $word) {
+                $w->orWhere($table.'.title', '~*', self::wordStart($word))
+                    ->orWhereRaw('left('.$table.'.description, 300) ~* ?', [self::wordStart($word)]);
+            }
+        });
+    }
+
+    /**
+     * Тема для страницы: она открывается раньше поста, если задан `page_window_before`.
+     *
+     * @param  array<string, mixed>  $theme
+     * @return array<string, mixed>
+     */
+    public static function forPage(array $theme): array
+    {
+        return isset($theme['page_window_before'])
+            ? ['window_before' => (int) $theme['page_window_before']] + $theme
+            : $theme;
     }
 
     /**
