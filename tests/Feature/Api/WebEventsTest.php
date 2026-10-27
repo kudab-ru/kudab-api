@@ -159,6 +159,18 @@ class WebEventsTest extends TestCase
         $this->assertSame($shown ? 'Вся афиша театра на месяц' : null, $text);
     }
 
+    public function test_event_page_gives_the_hover_card_its_short_text(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $event = $this->createEvent($vrn->id, $this->createCommunity($vrn->id, 'Театр')->id, 'Беби-спектакль', now()->addDay());
+        $event->description = "<p>Беби-спектакль.</p>\n\n  Продолжительность   30 минут.";
+        $event->save();
+
+        $text = $this->getJson("/api/web/events/{$event->id}")->assertOk()->json('data.short_description');
+
+        $this->assertSame('Беби-спектакль. Продолжительность 30 минут.', $text);
+    }
+
     public function test_web_events_can_be_filtered_by_venue_id(): void
     {
         $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);

@@ -132,8 +132,8 @@ final class SliceBuilder
      */
     private function row(array $row, array $until, array $score, bool $slim): array
     {
-        // `slim_rows`: картинки строке нужны только для всплывающей карточки, а она приносит их сама
-        $out = array_diff_key($row, ['score' => true, 'series' => true] + ($slim ? ['poster' => true, 'images' => true] : []));
+        // `slim_rows`: картинки и описание строке нужны только для всплывающей карточки, а она приносит их сама
+        $out = array_diff_key($row, ['score' => true, 'series' => true] + ($slim ? ['poster' => true, 'images' => true, 'short_description' => true] : []));
         $out['times'] = $this->clock((array) $row['times']);
         $out['until'] = $until[$row['id']] ?? $row['until'] ?? null;
         $out['rank'] = (int) round((float) ($score[$row['id']] ?? 0));

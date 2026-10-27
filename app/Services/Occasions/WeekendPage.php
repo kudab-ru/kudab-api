@@ -94,7 +94,7 @@ final class WeekendPage
         $sat = $from->isSunday() ? $from->copy()->subDay() : $from->copy();
 
         return Cache::remember(
-            'weekend-page:v4:'.$city->slug.':'.$from->toDateString().':'.$to->toDateString(),
+            'weekend-page:v5:'.$city->slug.':'.$from->toDateString().':'.$to->toDateString(),
             self::CACHE_SECONDS,
             fn () => ['w' => $sat->toDateString()]
                 + $this->slices->build($this->theme(), $city, $from, $to, $sat, Carbon::now(self::TZ), false),

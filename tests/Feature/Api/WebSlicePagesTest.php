@@ -72,7 +72,7 @@ class WebSlicePagesTest extends TestCase
     }
 
     #[Test]
-    public function weekend_programme_rows_come_without_pictures_the_hover_card_brings_them(): void
+    public function weekend_programme_rows_come_without_pictures_and_text_the_hover_card_brings_them(): void
     {
         $show = $this->withPhoto($this->event('Спектакль «Три сестры»', '2026-10-24 19:00'), [
             'https://example.com/a.jpg', 'https://example.com/b.jpg', 'https://example.com/c.jpg',
@@ -83,6 +83,7 @@ class WebSlicePagesTest extends TestCase
 
         $this->assertArrayNotHasKey('poster', $row);
         $this->assertArrayNotHasKey('images', $row);
+        $this->assertArrayNotHasKey('short_description', $row);
     }
 
     #[Test]

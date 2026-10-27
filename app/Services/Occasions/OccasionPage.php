@@ -657,7 +657,7 @@ final class OccasionPage
             'price_url' => $e->price_url,
             'free' => $e->price_status === 'free' || ((int) ($e->price_min ?? -1) === 0 && $e->price_max === null),
             // карточка под мышью в программе: что это, возраст и как попасть, те же поля, что у ленты афиши
-            'short_description' => $this->about($e),
+            'short_description' => $e->about(),
             'age_restriction' => $e->age_restriction !== null ? (int) $e->age_restriction : null,
             'entry' => EventAccess::entry($e->access, $e->price_status, (int) ($e->price_min ?? -1) === 0 && $e->price_max === null),
             'poster' => $e->poster(),
@@ -682,17 +682,6 @@ final class OccasionPage
         $all = $e->getAttribute('images');
 
         return is_array($all) && count($all) > 1 ? array_slice($all, 0, self::SLIDES) : null;
-    }
-
-    /** Что это парой фраз: короткое описание без тегов, без него — начало описания, как в ленте афиши. */
-    private function about(Event $e): ?string
-    {
-        $text = trim((string) preg_replace('/\s+/u', ' ', strip_tags((string) ($e->short_description ?: $e->description))));
-        if ($text === '') {
-            return null;
-        }
-
-        return mb_strlen($text) > 180 ? rtrim(mb_substr($text, 0, 179)).'…' : $text;
     }
 
     /** Прошло: у события без часа — день, у события с часом — три часа от начала. */

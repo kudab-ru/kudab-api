@@ -67,7 +67,7 @@ final class DayPage
     private function day(City $city, Carbon $day, bool $today): array
     {
         return Cache::remember(
-            'day-page:v2:'.$city->slug.':'.$day->toDateString().':'.(int) $today,
+            'day-page:v3:'.$city->slug.':'.$day->toDateString().':'.(int) $today,
             self::CACHE_SECONDS,
             fn () => ['w' => $day->toDateString(), 'weekday' => $day->copy()->locale('ru')->dayName]
                 + $this->slices->build($this->theme(), $city, $day->copy()->startOfDay(), $day->copy()->endOfDay(), $day, Carbon::now(self::TZ), $today),

@@ -326,6 +326,17 @@ class Event extends Model
         return $arr[0] ?? null;
     }
 
+    /** Что это парой фраз: короткое описание без тегов, без него — начало описания, как в ленте афиши. */
+    public function about(): ?string
+    {
+        $text = trim((string) preg_replace('/\s+/u', ' ', strip_tags((string) ($this->short_description ?: $this->description))));
+        if ($text === '') {
+            return null;
+        }
+
+        return mb_strlen($text) > 180 ? rtrim(mb_substr($text, 0, 179)).'…' : $text;
+    }
+
     /**
      * Записи очереди, чьё ВЕДУЩЕЕ событие — это.
      *

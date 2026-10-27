@@ -121,6 +121,8 @@ class WebEventDetailResource extends JsonResource
 
             // детальное для страницы
             'description' => $this->description,
+            // строки «На выходных» и «Сегодня» приходят без описания, карточка под мышью берёт его отсюда
+            'short_description' => $this->resource->about(),
 
             'original_text' => $this->relationLoaded('originalPost') && ! $this->originalIsSitePage()
                 ? ($this->originalPost?->text ?? null)
