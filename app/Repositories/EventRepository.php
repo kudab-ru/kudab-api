@@ -1781,7 +1781,7 @@ class EventRepository
      *
      * @return array{base: ?array<string, mixed>, items: list<array<string, mixed>>, events: array<int, Event>, today: string, scope: ?string, companions_meta: ?array<string, mixed>}
      */
-    public function nextPool(int $eventId): array
+    public function nextPool(int $eventId, bool $similarOnly = false): array
     {
         $today = now('Europe/Moscow')->toDateString();
         $out = ['base' => null, 'items' => [], 'events' => [], 'today' => $today, 'scope' => null, 'companions_meta' => null];
@@ -1814,9 +1814,19 @@ class EventRepository
                 $x->whereNull('events.start_time')->whereBetween('events.start_date', [$from, $to]);
             });
         });
+        // «Похожее» берёт только события с общей темой, остальные кандидаты ему не нужны
+        if ($similarOnly) {
+            $topicIds = $this->topicInterestIds($baseFeatures['topics'], $parents);
+            if ($topicIds === []) {
+                return ['base' => $baseFeatures] + $out;
+            }
+            $window->whereExists(fn ($q) => $q->selectRaw('1')->from('event_interest as ei')
+                ->whereColumn('ei.event_id', 'events.id')
+                ->whereIn('ei.interest_id', $topicIds));
+        }
         $events = $window->get()->all();
 
-        $scope = $this->companionsScope($base);
+        $scope = $similarOnly ? null : $this->companionsScope($base);
         if ($scope !== null) {
             [$column, $value] = $scope === 'venue'
                 ? ['events.venue_id', (int) $base->venue_id]
@@ -1983,6 +1993,26 @@ class EventRepository
     }
 
     /** @return array<int, ?string> */
+    /**
+     * Интересы, по которым событие делит с базой тему: тема у интереса та же, что
+     * в `nextFeatures`, то есть его родитель, а у самой темы — она сама.
+     *
+     * @param  list<string>  $topics
+     * @param  array<int, ?string>  $parents
+     * @return list<int>
+     */
+    private function topicInterestIds(array $topics, array $parents): array
+    {
+        $ids = [];
+        foreach (Interest::query()->pluck('slug', 'id') as $id => $slug) {
+            if (in_array($parents[(int) $id] ?? $slug, $topics, true)) {
+                $ids[] = (int) $id;
+            }
+        }
+
+        return $ids;
+    }
+
     private function interestParents(): array
     {
         $rows = Interest::query()->get(['id', 'slug', 'parent_id']);

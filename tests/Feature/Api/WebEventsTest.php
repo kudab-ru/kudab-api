@@ -1495,6 +1495,34 @@ class WebEventsTest extends TestCase
         $this->assertSame(['Через два дня'], array_column($similar, 'title'));
     }
 
+    public function test_next_only_similar_picks_the_same_as_full_next(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 3, 22, 12, 0, 0, 'Europe/Moscow'));
+
+        $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = $this->createCommunity($msk->id, 'Организатор');
+        $theatre = $this->createInterest('Театр', 'theatre');
+        $opera = $this->createInterest('Опера и балет', 'opera-ballet', $theatre->id);
+        $music = $this->createInterest('Музыка', 'music');
+        $hall = $this->createVenue($msk->id, 'Камерный', 'kamerny');
+
+        $base = $this->createEvent($msk->id, $community->id, 'Помещицы', Carbon::create(2026, 3, 20, 19, 0, 0, 'Europe/Moscow')->utc(), $hall->id);
+        $this->tagEventLeafOnly($base->id, $theatre->id);
+        $play = $this->createEvent($msk->id, $community->id, 'Игроки', Carbon::create(2026, 3, 23, 19, 0, 0, 'Europe/Moscow')->utc());
+        $this->tagEventLeafOnly($play->id, $theatre->id);
+        $ballet = $this->createEvent($msk->id, $community->id, 'Дон Кихот', Carbon::create(2026, 3, 24, 19, 0, 0, 'Europe/Moscow')->utc());
+        $this->tagEventLeafOnly($ballet->id, $opera->id);
+        $concert = $this->createEvent($msk->id, $community->id, 'Концерт', Carbon::create(2026, 3, 23, 19, 0, 0, 'Europe/Moscow')->utc(), $hall->id);
+        $this->tagEventLeafOnly($concert->id, $music->id);
+
+        $full = $this->getJson("/api/web/events/{$base->id}/next")->assertOk();
+        $only = $this->getJson("/api/web/events/{$base->id}/next?only=similar")->assertOk();
+
+        $this->assertSame(['Игроки', 'Дон Кихот'], array_column($only->json('data.similar'), 'title'));
+        $this->assertSame(array_column($full->json('data.similar'), 'id'), array_column($only->json('data.similar'), 'id'));
+        $only->assertJsonCount(0, 'data.companions');
+    }
+
     public function test_next_shows_one_card_per_thing_across_blocks(): void
     {
         Carbon::setTestNow(Carbon::create(2026, 3, 22, 9, 0, 0, 'Europe/Moscow'));

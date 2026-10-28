@@ -644,15 +644,17 @@ class EventsController extends Controller
      * Блоки «что дальше» для страницы события: в этот день, на той же площадке и
      * похожее. Одно событие попадает только в один блок; у карточки бывает
      * `reason` — короткая причина, почему она здесь. `prefer[]` — темы из колеса
-     * «Чего хочется?»: подходящее идёт выше.
+     * «Чего хочется?»: подходящее идёт выше. `only=similar` — только «Похожее»,
+     * его сайт ждёт для прошедшего события до отдачи страницы.
      */
     public function next(int $id, Request $request): JsonResponse
     {
         $v = $request->validate([
             'prefer'   => ['sometimes', 'array', 'max:20'],
             'prefer.*' => ['string', 'max:64', 'regex:/^[a-z0-9-]+$/'],
+            'only'     => ['sometimes', 'in:similar'],
         ]);
-        $res = $this->service->nextWeb($id, array_values($v['prefer'] ?? []));
+        $res = $this->service->nextWeb($id, array_values($v['prefer'] ?? []), ($v['only'] ?? null) === 'similar');
 
         return response()->json([
             'data' => [

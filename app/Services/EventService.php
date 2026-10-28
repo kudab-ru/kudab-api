@@ -20,12 +20,17 @@ class EventService
      *
      * @return array{day: ?string, same_day: EloquentCollection, companions: EloquentCollection, similar: EloquentCollection, companions_meta: ?array<string, mixed>}
      */
-    public function nextWeb(int $id, array $prefer = []): array
+    public function nextWeb(int $id, array $prefer = [], bool $similarOnly = false): array
     {
-        $pool = $this->repo->nextPool($id);
+        $pool = $this->repo->nextPool($id, $similarOnly);
         $picked = $pool['base'] === null
             ? ['day' => null, 'same_day' => [], 'companions' => [], 'similar' => []]
             : $this->picker->pick($pool['base'], $pool['items'], $pool['today'], $pool['scope'], $prefer);
+        // в выборке «только похожего» лишь события общих тем: «В этот день» из неё вышел бы неполным
+        if ($similarOnly) {
+            $picked['same_day'] = [];
+            $picked['companions'] = [];
+        }
 
         $sections = [];
         foreach (['same_day', 'companions', 'similar'] as $name) {
