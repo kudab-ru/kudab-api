@@ -9,9 +9,11 @@ use App\Models\Event;
 use App\Models\Venue;
 use App\Repositories\EventRepository;
 use App\Services\EventService;
+use App\Services\Rinks\RinkPage;
 use App\Support\KeyboardLayout;
 use App\Support\SearchLog;
 use App\Support\SearchMatch;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -62,7 +64,7 @@ class VenuesController extends Controller
     /** Меньше месяца наблюдений — делить на месяцы нечего. */
     private const RHYTHM_MIN_DAYS = 30;
 
-    public function __construct(private readonly EventService $events)
+    public function __construct(private readonly EventService $events, private readonly RinkPage $rinks)
     {
     }
 
@@ -136,7 +138,9 @@ class VenuesController extends Controller
         $this->attachRhythm([$venue]);
 
         return response()->json([
-            'data' => (new WebVenueDetailResource($venue))->toArray($request),
+            // у площадки с катком первым блоком идёт массовое катание, его сеансы сайт не повторяет в афише места
+            'data' => (new WebVenueDetailResource($venue))->toArray($request)
+                + ['rink' => $this->rinks->forVenue((int) $venue->id, CarbonImmutable::now('Europe/Moscow'))],
         ]);
     }
 

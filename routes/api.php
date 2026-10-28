@@ -222,6 +222,14 @@ Route::prefix('admin/venues')
         Route::post('{id}/not-duplicate', [\App\Http\Controllers\Api\Admin\AdminVenuesController::class, 'notDuplicate'])->whereNumber('id');
     });
 
+Route::prefix('admin/rinks')
+    ->middleware(['auth:sanctum', 'role:superadmin'])
+    ->group(function () {
+        Route::get('/', [\App\Http\Controllers\Api\Admin\AdminRinksController::class, 'index']);
+        Route::patch('{id}', [\App\Http\Controllers\Api\Admin\AdminRinksController::class, 'update'])->whereNumber('id');
+        Route::post('{id}/checked', [\App\Http\Controllers\Api\Admin\AdminRinksController::class, 'checked'])->whereNumber('id');
+    });
+
 Route::prefix('admin/sources/yandex-afisha')
     ->middleware(['auth:sanctum', 'role:superadmin'])
     ->group(function () {
@@ -289,6 +297,7 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('weekends', [\App\Http\Controllers\Api\Web\WeekendsController::class, 'show']);
     Route::get('days', [\App\Http\Controllers\Api\Web\DaysController::class, 'show']);
     Route::get('free', [\App\Http\Controllers\Api\Web\FreeController::class, 'show']);
+    Route::get('rinks', [\App\Http\Controllers\Api\Web\RinksController::class, 'show']);
 
     // Venues (PR4): /map ДО /{id} по той же причине, что у events/map выше.
     Route::get('venues', [\App\Http\Controllers\Api\Web\VenuesController::class, 'index']);
