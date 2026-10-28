@@ -8,6 +8,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\TelegramUser;
 use App\Services\Telegram\BroadcastAnnounce;
+use App\Services\Telegram\BroadcastEventChanges;
 use App\Services\Telegram\BroadcastOccasions;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use Carbon\Carbon;
@@ -190,6 +191,43 @@ class BroadcastNewsPostsTest extends TestCase
     }
 
     #[Test]
+    #[DataProvider('changes')]
+    public function a_posted_event_that_was_cancelled_or_moved_gets_one_short_reply(string $kind, string $caption): void
+    {
+        $show = $this->event('Вечер «Сила Духа»', Carbon::parse('2026-10-21 19:00', 'Europe/Moscow'));
+        $later = $this->event('Вечер «Сила Духа»', Carbon::parse('2026-10-29 19:00', 'Europe/Moscow'));
+        $main = $this->postedOccasion([$show], messageId: 5150);
+        $this->change($show, $kind, $kind === 'moved' ? $later : null);
+
+        app(BroadcastEventChanges::class)->run(Carbon::now());
+        app(BroadcastEventChanges::class)->run(Carbon::now()->addMinutes(10));
+
+        $reply = $this->items()->whereRaw("digest_meta->>'reply_to' = ?", [(string) $main->id])->sole();
+        $this->assertMatchesRegularExpression($caption, (string) $reply->caption);
+    }
+
+    public static function changes(): array
+    {
+        return [
+            'отменили' => ['cancelled', '/^Вечер «Сила Духа» 21 октября отменили\.$/u'],
+            'перенесли' => ['moved', '/^<a href="[^"]+\/events\/\d+\?[^"]+">Вечер «Сила Духа»<\/a> перенесли на 29 октября, 19:00\.$/u'],
+        ];
+    }
+
+    #[Test]
+    public function a_change_of_a_past_event_gets_no_reply(): void
+    {
+        $show = $this->event('Вечер «Сила Духа»', Carbon::parse('2026-10-16 19:00', 'Europe/Moscow'));
+        $main = $this->postedOccasion([$show], messageId: 5151);
+        $this->change($show, 'cancelled', null);
+
+        app(BroadcastEventChanges::class)->run(Carbon::now());
+
+        $this->assertSame(0, $this->items()->whereRaw("digest_meta->>'reply_to' = ?", [(string) $main->id])->count());
+        $this->assertNotNull(DB::table('event_changes')->where('event_id', $show)->value('notified_at'));
+    }
+
+    #[Test]
     public function a_fresh_big_event_is_announced_and_keeps_its_own_post(): void
     {
         $this->channel();
@@ -228,6 +266,14 @@ class BroadcastNewsPostsTest extends TestCase
     public static function notNews(): array
     {
         return ['шоу уже знали' => ['known'], 'всплеск нового источника' => ['burst']];
+    }
+
+    private function change(int $eventId, string $kind, ?int $newEventId): void
+    {
+        Event::query()->whereKey($eventId)->update(['status' => $kind]);
+        DB::table('event_changes')->insert([
+            'event_id' => $eventId, 'kind' => $kind, 'new_event_id' => $newEventId, 'created_at' => now(), 'updated_at' => now(),
+        ]);
     }
 
     private function actingAsSuperadmin(): void

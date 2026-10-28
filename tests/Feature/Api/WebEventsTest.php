@@ -159,6 +159,25 @@ class WebEventsTest extends TestCase
         $this->assertSame($shown ? 'Вся афиша театра на месяц' : null, $text);
     }
 
+    public function test_a_moved_event_keeps_its_page_with_the_new_date_and_leaves_the_feed(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Купол');
+        $old = $this->createEvent($vrn->id, $community->id, 'Вечер «Сила Духа»', now()->addDays(2));
+        $new = $this->createEvent($vrn->id, $community->id, 'Вечер «Сила Духа»', now()->addDays(9));
+        $old->status = 'moved';
+        $old->save();
+        DB::table('event_changes')->insert([
+            'event_id' => $old->id, 'kind' => 'moved', 'new_event_id' => $new->id, 'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $page = $this->getJson("/api/web/events/{$old->id}")->assertOk();
+
+        $this->assertSame('moved', $page->json('data.change.kind'));
+        $this->assertSame($new->id, $page->json('data.change.moved_to.id'));
+        $this->assertSame([$new->id], array_column($this->getJson('/api/web/events?city=voronezh')->json('data'), 'id'));
+    }
+
     public function test_event_page_gives_the_hover_card_its_short_text(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);

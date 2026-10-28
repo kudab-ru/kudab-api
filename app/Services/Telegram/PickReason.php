@@ -97,7 +97,9 @@ final class PickReason
 
         $movedAt = self::date($meta['moved']['at'] ?? null);
         if ($movedAt !== null) {
-            return 'Перевешено на двойник: карточку слили '.$movedAt->format('d.m');
+            return ($meta['moved']['via'] ?? null) === 'перенос'
+                ? 'Перевешено на новую дату: событие перенесли '.$movedAt->format('d.m')
+                : 'Перевешено на двойник: карточку слили '.$movedAt->format('d.m');
         }
 
         return match ($meta['by'] ?? null) {

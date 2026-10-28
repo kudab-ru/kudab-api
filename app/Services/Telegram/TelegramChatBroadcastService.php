@@ -709,6 +709,13 @@ class TelegramChatBroadcastService
                     continue;
                 }
 
+                // отменили или перенесли уже после прогона уборщика: пост о прежней дате не нужен
+                if ($event->status !== 'active') {
+                    $this->broadcastItemRepository->markSkipped($item, 'событие '.$event->id.' отменили или перенесли — снято из очереди');
+
+                    continue;
+                }
+
                 // пока пост лежал в очереди, событие могло начаться; правило то же, что в админке (PostTiming)
                 if (! PostTiming::fits($event, $now)) {
                     $this->broadcastItemRepository->markSkipped(

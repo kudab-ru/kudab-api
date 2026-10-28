@@ -9,6 +9,7 @@ use App\Models\Event;
 use App\Models\TelegramChat;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
+use App\Services\EventChanges;
 use App\Services\EventSurvivor;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -28,6 +29,7 @@ final class BroadcastQueueSweeper
         private readonly TelegramChatBroadcastService $broadcasts,
         private readonly TelegramChatBroadcastItemRepositoryInterface $items,
         private readonly EventSurvivor $survivors,
+        private readonly EventChanges $changes,
     ) {}
 
     /**
@@ -83,11 +85,22 @@ final class BroadcastQueueSweeper
 
         $reason = match (true) {
             $event === null => 'события больше нет — снято из очереди ожидания',
+            $event->status !== 'active' => self::offReason((string) $event->status),
             ! PostTiming::fits($event, $now) => 'событие началось, пока запись ждала свободного дня',
             default => null,
         };
 
         return $reason === null ? null : $this->skip($item, $reason);
+    }
+
+    private static function offReason(string $status): string
+    {
+        return match ($status) {
+            EventChanges::CANCELLED => 'событие отменили',
+            EventChanges::POSTPONED => 'событие отложили, новой даты нет',
+            EventChanges::MOVED => 'событие перенесли',
+            default => 'событие снято с публикации',
+        };
     }
 
     /**
@@ -104,8 +117,17 @@ final class BroadcastQueueSweeper
                 ?? $this->skip($item, 'событие удалили после выбора — слот освобождён');
         }
 
+        // пост о перенесённом событии нужен и на новую дату: перевешиваем, как запись склеенного
+        if ($event->status === EventChanges::MOVED) {
+            $newId = $this->changes->movedToId((int) $event->id);
+            $new = $newId !== null ? Event::query()->find($newId) : null;
+            if ($new !== null && $this->canMoveTo($broadcast, $item, $new, $at->copy()->max($now))) {
+                return $this->moveTo($item, $new, 'перенос', $now);
+            }
+        }
+
         $reason = match (true) {
-            $event->status !== 'active' => 'событие снято с публикации',
+            $event->status !== 'active' => self::offReason((string) $event->status),
             $event->tickets_status === 'sold_out' => 'билеты распроданы',
             ! PostTiming::fits($event, $at) => 'время сдвинули, к слоту не успевает',
             default => null,

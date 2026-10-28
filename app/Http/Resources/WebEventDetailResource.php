@@ -3,6 +3,7 @@
 namespace App\Http\Resources;
 
 use App\Http\Resources\Concerns\BuildsEventGroup;
+use App\Services\EventChanges;
 use App\Services\Telegram\Scoring\EventAccess;
 use App\Support\SignupNote;
 use Illuminate\Http\Request;
@@ -146,6 +147,9 @@ class WebEventDetailResource extends JsonResource
             'sources' => $sources,
 
             'is_past' => (bool) ($this->getAttribute('__is_past') ?? false),
+
+            // отменено, отложено или перенесено; null — идёт, как объявлено
+            'change' => app(EventChanges::class)->forPage((int) $this->id, $this->status),
 
             'interests' => $interests,
 

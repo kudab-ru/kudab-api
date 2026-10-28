@@ -971,6 +971,31 @@ class BroadcastSlotsTest extends TestCase
         }
     }
 
+    public function test_sweeper_moves_the_post_of_a_moved_event_to_the_new_date(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 11:00', 'Europe/Moscow')->utc());
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $broadcast->settings = array_merge((array) $broadcast->settings, ['slots' => [10], 'horizon_days' => 2]);
+        $broadcast->save();
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+
+        $old = $this->eventAt($city->id, 'Вечер «Сила Духа»', Carbon::parse('2026-09-16 19:00', 'Europe/Moscow')->utc());
+        $new = $this->eventAt($city->id, 'Вечер «Сила Духа»', Carbon::parse('2026-09-17 19:00', 'Europe/Moscow')->utc());
+        $item = $this->makeItem($broadcast->id, $old->id, TelegramChatBroadcastItem::STATUS_PENDING);
+        $item->publish_at = Carbon::parse('2026-09-16 10:00', 'Europe/Moscow')->utc();
+        $item->save();
+        $old->status = 'moved';
+        $old->save();
+        DB::table('event_changes')->insert([
+            'event_id' => $old->id, 'kind' => 'moved', 'new_event_id' => $new->id, 'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->artisan('broadcast:sweep-queue')->assertExitCode(0);
+
+        $this->assertSame($new->id, (int) $item->fresh()->event_id);
+    }
+
     private function twinOf(Event $deleted, string $merge): Event
     {
         $twin = $this->eventAt((int) $deleted->city_id, 'Guf', Carbon::parse($deleted->start_time));

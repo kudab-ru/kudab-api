@@ -84,6 +84,12 @@ Schedule::command('broadcast:occasions')
     ->onOneServer()
     ->withoutOverlapping(10);
 
+// Ответ в канале под постом о событии, которое отменили или перенесли, см. BroadcastEventChanges.
+Schedule::command('broadcast:event-changes')
+    ->everyTenMinutes()
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
 // Отчёт страницы «Аналитика». Считается заранее: сборка стоит восьми
 // обращений к чужим API и тянется около минуты, а nginx рвёт запрос раньше.
 // Каждые три часа при сроке жизни кэша в шесть — чтобы протухший отчёт
