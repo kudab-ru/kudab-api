@@ -120,6 +120,8 @@ class KulisyAuthController extends Controller
             'has_password' => $user->password !== null,
             'telegram' => $user->telegramUsers()->exists(),
             'roles' => $user->getRoleNames()->values()->all(),
+            'venues' => $user->venueManagers()->with('venue:id,name')->get()
+                ->map(fn ($m) => ['id' => $m->venue_id, 'name' => $m->venue?->name, 'status' => $m->status])->values()->all(),
         ];
     }
 

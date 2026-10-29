@@ -67,6 +67,10 @@ Route::prefix('kulisy')->middleware(['kulisy'])->group(function () {
         Route::get('auth/me', [\App\Http\Controllers\Api\Kulisy\KulisyAuthController::class, 'me']);
         Route::post('auth/logout', [\App\Http\Controllers\Api\Kulisy\KulisyAuthController::class, 'logout']);
         Route::post('auth/resend', [\App\Http\Controllers\Api\Kulisy\KulisyAuthController::class, 'resend'])->middleware('throttle:2,1');
+        Route::get('cabinet', [\App\Http\Controllers\Api\Kulisy\KulisyVenueController::class, 'cabinet']);
+        Route::post('venues/{id}/claim', [\App\Http\Controllers\Api\Kulisy\KulisyVenueController::class, 'claim'])->whereNumber('id');
+        Route::post('venues/{id}/claim/check', [\App\Http\Controllers\Api\Kulisy\KulisyVenueController::class, 'check'])->whereNumber('id')->middleware('throttle:10,1');
+        Route::post('venues/{id}/claim/manual', [\App\Http\Controllers\Api\Kulisy\KulisyVenueController::class, 'manual'])->whereNumber('id')->middleware('throttle:3,1');
     });
 });
 

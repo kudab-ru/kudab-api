@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\VenueManager;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -62,6 +63,14 @@ class AdminOrganizerLeadsController extends Controller
 
         if ($affected === 0) {
             return response()->json(['message' => 'Заявка не найдена'], 404);
+        }
+
+        // заявка «площадка ваша?» из кулис: «подключили» отдаёт площадку человеку, отказ возвращает его к коду
+        $claimId = DB::table('organizer_leads')->where('id', $id)->value('venue_manager_id');
+        if ($claimId !== null) {
+            VenueManager::whereKey($claimId)->where('status', 'manual')->update($data['resolution'] === 'connected'
+                ? ['status' => 'confirmed', 'confirmed_at' => now()]
+                : ['status' => 'pending']);
         }
 
         return response()->json(['ok' => true]);

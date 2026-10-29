@@ -61,6 +61,11 @@ class User extends Authenticatable
         return $this->hasMany(TelegramUser::class);
     }
 
+    public function venueManagers()
+    {
+        return $this->hasMany(VenueManager::class);
+    }
+
     /**
      * Интересы пользователя (M:N)
      *
