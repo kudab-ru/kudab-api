@@ -11,6 +11,7 @@ use App\Services\Weather\CityWeather;
 use App\Support\CityCase;
 use Carbon\Carbon;
 use Carbon\CarbonImmutable;
+use Carbon\CarbonInterface;
 use Illuminate\Support\Collection;
 
 /** Страница катков города (/afisha/{город}/katki) и блок «массовое катание» на странице площадки. */
@@ -35,6 +36,9 @@ final class RinkPage
 
     /** Чем каток помогает детям и новичкам: это попадает в ответ «Где покататься с ребёнком?». */
     private const KIDS_HELP = '/упор|подпор|помощник|инструктор|детск|дети до/iu';
+
+    /** Месяцы, когда катки зовут с других страниц; те же месяцы у чипа «Катки» на главной сайта. */
+    private const SEASON = [12, 1, 2];
 
     public function __construct(private readonly CityWeather $weather) {}
 
@@ -64,6 +68,39 @@ final class RinkPage
             'faq' => $this->faq($city, $rinks, $cards, $now),
             'shows' => $this->shows($rinks, $now),
         ];
+    }
+
+    /**
+     * Карточка катков в «Главном» подборок и зимних праздников: сколько катков в городе, сколько из них катает
+     * хоть в один из этих дней и вход от. Вне сезона и в городе без катков null.
+     *
+     * @return array{count: int, open: int, entry_from: ?int}|null
+     */
+    public function teaser(City $city, CarbonInterface $from, CarbonInterface $to): ?array
+    {
+        $from = CarbonImmutable::instance($from)->setTimezone(self::TZ)->startOfDay();
+        if (! in_array($from->month, self::SEASON, true)) {
+            return null;
+        }
+        $rinks = Rink::query()->where('city_id', $city->id)->where('hidden', false)->get();
+        if ($rinks->isEmpty()) {
+            return null;
+        }
+
+        $dated = $this->datedFromEvents($rinks, $from);
+        $days = (int) $from->diffInDays(CarbonImmutable::instance($to)->setTimezone(self::TZ)->startOfDay()) + 1;
+        $open = $rinks->filter(function (Rink $r) use ($from, $days, $dated) {
+            for ($i = 0; $i < $days; $i++) {
+                if (RinkDays::day($r, $from->addDays($i), null, $dated[$r->id] ?? [])['open']) {
+                    return true;
+                }
+            }
+
+            return false;
+        });
+        $entries = $rinks->where('status', 'open')->map(fn (Rink $r) => (int) ($r->prices['entry'] ?? 0))->filter()->all();
+
+        return ['count' => $rinks->count(), 'open' => $open->count(), 'entry_from' => $entries !== [] ? min($entries) : null];
     }
 
     /**

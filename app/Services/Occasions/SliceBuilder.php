@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Occasions;
 
 use App\Models\City;
+use App\Services\Rinks\RinkPage;
 use App\Support\CityCase;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -30,12 +31,13 @@ final class SliceBuilder
     public function __construct(
         private readonly OccasionPage $page,
         private readonly OccasionPromo $promo,
+        private readonly RinkPage $rinks,
     ) {}
 
     /**
      * Дни с `from` по `to`. `anchor` — день, по которому ищется пост рубрики канала; null — у страницы нет
-     * «Главного», а с ним и карточки праздника. С `dropPast` прошедшего на странице нет: «Сегодня» вечером
-     * не показывает утро.
+     * «Главного», а с ним и карточек праздника и катков. С `dropPast` прошедшего на странице нет: «Сегодня»
+     * вечером не показывает утро.
      *
      * @param  array<string, mixed>  $theme
      * @return array<string, mixed>
@@ -102,6 +104,7 @@ final class SliceBuilder
             'days' => $days,
             'both' => $both,
             'holiday' => $holiday,
+            'rinks' => $anchor === null ? null : $this->rinks->teaser($city, $from, $to),
             // «Коротко» — только у подборки с вопросом в теме, см. OccasionPage::faq
             'faq' => isset($theme['question'])
                 ? $this->page->faq($theme, CityCase::prepositional($city->slug), null, $picks, $rows)

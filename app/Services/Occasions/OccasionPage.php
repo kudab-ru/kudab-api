@@ -9,6 +9,7 @@ use App\Models\Event;
 use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Repositories\EventRepository;
+use App\Services\Rinks\RinkPage;
 use App\Services\Telegram\BroadcastDigestComposer;
 use App\Services\Telegram\EventCaptionBuilder;
 use App\Services\Telegram\Scoring\EventAccess;
@@ -91,6 +92,7 @@ final class OccasionPage
         private readonly BroadcastDigestComposer $composer,
         private readonly EventBroadcastScorer $scorer,
         private readonly EventRepository $repo,
+        private readonly RinkPage $rinks,
     ) {}
 
     /** @param  array<string, mixed>  $theme */
@@ -128,6 +130,8 @@ final class OccasionPage
                 'lead' => $lead,
             ],
             'picks' => $picks,
+            // у зимних праздников с `rinks` в теме в «Главном» карточка катков, катание считается на сегодня
+            'rinks' => ! empty($theme['rinks']) ? $this->rinks->teaser($city, $now, $now) : null,
             'days' => $days,
             'kinds' => $kinds,
             'faq' => $this->faq($theme, $cityIn, $day, $picks, $rows),
