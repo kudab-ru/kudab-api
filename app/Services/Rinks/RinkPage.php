@@ -22,11 +22,19 @@ final class RinkPage
     private const DAYS = 9;
 
     /** Сеансы катков, которые продают билеты через кассы, приходят обычными событиями площадки. */
-    private const SESSION_TITLE = '/массов\w*\s+катани/iu';
+    public const SESSION_TITLE = '/массов\w*\s+катани/iu';
 
     private const SHOW_TITLE = '/ледов\w*\s+шоу|шоу\s+на\s+льду/iu';
 
+    private const HOCKEY_TITLE = '/хокке|\bбуран\b/iu';
+
     private const SHOWS = 6;
+
+    /** Хоккея не больше двух ближайших матчей, иначе он вытеснит шоу. */
+    private const HOCKEY = 2;
+
+    /** Чем каток помогает детям и новичкам: это попадает в ответ «Где покататься с ребёнком?». */
+    private const KIDS_HELP = '/упор|подпор|помощник|инструктор|детск|дети до/iu';
 
     public function __construct(private readonly CityWeather $weather) {}
 
@@ -72,7 +80,20 @@ final class RinkPage
         $today = $now->setTimezone(self::TZ)->startOfDay();
         $card = $this->card($rink, $today, [], $this->datedFromEvents(collect([$rink]), $today)[$rink->id] ?? []);
 
-        return $card + ['now' => $now->setTimezone(self::TZ)->format('H:i'), 'today' => $today->toDateString()];
+        return $card + ['now' => $now->setTimezone(self::TZ)->format('H:i'), 'today' => $today->toDateString(), 'title' => $this->titleName($rink)];
+    }
+
+    /** Как назвать каток в заголовке страницы для поиска: «Каток «Платинум Арена»», «Каток на Адмиралтейской площади». */
+    private function titleName(Rink $r): string
+    {
+        $name = (string) $r->name;
+
+        return match (true) {
+            str_starts_with($name, 'Каток') => $name,
+            str_starts_with((string) $r->name_in, 'на ') => 'Каток '.$r->name_in,
+            str_contains($name, '«') => 'Каток '.$name,
+            default => 'Каток «'.$name.'»',
+        };
     }
 
     /**
@@ -264,6 +285,21 @@ final class RinkPage
             $out[] = ['q' => 'Какие катки'.$where.' работают сейчас?', 'a' => implode(' ', $a), 'links' => $open->map($link)->values()->all()];
         }
 
+        // о каникулах спрашивают с декабря, до их конца
+        if ($now->month === 12 || ($now->month === 1 && $now->day <= 10)) {
+            $a = $open->isNotEmpty() ? ['В каникулы работают '.$this->list($open).'.'] : [];
+            // «с морозами» — догадка по прошлой зиме, а прошедшая дата значит, что каток не сменил статус: обещанием это не назовёшь
+            $before = $now->month === 12 ? $rinks->where('status', 'soon')->filter(fn (Rink $r) => $r->opens_on !== null
+                && $r->opens_on->year === $now->year && $r->opens_on->toDateString() >= $now->toDateString()
+                && $r->name_in !== null && $r->status_short !== null && $r->status_short !== 'с морозами')->sortBy(fn (Rink $r) => $r->opens_on->toDateString()) : collect();
+            if ($before->isNotEmpty()) {
+                $a[] = 'До Нового года обещают открыть '.($before->count() > 1 ? 'катки ' : 'каток ')
+                    .$this->joinAnd($before->map(fn (Rink $r) => $r->name_in.' ('.$r->status_short.')')->values()->all()).'.';
+            }
+            $a[] = 'В праздники у катков свои часы: сеансы на каждый день — в расписании на этой странице, перед поездкой загляните в группу катка.';
+            $out[] = ['q' => 'Какие катки работают в новогодние каникулы?', 'a' => implode(' ', $a), 'links' => $open->map($link)->values()->all()];
+        }
+
         // вечерние сеансы сегодня: от пяти вечера и позже, ещё не начавшиеся
         $evening = [];
         $at = (int) $now->format('Hi');
@@ -294,6 +330,22 @@ final class RinkPage
                 .($r->status === 'soon' && $r->status_short !== null ? ' ('.$r->status_short.')' : ''))->values()->all();
             $a = $this->capital($this->joinAnd($parts)).'. Дворовые катки заливают только в сильный мороз, общего списка город не публикует.';
             $out[] = ['q' => 'Где кататься бесплатно?', 'a' => $a, 'links' => []];
+        }
+
+        $kidsNow = $rinks->filter(fn (Rink $r) => $r->kids && in_array($r->status, ['open', 'call'], true));
+        $kidsLater = $rinks->filter(fn (Rink $r) => $r->kids && $r->status === 'soon')->sortBy(fn (Rink $r) => $r->opens_on?->toDateString() ?? '9');
+        if ($kidsNow->isNotEmpty()) {
+            $help = function (Rink $r): string {
+                $f = collect((array) $r->features)->first(fn ($x) => preg_match(self::KIDS_HELP, (string) $x) === 1);
+
+                return $this->quoted($r).($f !== null ? ' ('.$f.')' : '');
+            };
+            $a = 'С детьми удобно: '.$this->joinAnd($kidsNow->map($help)->values()->all()).'.';
+            if ($kidsLater->isNotEmpty()) {
+                $a .= ' Позже откроются '.$this->joinAnd($kidsLater->map(fn (Rink $r) => $this->quoted($r)
+                    .($r->status_short !== null ? ' ('.$r->status_short.')' : ''))->values()->all()).'.';
+            }
+            $out[] = ['q' => 'Где покататься с ребёнком?', 'a' => $a, 'links' => $kidsNow->merge($kidsLater)->map($link)->values()->all()];
         }
 
         // у входа «200–300 ₽» в `entry` нижняя цена, верхняя только в строке разброса
@@ -338,7 +390,7 @@ final class RinkPage
     }
 
     /**
-     * Ледовые шоу на площадках катков: по одному показу каждого, ближайшие первыми.
+     * Ледовые шоу и хоккей на площадках катков: по одному показу каждого, ближайшие первыми.
      *
      * @param  Collection<int, Rink>  $rinks
      * @return list<array<string, mixed>>
@@ -361,15 +413,23 @@ final class RinkPage
             ->get();
 
         $out = [];
+        $hockey = 0;
         foreach ($events as $e) {
             $title = trim((string) $e->title);
             $key = mb_strtolower($title);
-            if (preg_match(self::SHOW_TITLE, $title) !== 1 || isset($out[$key])) {
+            $kind = match (true) {
+                preg_match(self::SHOW_TITLE, $title) === 1 => 'show',
+                preg_match(self::HOCKEY_TITLE, $title) === 1 => 'hockey',
+                default => null,
+            };
+            if ($kind === null || isset($out[$key]) || ($kind === 'hockey' && $hockey >= self::HOCKEY)) {
                 continue;
             }
+            $hockey += $kind === 'hockey' ? 1 : 0;
             $start = Carbon::parse($e->start_time)->setTimezone(self::TZ);
             $out[$key] = [
                 'id' => (int) $e->id,
+                'kind' => $kind,
                 'url' => '/events/'.$e->id,
                 'title' => (string) preg_replace('/"([^"]{1,80})"/u', '«$1»', $title),
                 'poster' => $e->poster(),

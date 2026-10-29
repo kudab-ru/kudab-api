@@ -71,6 +71,24 @@ class RinkDaysTest extends TestCase
     }
 
     #[Test]
+    public function a_weekday_holiday_goes_by_sunday_with_a_note_until_its_hours_are_known(): void
+    {
+        $rink = $this->rink(['indoor' => true, 'schedule' => [
+            ['days' => [1, 2, 3, 4, 5], 'label' => 'пн–пт', 'times' => ['13:00–14:00']],
+            ['days' => [7], 'label' => 'вс', 'times' => ['15:00–16:00']],
+        ]]);
+        $tuesday = CarbonImmutable::parse('2027-01-05');
+
+        $guess = RinkDays::day($rink, $tuesday, null);
+        $this->assertSame([['t' => '15:00–16:00', 'url' => null]], $guess['slots']);
+        $this->assertSame(RinkDays::HOLIDAY_NOTE, $guess['holiday']);
+
+        $set = RinkDays::day($rink->fill(['sessions' => [['date' => '2027-01-05', 'times' => ['12:00–13:00']]]]), $tuesday, null);
+        $this->assertSame([['t' => '12:00–13:00', 'url' => null]], $set['slots']);
+        $this->assertNull($set['holiday']);
+    }
+
+    #[Test]
     public function next_session_skips_days_without_skating(): void
     {
         $rink = $this->rink(['indoor' => true, 'schedule' => [['days' => [6], 'label' => 'сб', 'times' => ['17:45–18:45']]]]);

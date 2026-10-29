@@ -7,6 +7,8 @@ namespace App\Http\Controllers\Api\Admin;
 use App\Http\Controllers\Api\Web\RinksController;
 use App\Http\Controllers\Controller;
 use App\Models\Rink;
+use App\Services\Rinks\RinkDays;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -14,14 +16,52 @@ use Illuminate\Support\Facades\Cache;
 /** Страница «Катки» в админке: открыть сезон, поменять часы, цены и ссылки без выката. */
 final class AdminRinksController extends Controller
 {
+    private const STALE_DAYS = 14;
+
     public function index(): JsonResponse
     {
         $rinks = Rink::query()->with(['city:id,slug', 'venue:id,name'])->orderBy('city_id')->orderBy('sort')->orderBy('id')->get();
+        $today = CarbonImmutable::now('Europe/Moscow')->startOfDay();
 
         return response()->json(['data' => $rinks->map(fn (Rink $r) => $r->toArray() + [
             'venue_name' => $r->venue?->name,
             'checked_days' => $r->checked_at !== null ? (int) $r->checked_at->diffInDays(now()) : null,
+            'todo' => $this->todo($r, $today),
         ])->values()]);
+    }
+
+    /**
+     * Что проверить у катка: список над карточками в админке. Праздники смотрим на две недели вперёд:
+     * без своих часов на сайте стоят воскресные с пометкой «часы могут отличаться», см. RinkDays::day.
+     *
+     * @return list<string>
+     */
+    private function todo(Rink $r, CarbonImmutable $today): array
+    {
+        if ($r->hidden) {
+            return [];
+        }
+        $out = [];
+        if ($r->status === 'soon' && $r->opens_on !== null && $r->opens_on->toDateString() <= $today->toDateString()) {
+            $out[] = 'обещал открыться '.$r->opens_on->locale('ru')->translatedFormat('j F').' — открылся?';
+        }
+        if ($r->checked_at === null || $r->checked_at->diffInDays(now()) >= self::STALE_DAYS) {
+            $out[] = $r->checked_at === null ? 'ни разу не проверяли' : 'не проверяли с '.$r->checked_at->locale('ru')->translatedFormat('j F');
+        }
+        if ($r->status === 'open') {
+            $guess = [];
+            foreach (RinkDays::HOLIDAYS as $iso) {
+                $d = CarbonImmutable::parse($iso, 'Europe/Moscow');
+                if ($d->betweenIncluded($today, $today->addDays(14)) && RinkDays::day($r, $d, null)['holiday'] !== null) {
+                    $guess[] = $d->locale('ru')->translatedFormat('j F');
+                }
+            }
+            if ($guess !== []) {
+                $out[] = 'праздники без своих часов: '.implode(', ', $guess);
+            }
+        }
+
+        return $out;
     }
 
     public function update(Request $request, int $id): JsonResponse

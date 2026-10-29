@@ -3,6 +3,7 @@
 namespace App\Http\Resources;
 
 use App\Http\Resources\Concerns\BuildsEventGroup;
+use App\Services\Rinks\RinkEntry;
 use App\Services\Telegram\Scoring\EventAccess;
 use Carbon\CarbonInterface;
 use Illuminate\Http\Request;
@@ -96,8 +97,9 @@ class WebEventResource extends JsonResource
 
             'price_status'   => (string) ($this->price_status ?? 'unknown'),
             'tickets_status' => (string) ($this->tickets_status ?? 'unknown'),
-            'price_min'      => $this->price_min !== null ? (int) $this->price_min : null,
-            'price_max'      => $this->price_max !== null ? (int) $this->price_max : null,
+            // у сеанса катка из кассы цена входа катка, см. RinkEntry
+            'price_min'      => RinkEntry::forEvent($this->resource)['entry'] ?? ($this->price_min !== null ? (int) $this->price_min : null),
+            'price_max'      => RinkEntry::forEvent($this->resource)['entry'] ?? ($this->price_max !== null ? (int) $this->price_max : null),
             'price_text'     => $this->price_text !== null ? (string) $this->price_text : null,
             'price_url'      => $this->price_url !== null ? (string) $this->price_url : null,
 

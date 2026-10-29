@@ -12,19 +12,28 @@ final class RinkDays
 {
     public const NO_SKATING = 'в этот день массового катания нет';
 
+    public const HOLIDAY_NOTE = 'праздник, часы могут отличаться';
+
     /** Выше этой температуры днём лёд под открытым небом подтаивает, если он не искусственный. */
     private const THAW_MAX = 1;
 
+    /** Нерабочие дни зимы по постановлению о переносе выходных; список обновлять раз в год, к ноябрю. */
+    public const HOLIDAYS = [
+        '2026-11-04', '2026-12-31', '2027-01-01', '2027-01-02', '2027-01-03', '2027-01-04', '2027-01-05',
+        '2027-01-06', '2027-01-07', '2027-01-08', '2027-01-09', '2027-01-10', '2027-02-22', '2027-02-23', '2027-03-08',
+    ];
+
     /**
      * Закрытым каток бывает только по своим словам (`status`), прогноз погоды даёт лишь предупреждение:
-     * многие уличные катки с искусственным льдом работают и в плюс.
+     * многие уличные катки с искусственным льдом работают и в плюс. В праздник будний день идёт по воскресенью
+     * с пометкой `holiday`, пока часы на эту дату не пришли из кассы или из админки.
      *
      * @param  array<string, list<array{t: string, url: ?string}>>  $dated  сеансы по датам из касс и таблиц катка
-     * @return array{open: bool, slots: list<array{t: string, url: ?string}>, caution: ?string, closed: bool, why: ?string}
+     * @return array{open: bool, slots: list<array{t: string, url: ?string}>, caution: ?string, holiday: ?string, closed: bool, why: ?string}
      */
     public static function day(Rink $rink, CarbonImmutable $date, ?int $tMax, array $dated = []): array
     {
-        $none = fn (?string $why, bool $closed = false) => ['open' => false, 'slots' => [], 'caution' => null, 'closed' => $closed, 'why' => $why];
+        $none = fn (?string $why, bool $closed = false) => ['open' => false, 'slots' => [], 'caution' => null, 'holiday' => null, 'closed' => $closed, 'why' => $why];
 
         if ($rink->status === 'closed') {
             return $none($rink->status_note, true);
@@ -40,7 +49,9 @@ final class RinkDays
             }
         }
 
-        $slots = $dated[$iso] ?? self::manual($rink, $iso) ?? self::weekly($rink, $date);
+        $known = $dated[$iso] ?? self::manual($rink, $iso);
+        $holiday = in_array($iso, self::HOLIDAYS, true);
+        $slots = $known ?? self::weekly($rink, $holiday ? 7 : $date->isoWeekday());
         if ($slots === []) {
             return $none(self::NO_SKATING);
         }
@@ -51,6 +62,7 @@ final class RinkDays
             'open' => true,
             'slots' => $slots,
             'caution' => $thaw ? ($rink->ice === 'natural' ? 'лёд натуральный, в оттепель может не работать' : 'в оттепель может не работать') : null,
+            'holiday' => $holiday && $known === null ? self::HOLIDAY_NOTE : null,
             'closed' => false,
             'why' => null,
         ];
@@ -88,11 +100,11 @@ final class RinkDays
     }
 
     /** @return list<array{t: string, url: ?string}> */
-    private static function weekly(Rink $rink, CarbonImmutable $date): array
+    private static function weekly(Rink $rink, int $isoWeekday): array
     {
         $out = [];
         foreach ((array) $rink->schedule as $row) {
-            if (in_array($date->isoWeekday(), array_map('intval', (array) ($row['days'] ?? [])), true)) {
+            if (in_array($isoWeekday, array_map('intval', (array) ($row['days'] ?? [])), true)) {
                 foreach ((array) ($row['times'] ?? []) as $t) {
                     $out[] = ['t' => (string) $t, 'url' => null];
                 }

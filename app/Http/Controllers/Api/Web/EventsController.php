@@ -17,6 +17,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use App\Http\Resources\WebEventDetailResource;
 use App\Services\Occasions\OccasionPromo;
+use App\Services\Rinks\RinkEntry;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Validation\Rule;
@@ -454,6 +455,8 @@ class EventsController extends Controller
         $data = (new WebEventDetailResource($event))->toArray(request());
         // праздник, в программу которого входит событие; сбой тут не должен ронять страницу события
         $data['occasion'] = rescue(fn () => $occasions->forEvent($event, Carbon::now('Europe/Moscow')), null);
+        // сеанс массового катания ведёт ко всем сеансам и ценам своего катка
+        $data['rink'] = rescue(fn () => RinkEntry::forEvent($event), null);
 
         return response()->json(['data' => $data]);
     }
