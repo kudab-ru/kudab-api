@@ -51,7 +51,7 @@ final class RinkDays
 
         $known = $dated[$iso] ?? self::manual($rink, $iso);
         $holiday = in_array($iso, self::HOLIDAYS, true);
-        $slots = $known ?? self::weekly($rink, $holiday ? 7 : $date->isoWeekday());
+        $slots = $known ?? self::weekly($rink, $holiday && $date->isoWeekday() < 6 ? 7 : $date->isoWeekday());
         if ($slots === []) {
             return $none(self::NO_SKATING);
         }
