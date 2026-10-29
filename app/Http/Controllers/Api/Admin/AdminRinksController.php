@@ -6,14 +6,16 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Api\Web\RinksController;
 use App\Http\Controllers\Controller;
+use App\Models\City;
 use App\Models\Rink;
 use App\Services\Rinks\RinkDays;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Str;
 
-/** Страница «Катки» в админке: открыть сезон, поменять часы, цены и ссылки без выката. */
+/** Страница «Катки» в админке: завести каток, открыть сезон, поменять часы, цены и ссылки без выката. */
 final class AdminRinksController extends Controller
 {
     private const STALE_DAYS = 14;
@@ -64,6 +66,37 @@ final class AdminRinksController extends Controller
         return $out;
     }
 
+    /** Новый каток заводится скрытым: на сайт он выходит, когда в него внесут часы и цены и снимут «скрыть». */
+    public function store(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'city' => 'sometimes|string|exists:cities,slug',
+            'name' => 'required|string|max:255',
+            'indoor' => 'required|boolean',
+            'address' => 'nullable|string|max:255',
+            'area' => 'nullable|string|max:80',
+            'lat' => 'nullable|numeric|between:-90,90',
+            'lon' => 'nullable|numeric|between:-180,180',
+        ]);
+        $city = City::query()->where('slug', $data['city'] ?? 'voronezh')->firstOrFail();
+
+        $base = Str::slug($data['name']) ?: 'katok';
+        $slug = $base;
+        for ($n = 2; Rink::query()->where('city_id', $city->id)->where('slug', $slug)->exists(); $n++) {
+            $slug = $base.'-'.$n;
+        }
+        $rink = Rink::query()->create(array_diff_key($data, ['city' => true]) + [
+            'city_id' => $city->id,
+            'slug' => $slug,
+            'status' => 'soon',
+            'hidden' => true,
+            'sort' => (int) Rink::query()->where('city_id', $city->id)->max('sort') + 10,
+            'checked_at' => now(),
+        ]);
+
+        return response()->json(['data' => $rink->fresh()], 201);
+    }
+
     public function update(Request $request, int $id): JsonResponse
     {
         $rink = Rink::query()->with('city:id,slug')->findOrFail($id);
@@ -72,6 +105,8 @@ final class AdminRinksController extends Controller
             'name_in' => 'sometimes|nullable|string|max:255',
             'address' => 'sometimes|nullable|string|max:255',
             'area' => 'sometimes|nullable|string|max:80',
+            'lat' => 'sometimes|nullable|numeric|between:-90,90',
+            'lon' => 'sometimes|nullable|numeric|between:-180,180',
             'indoor' => 'sometimes|boolean',
             'ice' => 'sometimes|nullable|in:artificial,natural',
             'entry' => 'sometimes|in:online,cash,free,phone',

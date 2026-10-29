@@ -226,6 +226,7 @@ Route::prefix('admin/rinks')
     ->middleware(['auth:sanctum', 'role:superadmin'])
     ->group(function () {
         Route::get('/', [\App\Http\Controllers\Api\Admin\AdminRinksController::class, 'index']);
+        Route::post('/', [\App\Http\Controllers\Api\Admin\AdminRinksController::class, 'store']);
         Route::patch('{id}', [\App\Http\Controllers\Api\Admin\AdminRinksController::class, 'update'])->whereNumber('id');
         Route::post('{id}/checked', [\App\Http\Controllers\Api\Admin\AdminRinksController::class, 'checked'])->whereNumber('id');
     });
