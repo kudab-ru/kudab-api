@@ -43,7 +43,7 @@ final class AdminRinksController extends Controller
         }
         $out = [];
         if ($r->status === 'soon' && $r->opens_on !== null && $r->opens_on->toDateString() <= $today->toDateString()) {
-            $out[] = 'обещал открыться '.$r->opens_on->locale('ru')->translatedFormat('j F').' — открылся?';
+            $out[] = 'обещал открыться '.$r->opens_on->locale('ru')->translatedFormat('j F').', проверьте, открылся ли';
         }
         if ($r->checked_at === null || $r->checked_at->diffInDays(now()) >= self::STALE_DAYS) {
             $out[] = $r->checked_at === null ? 'ни разу не проверяли' : 'не проверяли с '.$r->checked_at->locale('ru')->translatedFormat('j F');
