@@ -112,6 +112,7 @@ final class AdminRinksController extends Controller
             'entry' => 'sometimes|in:online,cash,free,phone',
             'status' => 'sometimes|in:open,soon,call,closed',
             'status_note' => 'sometimes|nullable|string|max:255',
+            'faq_q' => 'sometimes|nullable|string|max:160',
             'status_short' => 'sometimes|nullable|string|max:40',
             'status_source' => 'sometimes|nullable|string|max:255',
             'opens_on' => 'sometimes|nullable|date',

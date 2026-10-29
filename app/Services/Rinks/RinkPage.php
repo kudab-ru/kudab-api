@@ -393,6 +393,20 @@ final class RinkPage
             $out[] = ['q' => 'Где покататься с ребёнком?', 'a' => $a, 'links' => $kidsNow->merge($kidsLater)->map($link)->values()->all()];
         }
 
+        // вопросы катков из админки, и скрытых с сайта тоже: их ищут, хотя в списке их нет; ответ — пояснение катка
+        $asked = Rink::query()->where('city_id', $city->id)->whereNotNull('faq_q')->whereNotNull('status_note')
+            ->orderBy('sort')->orderBy('id')->get();
+        foreach ($asked as $r) {
+            $a = $this->capital(rtrim((string) $r->status_note, '. ')).'.';
+            // катки страницы, названные в ответе («на Адмиралтейской площади»), ведут к своим карточкам
+            $named = $rinks->filter(function (Rink $o) use ($a) {
+                $name = preg_replace('/^(в|во|на|у)\s+/u', '', (string) $o->name_in);
+
+                return $name !== '' && mb_stripos($a, $name) !== false;
+            })->map(fn (Rink $o) => ['text' => preg_replace('/^(в|во|на|у)\s+/u', '', (string) $o->name_in), 'url' => '#k-'.$o->slug]);
+            $out[] = ['q' => (string) $r->faq_q, 'a' => $a, 'links' => $named->values()->all()];
+        }
+
         // ответ постоянный, без сегодняшней погоды: его читают поисковики, а совет по погоде стоит в шапке страницы
         $out[] = ['q' => 'Что надеть на каток?', 'a' => 'В крытых катках прохладно, у самого льда тем более: хватит тёплой кофты, '
             .'а перчатки или варежки нужны всегда. На уличный каток одевайтесь по погоде слоями и возьмите запасные перчатки. '
