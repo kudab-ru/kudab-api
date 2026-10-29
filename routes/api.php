@@ -49,6 +49,27 @@ Route::prefix('admin/auth')
         Route::get('me', [AdminAuthController::class, 'me']);
     });
 
+// Кулисы: вход и кабинет организаторов. Без KULISY_ENABLED все адреса отвечают 404.
+Route::prefix('kulisy')->middleware(['kulisy'])->group(function () {
+    // страница кулис спрашивает, включены ли они; без флага сайт отдаёт 404
+    Route::get('ping', fn () => response()->json(['data' => ['ok' => true]]));
+    Route::middleware('throttle:10,1')->group(function () {
+        Route::post('auth/register', [\App\Http\Controllers\Api\Kulisy\KulisyAuthController::class, 'register']);
+        Route::post('auth/login', [\App\Http\Controllers\Api\Kulisy\KulisyAuthController::class, 'login']);
+        Route::post('auth/telegram', [\App\Http\Controllers\Api\Kulisy\KulisyTelegramController::class, 'start']);
+    });
+    Route::get('auth/telegram/{code}', [\App\Http\Controllers\Api\Kulisy\KulisyTelegramController::class, 'status'])->middleware('throttle:120,1');
+    Route::get('auth/verify/{id}/{hash}', [\App\Http\Controllers\Api\Kulisy\KulisyAuthController::class, 'verify'])
+        ->whereNumber('id')->middleware('signed:relative')->name('kulisy.verify');
+    Route::get('city', \App\Http\Controllers\Api\Kulisy\KulisyCityController::class)->middleware('throttle:60,1');
+
+    Route::middleware(['auth:sanctum', 'role:organizer|admin|superadmin'])->group(function () {
+        Route::get('auth/me', [\App\Http\Controllers\Api\Kulisy\KulisyAuthController::class, 'me']);
+        Route::post('auth/logout', [\App\Http\Controllers\Api\Kulisy\KulisyAuthController::class, 'logout']);
+        Route::post('auth/resend', [\App\Http\Controllers\Api\Kulisy\KulisyAuthController::class, 'resend'])->middleware('throttle:2,1');
+    });
+});
+
 Route::prefix('admin')
     ->middleware(['auth:sanctum', 'role:admin|superadmin'])
     ->group(function () {
@@ -326,6 +347,7 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
 
 Route::prefix('bot')->middleware('bot.auth')->group(function () {
     Route::get('/role/by-telegram/{telegram_id}', [RoleController::class, 'byTelegram']);
+    Route::post('/kulisy/confirm', [\App\Http\Controllers\Bot\KulisyBotController::class, 'confirm'])->middleware('kulisy');
 
     Route::get('/cities', [CityController::class, 'index']); // список/поиск/near
     Route::get('/cities/{city}', [CityController::class, 'show']);

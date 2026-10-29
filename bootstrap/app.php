@@ -15,6 +15,7 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'bot.auth' => \App\Http\Middleware\BotAuthMiddleware::class,
+            'kulisy' => \App\Http\Middleware\EnsureKulisyEnabled::class,
 
             'role' => \Spatie\Permission\Middleware\RoleMiddleware::class,
             'permission' => \Spatie\Permission\Middleware\PermissionMiddleware::class,
