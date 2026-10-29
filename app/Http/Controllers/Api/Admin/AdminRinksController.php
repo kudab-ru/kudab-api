@@ -100,6 +100,9 @@ final class AdminRinksController extends Controller
             'links' => 'sometimes|nullable|array',
             'links.*' => 'nullable|string|max:500',
             'week_note' => 'sometimes|nullable|string|max:255',
+            'about' => 'sometimes|nullable|string|max:255',
+            'session_note' => 'sometimes|nullable|string|max:255',
+            'way' => 'sometimes|nullable|string|max:255',
             'hidden' => 'sometimes|boolean',
             'sort' => 'sometimes|integer|between:0,999',
         ]);
