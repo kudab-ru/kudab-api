@@ -84,6 +84,8 @@ class RinkDaysTest extends TestCase
         $this->assertSame([['t' => '15:00–16:00', 'url' => null]], $guess['slots']);
         $this->assertSame(RinkDays::HOLIDAY_NOTE, $guess['holiday']);
         $this->assertSame([['t' => '17:00–18:00', 'url' => null]], RinkDays::day($rink, CarbonImmutable::parse('2027-01-09'), null)['slots']);
+        $noSunday = $this->rink(['indoor' => true, 'schedule' => [['days' => [3, 6], 'label' => 'ср, сб', 'times' => ['21:30–23:00']]]]);
+        $this->assertSame([['t' => '21:30–23:00', 'url' => null]], RinkDays::day($noSunday, CarbonImmutable::parse('2027-01-06'), null)['slots']);
 
         $set = RinkDays::day($rink->fill(['sessions' => [['date' => '2027-01-05', 'times' => ['12:00–13:00']]]]), $tuesday, null);
         $this->assertSame([['t' => '12:00–13:00', 'url' => null]], $set['slots']);

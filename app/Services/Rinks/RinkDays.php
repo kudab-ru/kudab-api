@@ -24,9 +24,9 @@ final class RinkDays
     ];
 
     /**
-     * Закрытым каток бывает только по своим словам (`status`), прогноз погоды даёт лишь предупреждение:
-     * многие уличные катки с искусственным льдом работают и в плюс. В праздник будний день идёт по воскресенью
-     * с пометкой `holiday`, пока часы на эту дату не пришли из кассы или из админки.
+     * Закрытым каток бывает только по своим словам (`status`), погода даёт лишь предупреждение: уличные катки
+     * с искусственным льдом работают и в плюс. Праздничный будний день идёт по воскресенью, а у катка без
+     * воскресных сеансов по своему дню, с пометкой `holiday`, пока часы на дату не пришли из кассы или админки.
      *
      * @param  array<string, list<array{t: string, url: ?string}>>  $dated  сеансы по датам из касс и таблиц катка
      * @return array{open: bool, slots: list<array{t: string, url: ?string}>, caution: ?string, holiday: ?string, closed: bool, why: ?string}
@@ -51,7 +51,8 @@ final class RinkDays
 
         $known = $dated[$iso] ?? self::manual($rink, $iso);
         $holiday = in_array($iso, self::HOLIDAYS, true);
-        $slots = $known ?? self::weekly($rink, $holiday && $date->isoWeekday() < 6 ? 7 : $date->isoWeekday());
+        $dow = $date->isoWeekday();
+        $slots = $known ?? ($holiday && $dow < 6 ? (self::weekly($rink, 7) ?: self::weekly($rink, $dow)) : self::weekly($rink, $dow));
         if ($slots === []) {
             return $none(self::NO_SKATING);
         }
