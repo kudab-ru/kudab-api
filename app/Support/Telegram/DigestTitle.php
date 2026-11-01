@@ -16,6 +16,13 @@ final class DigestTitle
     /** Короче — площадку внутри названия не ищем: «Арт» нашёлся бы в «Артель» и «Арт-рок». */
     private const MIN_VENUE = 4;
 
+    /** Слово вида перед названием в кавычках и значки, которые этот вид уже называют. 🧠 или 📚 читаются по-разному, их тут нет. */
+    private const KIND_WORDS = [
+        'спектакль' => ['🎭'],
+        'концерт' => ['🎵', '🎸', '🎷', '🎻', '🎧'],
+        'фильм|показ фильма|просмотр фильма|кинопоказ' => ['🎬'],
+    ];
+
     /**
      * @param  string|null  $city  «Воронеж»
      * @param  string|null  $cityIn  «Воронеже»
@@ -50,7 +57,29 @@ final class DigestTitle
             }
         }
 
-        return (string) preg_replace('/^[\s\/|–—-]+|[\s\/|–—-]+$/u', '', $t);
+        return self::unquoted((string) preg_replace('/^[\s\/|–—-]+|[\s\/|–—-]+$/u', '', $t));
+    }
+
+    /**
+     * «Спектакль «Как дети»» под значком 🎭 или в рубрике спектаклей — просто «Как дети»: вид уже назван.
+     * Слово с уточнением остаётся: «Импровизационный спектакль» говорит больше значка.
+     */
+    public static function withoutKind(string $title, string $sign): string
+    {
+        foreach (self::KIND_WORDS as $words => $signs) {
+            if ($sign !== '' && in_array($sign, $signs, true)
+                && preg_match('/^(?:'.$words.')\s+([«"„].+)$/iu', $title, $m) === 1) {
+                return self::unquoted($m[1]);
+            }
+        }
+
+        return $title;
+    }
+
+    /** Название целиком в кавычках — без них: в списке оно и так стоит заголовком. */
+    private static function unquoted(string $t): string
+    {
+        return preg_match('/^[«"„]([^«»"„“]{3,})[»"“]$/u', $t, $m) === 1 ? $m[1] : $t;
     }
 
     /** @param list<string> $occasionWords */

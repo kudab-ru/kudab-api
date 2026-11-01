@@ -416,6 +416,7 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertNotNull($out);
         $this->assertEqualsCanonicalizing([$lecture, $concert, $museum], $out['event_ids']);
         $this->assertNotContains($morning, $out['event_ids']);
+        $this->assertStringContainsString('<b>Вторник, 3 ноября</b>', $out['caption'], 'в шапке гида срока нет');
     }
 
     #[Test]
@@ -444,7 +445,7 @@ class BroadcastDigestRubricsTest extends TestCase
 
         $caption = $this->caption(Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
 
-        $this->assertMatchesRegularExpression('/<b>Суббота, 19 сентября<\/b>\n\n.+<b>Воскресенье, 20 сентября<\/b>\n\n/us', $caption);
+        $this->assertMatchesRegularExpression('/<b>Суббота<\/b>\n\n.+<b>Воскресенье<\/b>\n\n/us', $caption, 'числа уже в шапке');
         $this->assertMatchesRegularExpression('/<\/a><\/b>\n\d{2}:\d{2} · /u', $caption, 'под заголовком дня в строке только час');
     }
 
@@ -731,6 +732,27 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertNotNull($out);
         $this->assertGreaterThan(2, count($out['event_ids']),
             'на двух днях названо больше двух — правило дня снято');
+    }
+
+    #[Test]
+    public function a_title_naming_its_place_leaves_the_place_out_of_the_line(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $ids = [];
+        foreach ([1, 1, 1, 2, 2] as $i => $day) {
+            $ids[] = $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+        DB::table('events')->where('id', $ids[4])->update(['title' => 'Вечеринка в ПараDice']);
+        DB::table('venues')->where('id', DB::table('events')->where('id', $ids[4])->value('venue_id'))
+            ->update(['name' => 'Настольные игры | ПараDice | Воронеж']);
+
+        $caption = $this->caption(Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertStringContainsString('Вечеринка в ПараDice', $caption);
+        $this->assertStringNotContainsString('Настольные игры', $caption);
     }
 
     /** Во вторник такой рубрики нет: «на выходных» за четыре дня читают один раз. */

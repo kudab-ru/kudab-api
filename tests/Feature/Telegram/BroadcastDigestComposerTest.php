@@ -343,6 +343,41 @@ class BroadcastDigestComposerTest extends TestCase
         $this->assertStringNotContainsString('Фраза номер 3', $caption, 'снялась только лишняя, с конца');
     }
 
+    public function test_intro_under_the_last_event_stays_whole_and_goes_last(): void
+    {
+        $broadcast = $this->makeChannel();
+        foreach (range(1, 6) as $n) {
+            $this->themedEvent("Спектакль {$n}", $n);
+        }
+
+        $digest = $this->digestItem($broadcast, Carbon::now()->addDay());
+        $composer = app(BroadcastDigestComposer::class);
+        $draft = $composer->compose($broadcast, Carbon::now(), $digest);
+        app(\App\Services\Telegram\TelegramChatBroadcastService::class)->applyDigestDraft($digest, $draft);
+        $base = \App\Support\Telegram\CaptionLength::visible(
+            $composer->recompose($digest->refresh(), $broadcast, Carbon::now())['caption'],
+        );
+
+        [$first, $second, $last] = $draft['event_ids'];
+        // длиннее, чем режется фраза события
+        $intro = rtrim(mb_substr('Подводка '.str_repeat('абвгде ', 40), 0, 200)).'.';
+        $meta = (array) $digest->refresh()->digest_meta;
+        $meta['hooks'] = [(string) $first => 'Фраза первого события.', (string) $second => 'Фраза второго события.'];
+        $meta['intro'] = $intro;
+        $meta['intro_event'] = $last;
+        $meta['roster'] = $draft['event_ids'];
+        $digest->digest_meta = $meta;
+        $digest->save();
+
+        // подводка и одна фраза помещаются, вторая — нет
+        config(['broadcast_digest.caption_soft_limit' => $base + mb_strlen($intro) + 1 + 23 + 5]);
+        $caption = $composer->recompose($digest->refresh(), $broadcast, Carbon::now())['caption'];
+
+        $this->assertStringContainsString($intro, $caption, 'подводка целиком');
+        $this->assertStringContainsString('Фраза первого события.', $caption);
+        $this->assertStringNotContainsString('Фраза второго события.', $caption, 'снимается чужая фраза, а не подводка');
+    }
+
     /** Названные события идут по датам — подборка про «что впереди». */
     public function test_named_events_are_ordered_by_date(): void
     {

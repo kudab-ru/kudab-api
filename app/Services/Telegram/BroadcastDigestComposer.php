@@ -1614,8 +1614,9 @@ final class BroadcastDigestComposer
         $where = ! empty($theme['city_in_head']) && $city !== null ? ' в '.$city : '';
         // у повода город в самом заголовке: «Хэллоуин в Воронеже: где отмечать»
         $headline = trim((string) preg_replace('/\s+(?=[:,.]|$)/u', '', str_replace('{city}', $city !== null ? 'в '.$city : '', $headline)));
+        $datesInHead = (bool) ($theme['range_in_head'] ?? true);
         $head = trim(($theme['emoji'] ?? '').' <b>'.$this->escape($headline.$where).'</b>')
-            .(($theme['range_in_head'] ?? true) ? ' · '.$this->escape($range) : '');
+            .($datesInHead ? ' · '.$this->escape($range) : '');
 
         // Подводка про одно событие стоит фразой этого события: над списком она читается как
         // оторванный абзац. Над списком — только подводка про всю подборку (`intro_event` пуст).
@@ -1676,28 +1677,34 @@ final class BroadcastDigestComposer
             };
 
             $day = self::dayOf($row);
-            $dayHeads[] = $byDay && $day !== $prevDay ? '<b>'.$this->escape(self::dayHeading($row)).'</b>' : null;
+            $dayHeads[] = $byDay && $day !== $prevDay ? '<b>'.$this->escape(self::dayHeading($row, $datesInHead)).'</b>' : null;
             $prevDay = $day;
 
             $venue = $this->venueLabel($row);
             if ($venue === '' && trim((string) ($row->address ?? '')) !== '') {
                 $venue = EventCaptionBuilder::placeFromAddress((string) $row->address, $cityName);
             }
+            $place = VenueName::withoutCity($venue, $cityName, $city);
             // от названия гида остался один повод («Ночь искусств») — называем место, в строке его уже не повторяем
             $title = DigestTitle::clean((string) $row->title, $venue, $cityName, $city, $occasionWords);
-            if ($title === '') {
-                $title = $venue !== '' ? $venue : (string) $row->title;
+            if ($title === '' || $title === $venue) {
+                [$title, $place] = [$place !== '' ? $place : (string) $row->title, ''];
+            }
+            // Пустой значок не оставляет пробела: строка начиналась бы с отступа.
+            $mark = $emoji[(int) $row->id] ?? '';
+            // вид уже назван значком строки или рубрикой: «🎭 Как дети», а не «🎭 Спектакль «Как дети»»
+            $title = DigestTitle::withoutKind($title, $mark !== '' ? $mark : (isset($theme['interest']) ? (string) ($theme['emoji'] ?? '') : ''));
+            if ($place !== '' && self::titleNamesVenue($title, $place, (string) ($row->venue_name ?? ''), $cityName)) {
+                $place = '';
             }
             $meta = array_values(array_filter([
                 $byDay ? self::timeLabel($row) : $this->whenLabel($row, $shortDates, $sessions[(int) $row->id] ?? []),
-                $title === $venue ? '' : $venue,
+                $place,
                 $this->priceLabel($row),
             ]));
 
             // НЕ $head: этим именем выше назван заголовок поста, и повторное
             // использование затирало его названием последнего события.
-            // Пустой значок не оставляет пробела: строка начиналась бы с отступа.
-            $mark = $emoji[(int) $row->id] ?? '';
             $titleLink = trim($mark.' <b>'
                 .$this->link($this->eventUrl((int) $row->id, $item?->id), $this->typography(CalmCaps::title($title))).'</b>');
             // Без курсива: пять наклонных строк подряд читаются как сноски.
@@ -1747,16 +1754,8 @@ final class BroadcastDigestComposer
             $blocks,
         );
 
-        // ИЗЮМ СНИМАЕТСЯ ПО ОДНОЙ СТРОКЕ С КОНЦА, а не весь разом.
-        //
-        // Правило «целиком или никак» стояло ради того, чтобы пост не выходил
-        // обрезанным на полуслове, и это верно: резать строку нельзя. Но
-        // снятие ВСЕХ строк ради одной лишней — плата не за то: текст уже
-        // написан и оплачен, а без него пост становится списком из базы.
-        //
-        // С конца, а не самую длинную: хвост подборки слабее начала, и дыра
-        // в середине читается как сбой. Строка снимается целиком, так что
-        // обрезанных на полуслове по-прежнему не бывает.
+        // Не влезает — фразы снимаются по одной с конца, подводка — последней: это главный текст поста.
+        // Резать фразу на полуслове нельзя, а снять все ради одной лишней — выбросить написанное.
         $soft = (int) config('broadcast_digest.caption_soft_limit', 950);
 
         // СКОЛЬКО МЕСТА ОСТАЁТСЯ НА ФРАЗУ — считаем здесь и сохраняем, потому
@@ -1779,14 +1778,18 @@ final class BroadcastDigestComposer
             $this->hookBudget = max(self::HOOK_BUDGET_MIN, min($this->hookBudget, (int) $theme['hook_max']));
         }
 
-        for ($keep = count($rich); $keep >= 0; $keep--) {
-            $body = array_merge(
-                array_slice($rich, 0, $keep),
-                array_slice($lines, $keep),
-            );
+        $leadAt = array_search($leadId, $this->postOrder, true);
+        $drop = array_values(array_filter(array_reverse(array_keys($rich)), fn (int $i) => $i !== $leadAt));
+        if ($leadAt !== false) {
+            $drop[] = $leadAt;
+        }
+        $body = $rich;
+        foreach ([null, ...$drop] as $i) {
+            if ($i !== null) {
+                $body[$i] = $lines[$i];
+            }
             $caption = implode("\n\n", array_merge($top, $withDays($body), [$footer]));
-
-            if ($keep === 0 || \App\Support\Telegram\CaptionLength::visible($caption) <= $soft) {
+            if (\App\Support\Telegram\CaptionLength::visible($caption) <= $soft) {
                 return $caption;
             }
         }
@@ -1794,12 +1797,26 @@ final class BroadcastDigestComposer
         return implode("\n\n", array_merge($top, $withDays($lines), [$footer]));
     }
 
-    /** «Суббота, 31 октября» */
-    private static function dayHeading(object $row): string
+    /** Название уже называет место: «Вечеринка в ПараDice» у группы ВК «Настольные игры | ПараDice | Воронеж». */
+    private static function titleNamesVenue(string $title, string $place, string $raw, string $city): bool
+    {
+        foreach (array_merge([$place], preg_split('/\s+[|\/]\s+/u', $raw) ?: []) as $part) {
+            $part = trim((string) $part);
+            if (mb_strlen($part) >= 3 && mb_strtolower($part) !== mb_strtolower(trim($city)) && mb_stripos($title, $part) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** «Суббота»: числа уже стоят в шапке. У гида без срока в шапке — «Вторник, 3 ноября». */
+    private static function dayHeading(object $row, bool $datesInHead): string
     {
         $at = Carbon::parse($row->start_time)->setTimezone(self::TZ);
+        $name = self::DAY_NAMES[(int) $at->isoWeekday()];
 
-        return self::DAY_NAMES[(int) $at->isoWeekday()].', '.$at->day.' '.self::MONTHS[$at->month];
+        return $datesInHead ? $name : $name.', '.$at->day.' '.self::MONTHS[$at->month];
     }
 
     /** Час под заголовком дня; у события без часа строка начинается с места. */
@@ -1863,16 +1880,19 @@ final class BroadcastDigestComposer
      * Сами ничего не сочиняем: подборка и так рискует звучать списком из базы,
      * а выдуманная фраза к этому добавит вранья.
      *
-     * @param  string|null  $written  текст модели вместо строки события из меты
+     * @param  string|null  $intro  подводка модели про это событие: писалась на верх поста целиком, её не режем
      */
-    private function hook(object $row, ?TelegramChatBroadcastItem $item = null, ?string $written = null, bool $writtenOnly = false): string
+    private function hook(object $row, ?TelegramChatBroadcastItem $item = null, ?string $intro = null, bool $writtenOnly = false): string
     {
         $limit = (int) config('broadcast_digest.named_line_chars', 130);
 
+        if ($intro !== null) {
+            return $this->typography((string) preg_replace('/\s+/u', ' ', trim($intro)));
+        }
         // 1. Строка модели написана ПОД ЭТУ СТРОКУ — целиком, а не первой
         // фразой из анонса. Резать её по первому предложению нельзя: панч у
         // такой строки обычно во второй половине.
-        $written ??= $item?->digestHook((int) $row->id);
+        $written = $item?->digestHook((int) $row->id);
         if ($written !== null) {
             return $this->typography($this->trimToWord((string) preg_replace('/\s+/u', ' ', $written), (int) round($limit * 1.3)));
         }
