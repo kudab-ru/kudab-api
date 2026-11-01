@@ -228,6 +228,24 @@ class BroadcastNewsPostsTest extends TestCase
     }
 
     #[Test]
+    public function an_announced_show_opens_with_its_nearest_date(): void
+    {
+        $this->channel();
+        $later = $this->event('Лебединое озеро', Carbon::now()->addDays(90), price: 3500, photo: true);
+        $nearest = $this->event('Лебединое озеро', Carbon::now()->addDays(40), price: 2000, venueOf: $later);
+        $group = (int) DB::table('event_groups')->insertGetId([
+            'community_id' => Event::query()->whereKey($later)->value('community_id'),
+            'group_key' => 'swan-lake', 'title_norm' => 'лебединое озеро', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('events')->whereIn('id', [$later, $nearest])->update(['event_group_id' => $group]);
+
+        app(BroadcastAnnounce::class)->run(Carbon::now());
+
+        $item = TelegramChatBroadcastItem::query()->whereRaw("digest_meta->>'theme' = ?", [TelegramChatBroadcastItem::THEME_ANNOUNCE])->firstOrFail();
+        $this->assertSame([$nearest], DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->pluck('event_id')->map(fn ($v) => (int) $v)->all());
+    }
+
+    #[Test]
     public function a_fresh_big_event_is_announced_and_keeps_its_own_post(): void
     {
         $this->channel();

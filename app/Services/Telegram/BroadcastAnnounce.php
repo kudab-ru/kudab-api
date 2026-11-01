@@ -75,6 +75,7 @@ final class BroadcastAnnounce
             if ($best === null) {
                 continue;
             }
+            $best[0] = $this->nearestSession($best[0], $now);
             if (! $dryRun) {
                 try {
                     // запись, подпись и состав — вместе: без подписи пост уйти не должен
@@ -174,6 +175,23 @@ final class BroadcastAnnounce
         }
 
         return null;
+    }
+
+    /** Пост открывается ближайшей датой показа: подпись ставит дату самого события первой, остальные сеансы — после. */
+    private function nearestSession(Event $event, Carbon $now): Event
+    {
+        if ($event->event_group_id === null) {
+            return $event;
+        }
+
+        return Event::query()
+            ->with('venue:id,name')
+            ->where('event_group_id', $event->event_group_id)
+            ->where('status', 'active')
+            ->where('start_time', '>', $now)
+            ->orderBy('start_time')
+            ->orderBy('id')
+            ->first() ?? $event;
     }
 
     /** @param  list<string>  $photos */
