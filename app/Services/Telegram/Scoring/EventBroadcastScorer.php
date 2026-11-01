@@ -34,7 +34,7 @@ class EventBroadcastScorer
 
     public const W_ONE_OFF = 20; // одна дата за месяц
 
-    public const W_FEW_DATES = 15; // две-три даты: тоже редкость
+    public const W_FEW_DATES = 15; // несколько дат у новой серии: тоже редкость
 
     public const W_WEEKLY = -20; // каждую неделю и чаще
 
@@ -60,6 +60,11 @@ class EventBroadcastScorer
 
     public const W_NO_VENUE = -5;
 
+    public const W_AMATEUR = -30;
+
+    /** Любительское: отчётный концерт, школа искусств, сельский дом культуры или клуб. */
+    private const AMATEUR = '/отч[её]тн|школ[аыу]\s+искусств|музыкальн\p{L}*\s+школ|(?<!\p{L})(дши|дмш|сдк)(?!\p{L})|сельск\p{L}*\s+(дом|клуб)/iu';
+
     /** Сцена и дорогой билет: без этого звезда в концертном зале весила как группа в баре. */
     public const W_BIG_STAGE = 15;
 
@@ -73,6 +78,9 @@ class EventBroadcastScorer
     public const WEEKLY_FROM = 4;
 
     public const PERMANENT_FROM = 15;
+
+    /** Столько прошедших дат за месяц — серия уже идёт каждую неделю; меньше — новая, сколько бы дат ни было впереди. */
+    public const RECURRING_PAST_FROM = 3;
 
     public const RATED_FROM = 50;
 
@@ -107,8 +115,8 @@ class EventBroadcastScorer
     private const TZ = 'Europe/Moscow';
 
     private const NO_SIGNALS = [
-        'slug' => null, 'parent' => null, 'repeats' => 1, 'run_until' => null, 'ticketed' => false,
-        'rating' => 0, 'photo' => false, 'venue_kind' => null,
+        'slug' => null, 'parent' => null, 'repeats' => 1, 'past' => 0, 'run_until' => null, 'ticketed' => false,
+        'rating' => 0, 'photo' => false, 'venue_kind' => null, 'venue_name' => null,
     ];
 
     /** @var array<int, array<string, mixed>> */
@@ -161,9 +169,19 @@ class EventBroadcastScorer
     }
 
     /**
+     * Интерес без части слагаемых: `scale`, `rating`, `venue` и другие ключи `parts`.
+     *
+     * @param  list<string>  $skip
+     */
+    public function interestWithout(object $e, array $skip): int
+    {
+        return array_sum(array_diff_key($this->parts($e, false), array_flip($skip)));
+    }
+
+    /**
      * Что сказать человеку о событии.
      *
-     * @return array{kind: string|null, repeats: int, ticketed: bool, rating: int, multi_day: bool, run_until: string|null, access: string}
+     * @return array{kind: string|null, repeats: int, past: int, ticketed: bool, rating: int, multi_day: bool, run_until: string|null, access: string}
      */
     public function explain(object $e): array
     {
@@ -173,6 +191,7 @@ class EventBroadcastScorer
         return [
             'kind' => $s['parent'] ?? $s['slug'],
             'repeats' => (int) $s['repeats'],
+            'past' => (int) ($s['past'] ?? 0),
             'ticketed' => (bool) $s['ticketed'],
             'rating' => (int) $s['rating'],
             'multi_day' => $runEnd !== null,
@@ -277,14 +296,15 @@ class EventBroadcastScorer
     {
         $s = $this->signal($e);
         $repeats = (int) $s['repeats'];
+        $past = (int) ($s['past'] ?? 0);
         $rating = (int) $s['rating'];
 
         return [
             'kind' => self::KIND_WEIGHTS[$s['slug'] ?? ''] ?? self::KIND_WEIGHTS[$s['parent'] ?? ''] ?? 0,
             'dates' => ($runEnd = $this->runEnd($e)) !== null ? $this->lastChance($runEnd, $at) : match (true) {
+                $past >= self::RECURRING_PAST_FROM => $past + $repeats < self::PERMANENT_FROM ? self::W_WEEKLY : self::W_PERMANENT,
                 $repeats <= 1 => self::W_ONE_OFF,
-                $repeats < self::WEEKLY_FROM => self::W_FEW_DATES,
-                $repeats < self::PERMANENT_FROM => self::W_WEEKLY,
+                $repeats < self::PERMANENT_FROM => self::W_FEW_DATES,
                 default => self::W_PERMANENT,
             },
             'ticketed' => $s['ticketed'] ? self::W_TICKETED : 0,
@@ -301,7 +321,8 @@ class EventBroadcastScorer
             // у события без времени в начале полночь, и в посте вышло бы «сб 00:00»
             'time' => ($e->time_precision ?? null) === 'date' ? self::W_NO_TIME : 0,
             'venue' => empty($e->venue_id) ? self::W_NO_VENUE : 0,
-            'scale' => ($s['venue_kind'] === 'Сцены' && (int) ($e->price_min ?? 0) >= self::BIG_STAGE_PRICE_FROM ? self::W_BIG_STAGE : 0)
+            'amateur' => preg_match(self::AMATEUR, (string) ($e->title ?? '').' '.($s['venue_name'] ?? '').' '.($e->address ?? '')) === 1 ? self::W_AMATEUR : 0,
+            'scale' => ($s['venue_kind'] === EventInterestSignals::STAGE_VENUE_KIND && (int) ($e->price_min ?? 0) >= self::BIG_STAGE_PRICE_FROM ? self::W_BIG_STAGE : 0)
                 + (preg_match(self::TOUR_TITLE, (string) ($e->title ?? '')) === 1 ? self::W_TOUR : 0),
         ];
     }

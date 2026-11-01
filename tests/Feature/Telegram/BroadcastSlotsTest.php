@@ -1274,6 +1274,124 @@ class BroadcastSlotsTest extends TestCase
         $this->assertSame($dates, $scorer->breakdown($today, Carbon::parse('2026-09-15 10:00', 'Europe/Moscow'))['dates']);
     }
 
+    /** @return array<string, array{bool}> */
+    public static function weeklyShowGroups(): array
+    {
+        return ['без групп' => [false], 'вечер в своей маленькой группе' => [true]];
+    }
+
+    #[DataProvider('weeklyShowGroups')]
+    public function test_a_weekly_show_kept_as_separate_events_is_not_one_off(bool $ownGroup): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 06:00', 'Europe/Moscow')->utc());
+        $city = $this->insertCity();
+        $venue = $this->insertVenue($city->id, 'Стендап-клуб', 'standup-club');
+        $shows = [];
+        foreach ([-21, -14, -7, 3, 10] as $day) {
+            $shows[$day] = $this->eventAt($city->id, 'Большой Stand-up', Carbon::parse('2026-09-15 20:00', 'Europe/Moscow')->addDays($day)->utc());
+            $shows[$day]->forceFill(['venue_id' => $venue])->save();
+        }
+        if ($ownGroup) {
+            $group = DB::table('event_groups')->insertGetId([
+                'community_id' => $shows[3]->community_id, 'city_id' => $city->id, 'group_key' => 'eg:test:standup',
+                'title_norm' => 'большой stand-up', 'created_at' => now(), 'updated_at' => now(),
+            ]);
+            $shows[3]->forceFill(['event_group_id' => $group])->save();
+        }
+
+        $parts = app(EventBroadcastScorer::class)->breakdown($shows[3]->fresh(), now());
+
+        $this->assertSame(EventBroadcastScorer::W_WEEKLY, $parts['dates']);
+    }
+
+    public function test_a_new_short_run_is_rare_not_weekly(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 06:00', 'Europe/Moscow')->utc());
+        $city = $this->insertCity();
+        $walks = [];
+        foreach ([1, 4, 8, 11, 15, 18, 22] as $day) {
+            $walks[] = $this->eventAt($city->id, 'Сказки на Девичке', Carbon::parse('2026-09-15 15:00', 'Europe/Moscow')->addDays($day)->utc());
+        }
+        $group = DB::table('event_groups')->insertGetId([
+            'community_id' => $walks[0]->community_id, 'city_id' => $city->id, 'group_key' => 'eg:test:devichok',
+            'title_norm' => 'сказки на девичке', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('events')->whereIn('id', array_map(fn (Event $e) => $e->id, $walks))->update(['event_group_id' => $group]);
+
+        $parts = app(EventBroadcastScorer::class)->breakdown($walks[0]->fresh(), now());
+
+        $this->assertSame(EventBroadcastScorer::W_FEW_DATES, $parts['dates']);
+    }
+
+    /** @return array<string, array{string|null, string|null, bool}> */
+    public static function boxOffices(): array
+    {
+        return [
+            'Кассир среди источников' => ['https://vrn.kassir.ru/teatr/vecher', null, true],
+            'платный вечер на сцене' => [null, 'Сцены', true],
+            'платный вечер в баре' => [null, 'Клубы и бары', false],
+        ];
+    }
+
+    #[DataProvider('boxOffices')]
+    public function test_a_ticket_site_or_a_paid_stage_counts_as_box_office(?string $site, ?string $venueKind, bool $ticketed): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 06:00', 'Europe/Moscow')->utc());
+        $city = $this->insertCity();
+        $venue = $this->insertVenue($city->id, 'Площадка', 'place');
+        DB::table('venues')->where('id', $venue)->update(['kind' => $venueKind]);
+        $event = $this->eventAt($city->id, 'Вечер', Carbon::parse('2026-09-18 19:00', 'Europe/Moscow')->utc());
+        $event->forceFill(['venue_id' => $venue, 'price_min' => 500])->save();
+        $network = DB::table('social_networks')->insertGetId(['name' => 'Сайт', 'slug' => 'site', 'created_at' => now(), 'updated_at' => now()]);
+        $link = DB::table('community_social_links')->insertGetId([
+            'community_id' => $event->community_id, 'social_network_id' => $network, 'url' => $site ?? 'https://vk.com/bar',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('event_sources')->insert([
+            'event_id' => $event->id, 'social_link_id' => $link, 'source' => $site !== null ? 'site' : 'vk',
+            'post_external_id' => 'vecher', 'external_url' => $site ?? 'https://vk.com/wall-1_1',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->assertSame($ticketed, app(EventBroadcastScorer::class)->explain($event->fresh())['ticketed']);
+    }
+
+    public function test_the_feed_leaves_out_a_town_far_from_the_city(): void
+    {
+        [$broadcast, [$near, $far]] = $this->channelWithEvents(2);
+        // Бобров, около 85 км от центра Воронежа
+        DB::update('UPDATE events SET location = ST_SetSRID(ST_Point(?, ?), 4326) WHERE id = ?', [40.0345, 51.0973, $far->id]);
+
+        $ids = $this->service()->channelCandidates($broadcast->chat, $broadcast->id)->pluck('id')->all();
+
+        $this->assertContains($near->id, $ids);
+        $this->assertNotContains($far->id, $ids);
+    }
+
+    /** @return array<string, array{string, string, bool}> */
+    public static function amateurConcerts(): array
+    {
+        return [
+            'школа искусств' => ['Концерт «Звуки домры»', 'Детская школа искусств № 5', true],
+            'отчётный концерт' => ['Отчётный концерт хора «Надежда»', 'Клуб «Репное»', true],
+            'сельский дом культуры' => ['Концерт Александра Казака', 'СДК Землянский', true],
+            'городской концерт' => ['Концерт Александра Казака', 'ДК железнодорожников', false],
+        ];
+    }
+
+    #[DataProvider('amateurConcerts')]
+    public function test_an_amateur_concert_is_pushed_down(string $title, string $venueName, bool $amateur): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 06:00', 'Europe/Moscow')->utc());
+        $city = $this->insertCity();
+        $event = $this->eventAt($city->id, $title, Carbon::parse('2026-09-18 19:00', 'Europe/Moscow')->utc());
+        $event->forceFill(['venue_id' => $this->insertVenue($city->id, $venueName, 'place')])->save();
+
+        $parts = app(EventBroadcastScorer::class)->breakdown($event->fresh(), now());
+
+        $this->assertSame($amateur ? EventBroadcastScorer::W_AMATEUR : 0, $parts['amateur']);
+    }
+
     public function test_role_without_a_fitting_event_takes_the_best_of_the_rest(): void
     {
         [$broadcast, $city] = $this->roleChannel('bar');

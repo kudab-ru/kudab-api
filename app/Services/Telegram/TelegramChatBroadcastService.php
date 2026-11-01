@@ -16,6 +16,7 @@ use App\Services\EventSurvivor;
 use App\Services\Telegram\Scoring\EventAccess;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Support\BroadcastSafety;
+use App\Support\CityRadius;
 use App\Support\EventStart;
 use Carbon\Carbon;
 use DateTimeInterface;
@@ -2107,6 +2108,7 @@ class TelegramChatBroadcastService
             ->whereHas('community', function ($q) use ($chat) {
                 $q->where('city_id', $chat->city_id);
             })
+            ->where(fn ($q) => CityRadius::apply($q, (int) $chat->city_id, CityRadius::CHANNEL_KM))
             // Жёсткие фильтры (NULL-safe): не распроданное, не скрытое для канала.
             ->where(function ($q) {
                 $q->whereNull('tickets_status')

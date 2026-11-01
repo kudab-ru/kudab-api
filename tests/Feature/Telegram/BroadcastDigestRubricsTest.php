@@ -755,6 +755,172 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertStringNotContainsString('Настольные игры', $caption);
     }
 
+    #[Test]
+    public function the_weekend_rubric_leaves_out_a_town_far_from_the_city(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 1, 2, 2] as $i => $day) {
+            $this->event('Городское '.($i + 1), $day, free: false, priceMin: 700, hour: 12 + $i, description: $long);
+        }
+        // единственное недорогое: без правила его ставит строка «дешевле 500»
+        $far = $this->event('Концерт в Боброве', 1, free: false, priceMin: 500, hour: 17, description: $long);
+        // Бобров, около 85 км от центра Воронежа
+        DB::update('UPDATE events SET location = ST_SetSRID(ST_Point(?, ?), 4326) WHERE id = ?', [40.0345, 51.0973, $far]);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertNotContains($far, $out['event_ids']);
+    }
+
+    #[Test]
+    public function the_weekend_rubric_puts_an_unusual_format_above_a_big_stage(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 2, 2, 2] as $i => $day) {
+            $big = $this->event('Спектакль на большой сцене '.($i + 1), $day, free: false, priceMin: 2500, hour: 12 + $i, description: $long);
+            DB::table('venues')->where('id', DB::table('events')->where('id', $big)->value('venue_id'))->update(['kind' => 'Сцены']);
+        }
+        $walk = $this->event('Аудиоспектакль-прогулка по старому городу', 1, free: false, priceMin: 1000, hour: 17, description: $long);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertContains($walk, $out['event_ids']);
+    }
+
+    #[Test]
+    public function the_weekend_rubric_skips_a_weak_line_added_only_for_variety(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $this->event('Аудиоспектакль-прогулка по старому городу', 1, free: false, priceMin: 1000, hour: 12, description: $long);
+        foreach ([1, 2, 2, 2] as $i => $day) {
+            $this->event('Спектакль '.($i + 1), $day, free: false, priceMin: 700, hour: 14 + $i, description: $long);
+        }
+        $weak = $this->event('Утренник', 1, free: false, priceMin: 300, hour: 10, description: $long);
+        $kids = DB::table('interests')->insertGetId(['name' => 'Детям', 'slug' => 'kids', 'created_at' => now(), 'updated_at' => now()]);
+        DB::table('event_interest')->where('event_id', $weak)->update(['interest_id' => $kids]);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertNotContains($weak, $out['event_ids']);
+    }
+
+    #[Test]
+    public function the_weekend_rubric_does_not_repeat_a_series_named_a_fortnight_ago(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 2, 2, 2] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 700, hour: 12 + $i, description: $long);
+        }
+        $earlier = $this->event('Сердцелесье', -13, free: false, priceMin: 1000, hour: 12, description: $long);
+        $again = $this->event('Сердцелесье', 2, free: false, priceMin: 1000, hour: 11, description: $long);
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $this->channel()->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_POSTED;
+        $item->posted_at = Carbon::now()->subDays(14);
+        $item->digest_meta = ['theme' => 'na-vyhodnyh'];
+        $item->save();
+        DB::table('telegram.chat_broadcast_item_events')->insert([
+            'item_id' => $item->id, 'event_id' => $earlier, 'position' => 1, 'created_at' => now(),
+        ]);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertNotContains($again, $out['event_ids']);
+    }
+
+    /** @return array<string, array{int|null, bool, int, int, bool}> */
+    public static function weekendPrices(): array
+    {
+        // цена, бесплатно, день, час, назван ли: при равных баллах ниже всех встаёт самое позднее
+        return [
+            'бесплатное с часом идёт вверх' => [null, true, 2, 20, true],
+            'билет звезды идёт вниз' => [2500, false, 1, 9, false],
+        ];
+    }
+
+    #[Test]
+    #[DataProvider('weekendPrices')]
+    public function the_weekend_rubric_weighs_the_ticket_price(?int $price, bool $free, int $day, int $hour, bool $named): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 2, 2, 2] as $i => $d) {
+            $this->event('Спектакль '.($i + 1), $d, free: false, priceMin: 400, hour: 12 + $i, description: $long);
+        }
+        $target = $this->event('Вечер', $day, free: $free, priceMin: $price, hour: $hour, description: $long);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertSame($named, in_array($target, $out['event_ids'], true));
+    }
+
+    #[Test]
+    public function the_weekend_rubric_names_one_of_two_cards_of_the_same_concert(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 2, 2] as $i => $d) {
+            $this->event('Спектакль '.($i + 1), $d, free: false, priceMin: 400, hour: 12 + $i, description: $long);
+        }
+        $one = $this->event('Концерт ансамбля «Берёзка»', 1, free: false, priceMin: 700, hour: 19, description: $long);
+        $two = $this->event('Ансамбль "Березка"', 1, free: false, priceMin: 700, hour: 19, description: $long);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertCount(1, array_intersect([$one, $two], $out['event_ids']));
+    }
+
+    #[Test]
+    public function a_weekend_event_without_a_venue_card_is_named_by_its_address(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 2, 2] as $i => $day) {
+            $this->event('С площадкой '.($i + 1), $day, free: false, priceMin: 700, hour: 12 + $i, description: $long);
+        }
+        $home = $this->event('Наш дядя Ваня', 1, free: false, priceMin: 1000, hour: 17, description: $long,
+            address: 'А6 дом-студия, проезд Архангельский д.6');
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertContains($home, $out['event_ids']);
+        $this->assertStringContainsString('А6 дом-студия', $out['caption']);
+    }
+
     /** Во вторник такой рубрики нет: «на выходных» за четыре дня читают один раз. */
     #[Test]
     public function the_weekend_rubric_is_absent_on_a_tuesday(): void

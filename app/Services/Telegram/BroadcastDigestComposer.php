@@ -10,6 +10,7 @@ use App\Models\TelegramChatBroadcastItem;
 use App\Services\Occasions\OccasionCalendar;
 use App\Support\CalmCaps;
 use App\Support\CityCase;
+use App\Support\CityRadius;
 use App\Support\EventStart;
 use App\Support\Telegram\DigestTitle;
 use App\Support\Telegram\KindEmoji;
@@ -626,6 +627,7 @@ final class BroadcastDigestComposer
         'new' => 'появилось в афише после сборки',
         'gone' => 'снято с публикации',
         'city' => 'другой город',
+        'far' => 'далеко от города',
         'window' => 'вне дат рубрики',
         'no_time' => 'без часа начала',
         'timing' => 'слишком близко к выходу или уже закончилось',
@@ -878,6 +880,7 @@ final class BroadcastDigestComposer
         $filters = array_filter([
             'gone' => fn ($q) => $q->whereNull('e.deleted_at')->where('e.status', 'active'),
             'city' => fn ($q) => $q->where('c.city_id', $cityId),
+            'far' => fn ($q) => CityRadius::apply($q, $cityId, (float) ($theme['max_km'] ?? CityRadius::CHANNEL_KM), 'e', 'v'),
             // нижняя граница только у календарного окна: у «выходных» без неё попадал бы вечер пятницы
             'window' => fn ($q) => $q->where(fn ($w) => EventStart::notAfter($w, $until, 'e'))
                 ->when($since !== null, fn ($w) => EventStart::notBefore($w, $since, 'e')),
@@ -1256,9 +1259,10 @@ final class BroadcastDigestComposer
         ?int $exceptItemId = null,
         array $theme = [],
     ): \Illuminate\Support\Collection {
-        // рубрика раз в две недели не повторяет своё: окна соседних выпусков перекрываются
-        $ownSlug = empty($theme['every_days']) ? null : (string) $theme['slug'];
-        $ownDays = (int) ($theme['window_days'] ?? self::SHOWN_WINDOW_DAYS);
+        // своё рубрика помнит дольше общей недели: у «раз в две недели» перекрываются окна соседних выпусков,
+        // а у «На выходных» еженедельная серия иначе выходила бы через выпуск, см. `repeat_days`
+        $ownDays = (int) ($theme['repeat_days'] ?? (empty($theme['every_days']) ? 0 : ($theme['window_days'] ?? self::SHOWN_WINDOW_DAYS)));
+        $ownSlug = $ownDays > 0 ? (string) $theme['slug'] : null;
 
         $shown = DB::table('telegram.chat_broadcast_item_events as l')
             ->join('telegram.chat_broadcast_items as i', 'i.id', '=', 'l.item_id')
@@ -1352,18 +1356,24 @@ final class BroadcastDigestComposer
             }
         }
 
+        // ради разнообразия вида и дешёвой строки не берём то, что намного слабее лучшего
+        $floor = isset($theme['gems']['floor'], $ranked[0]) ? $this->gemScores[(int) $ranked[0]->id] - (int) $theme['gems']['floor'] : null;
+        $strong = fn (object $row) => $floor === null || $this->gemScores[(int) $row->id] >= $floor;
+
         $this->kindCaps = array_map('intval', (array) ($theme['kind_caps'] ?? []));
-        // сначала строк одного вида не больше `kind_cap`, потом без этого предела, если мест осталось больше
-        foreach ([max(1, (int) ($theme['kind_cap'] ?? 1)), 0] as $kindCap) {
+        // сначала строк одного вида не больше `kind_cap`, потом без этого предела, если мест осталось больше;
+        // у рубрики могут быть свои ступени, см. `kind_steps`
+        $steps = (array) ($theme['kind_steps'] ?? [max(1, (int) ($theme['kind_cap'] ?? 1)), 0]);
+        foreach (array_map('intval', $steps) as $kindCap) {
             foreach ($ranked as $row) {
-                if ($this->fitsNamed($row, $named, $min, $max, $onePerDay, $kindCap)) {
+                if ($strong($row) && $this->fitsNamed($row, $named, $min, $max, $onePerDay, $kindCap)) {
                     $named[(int) $row->id] = $row;
                 }
             }
         }
 
         $named = ($theme['cheap_line'] ?? true)
-            ? $this->withCheapLine($named, $ranked, $min, $max, $onePerDay, $bothDays)
+            ? $this->withCheapLine($named, array_values(array_filter($ranked, fn ($r) => isset($named[(int) $r->id]) || $strong($r))), $min, $max, $onePerDay, $bothDays)
             : array_values($named);
 
         // по датам: подборка отвечает на вопрос «что впереди», и читать её удобно по порядку недели;
@@ -1401,6 +1411,42 @@ final class BroadcastDigestComposer
         if (isset($theme['occasion'])) {
             $ranked = $this->byOccasion($ranked, (array) ($theme['words'] ?? []));
         }
+        $this->gemScores = [];
+        if (isset($theme['gems'])) {
+            $ranked = $this->byGems($ranked, (array) $theme['gems']);
+        }
+
+        return $ranked;
+    }
+
+    /** @var array<int, int> оценки «не на виду» последнего ранжирования, по ним `pickNamed` отсекает слабые строки */
+    private array $gemScores = [];
+
+    /**
+     * Порядок «не на виду», см. `gems` у рубрики: без слагаемых, которые тянут вверх и так известное,
+     * и с прибавкой за необычный формат.
+     *
+     * @param  list<object>  $ranked
+     * @param  array<string, mixed>  $gems
+     * @return list<object>
+     */
+    private function byGems(array $ranked, array $gems): array
+    {
+        $words = (array) ($gems['format_words'] ?? []);
+        foreach ($ranked as $row) {
+            $text = mb_strtolower((string) $row->title.' '.mb_substr((string) $row->description, 0, 300));
+            $text = str_replace('ё', 'е', $text);
+            $unusual = array_filter($words, fn ($w) => mb_strpos($text, (string) $w) !== false) !== [];
+            $dear = isset($gems['dear_from']) && (int) ($row->price_min ?? 0) >= (int) $gems['dear_from'];
+            // выставка без часа идёт неделями, прибавка за бесплатное — разовому событию
+            $free = in_array($row->price_status ?? null, ['free', 'donation'], true) && ($row->time_precision ?? null) !== 'date';
+            $this->gemScores[(int) $row->id] = $this->scorer->interestWithout($row, (array) ($gems['skip'] ?? []))
+                + ($unusual ? (int) ($gems['format_bonus'] ?? 0) : 0)
+                + ($dear ? (int) ($gems['dear'] ?? 0) : 0)
+                + ($free ? (int) ($gems['free'] ?? 0) : 0);
+        }
+        // при равенстве остаётся прежний порядок: usort устойчив
+        usort($ranked, fn ($a, $b) => $this->gemScores[(int) $b->id] <=> $this->gemScores[(int) $a->id]);
 
         return $ranked;
     }
@@ -1448,7 +1494,7 @@ final class BroadcastDigestComposer
         $kind = $this->scorer->explain($row)['kind'];
         $sameKind = 0;
         foreach ($named as $other) {
-            if (self::samePlace($other, $row)) {
+            if (self::samePlace($other, $row) || self::twinCards($other, $row)) {
                 return false;
             }
             // «одна строка на день» — для недельной подборки; на двух днях выходных это потолок в две строки
@@ -1524,6 +1570,25 @@ final class BroadcastDigestComposer
         }
 
         return array_values($named);
+    }
+
+    /** Слова названий, которые есть у разных событий одного часа: по ним двойника не узнать. */
+    private const TWIN_COMMON = ['концерт', 'концерта', 'спектакль', 'спектакля', 'ансамбль', 'ансамбля', 'группа', 'группы',
+        'вечер', 'вечеринка', 'фестиваль', 'премьера', 'воронеж', 'воронеже', 'сольный', 'большой', 'большая', 'выставка',
+        'театра', 'оркестр', 'оркестра', 'оркестром', 'симфонический', 'симфоническим', 'музыка', 'музыки', 'трибьют'];
+
+    /** Одно событие двумя карточками с разными площадками: тот же час и общее редкое слово в названии. */
+    private static function twinCards(object $a, object $b): bool
+    {
+        if ((string) $a->start_time !== (string) $b->start_time) {
+            return false;
+        }
+        $words = fn (object $r) => array_filter(
+            preg_split('/[^\p{L}\p{N}]+/u', str_replace('ё', 'е', mb_strtolower((string) $r->title))) ?: [],
+            fn ($w) => mb_strlen($w) >= 5 && ! in_array($w, self::TWIN_COMMON, true),
+        );
+
+        return array_intersect($words($a), $words($b)) !== [];
     }
 
     /** Одна площадка — одна строка; у события без площадки место — его адрес. */
