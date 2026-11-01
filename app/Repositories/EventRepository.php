@@ -2138,19 +2138,59 @@ class EventRepository
     }
 
     /**
-     * Одно фото из повторных постов приходит с разными адресами. Оставляем первую копию: её уже
-     * поставил выше выбор обложки. Картинка без отпечатка остаётся.
+     * Пары картинок, которые парсер признал одним фото в разной обрезке (`image_twins`).
+     *
+     * @param  list<string>  $urls
+     * @return array<string, true> ключ — md5 обоих адресов подряд, меньший первым
+     */
+    private function imageTwins(array $urls): array
+    {
+        $md5s = array_values(array_unique(array_map('md5', $urls)));
+        if (count($md5s) < 2) {
+            return [];
+        }
+        $out = [];
+        try {
+            foreach (array_chunk($md5s, 1000) as $chunk) {
+                $rows = DB::table('image_twins')
+                    ->where('same', true)
+                    ->whereIn('url_md5_a', $chunk)
+                    ->whereIn('url_md5_b', $md5s)
+                    ->get(['url_md5_a', 'url_md5_b']);
+                foreach ($rows as $r) {
+                    $out[$r->url_md5_a.$r->url_md5_b] = true;
+                }
+            }
+        } catch (QueryException) {
+            // таблицы ещё нет, пока выкат не дошёл до миграции
+            return [];
+        }
+
+        return $out;
+    }
+
+    /**
+     * Одно фото из повторных постов приходит с разными адресами, а от разных касс — в разной обрезке
+     * (`$twins`). Оставляем первую копию: её уже поставил выше выбор обложки. Картинка без отпечатка остаётся.
      *
      * @param  list<string>  $images
      * @param  array<string, list<int>>  $prints
+     * @param  array<string, true>  $twins  см. `imageTwins`
      * @return list<string>
      */
-    private static function withoutRepeatedPictures(array $images, array $prints): array
+    private static function withoutRepeatedPictures(array $images, array $prints, array $twins = []): array
     {
         $kept = [];
+        $keptMd5 = [];
         $seen = [];
         foreach ($images as $url) {
-            $print = $prints[md5($url)] ?? null;
+            $md5 = md5($url);
+            foreach ($keptMd5 as $other) {
+                if (isset($twins[min($md5, $other).max($md5, $other)])) {
+                    continue 2;
+                }
+            }
+            $print = $prints[$md5] ?? null;
             if ($print !== null) {
                 foreach ($seen as $other) {
                     if (self::pictureDiff($print, $other) <= self::SAME_PICTURE_DIFF) {
@@ -2160,6 +2200,7 @@ class EventRepository
                 $seen[] = $print;
             }
             $kept[] = $url;
+            $keptMd5[] = $md5;
         }
 
         return $kept;
@@ -2285,9 +2326,11 @@ class EventRepository
                 return $uniq;
             });
 
-        $prints = $this->imagePrints($esRows->flatten()->merge($cpRows->flatten())->merge($evRows->flatten())->all());
+        $allUrls = $esRows->flatten()->merge($cpRows->flatten())->merge($evRows->flatten())->all();
+        $prints = $this->imagePrints($allUrls);
+        $twins = $this->imageTwins($allUrls);
 
-        $events->each(function (Event $e) use ($esRows, $cpRows, $evRows, $prints, $shows) {
+        $events->each(function (Event $e) use ($esRows, $cpRows, $evRows, $prints, $shows, $twins) {
             $images = $esRows->get($e->id, []);
             if (empty($images) && $e->original_post_id) {
                 $images = $cpRows->get($e->original_post_id, []);
@@ -2306,7 +2349,7 @@ class EventRepository
             // Порядок обложки задаёт `App\Support\CoverPicker` — там же почему.
             if (count($images) > 1) {
                 $images = \App\Support\CoverPicker::pickBest($images);
-                $images = self::withoutRepeatedPictures($images, $prints['gray']);
+                $images = self::withoutRepeatedPictures($images, $prints['gray'], $twins);
             }
 
             $e->setAttribute('images', $images);

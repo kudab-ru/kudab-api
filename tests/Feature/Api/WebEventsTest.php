@@ -1999,6 +1999,25 @@ class WebEventsTest extends TestCase
             ->assertJsonPath('data.images', [$poster, $scene]);
     }
 
+    public function test_event_shows_one_copy_of_a_photo_cropped_by_two_box_offices(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Касса');
+        $event = $this->createEvent($vrn->id, $community->id, 'AKSTAR', now()->addDays(3));
+        $poster = 'https://cdn.kassir.ru/vrn/poster/akstar.jpg';
+        $wide = 'https://ponominalu.ru/media/i/536x360/akstar.jpg';
+        $portrait = 'https://avatars.mds.yandex.net/get-afishanew/1/akstar/orig';
+        $this->addPostImages($event, ['kassir' => [$poster], 'ponominalu' => [$wide], 'yandex' => [$portrait]]);
+        [$a, $b] = [min(md5($poster), md5($wide)), max(md5($poster), md5($wide))];
+        DB::table('image_twins')->insert(['url_md5_a' => $a, 'url_md5_b' => $b, 'same' => true, 'checked_at' => now()]);
+
+        $images = $this->getJson("/api/web/events/{$event->id}")->assertOk()->json('data.images');
+
+        $this->assertCount(2, $images);
+        $this->assertContains($portrait, $images);
+        $this->assertFalse(in_array($poster, $images, true) && in_array($wide, $images, true));
+    }
+
     public function test_picture_shared_by_other_events_of_the_post_is_not_the_event_poster(): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
