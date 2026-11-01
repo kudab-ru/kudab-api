@@ -818,8 +818,8 @@ class BroadcastDigestComposerTest extends TestCase
     public static function introLead(): array
     {
         return [
-            'главное событие первым и без фразы' => [true, 'second',
-                ['Подводка про второе.', 'second', 'first: Фраза первого.', 'third: Фраза третьего.'], 2],
+            'подводка про событие — его фраза на его месте' => [true, 'second',
+                ['first: Фраза первого.', 'second: Подводка про второе.', 'third: Фраза третьего.'], 3],
             'подводка выключена — её текст фразой события' => [false, 'second',
                 ['first: Фраза первого.', 'second: Подводка про второе.', 'third: Фраза третьего.'], 3],
             'старая мета без intro_event' => [true, null,
@@ -869,7 +869,10 @@ class BroadcastDigestComposerTest extends TestCase
         $bare = [];
         foreach ($chunks as $chunk) {
             if (! preg_match('~/events/(\d+)~', $chunk, $m)) {
-                $seen[] = $chunk;
+                // заголовок дня — вёрстка, а не текст подборки
+                if (! preg_match('~^<b>[^<]+</b>$~u', $chunk)) {
+                    $seen[] = $chunk;
+                }
 
                 continue;
             }

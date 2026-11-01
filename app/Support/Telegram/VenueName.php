@@ -30,6 +30,9 @@ final class VenueName
             }
         }
 
-        return $name;
+        // из разметки сайтов имя приходит с экранированными кавычками: Бар \"Цензура\"
+        $name = str_replace('\\"', '"', $name);
+
+        return (string) preg_replace('/"([^"]+)"/u', '«$1»', $name);
     }
 }

@@ -400,6 +400,25 @@ class BroadcastDigestRubricsTest extends TestCase
      * то есть место под целое шестое событие в посте из пяти.
      */
     #[Test]
+    public function the_night_guide_takes_what_goes_on_in_the_evening(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-30 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('povod-noch-iskusstv');
+
+        $lecture = $this->event('Ночь искусств: лекция о графике', 4, free: true, hour: 18);
+        $concert = $this->event('Концерт в Ночь искусств', 4, free: true, hour: 20);
+        $museum = $this->event('Ночь искусств в краеведческом музее', 4, free: true, hour: 15);
+        DB::table('events')->where('id', $museum)->update(['end_time' => Carbon::parse('2026-11-03 23:00', 'Europe/Moscow')->utc()]);
+        $morning = $this->event('Ночь искусств: уличная читка', 4, free: true, hour: 10);
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::parse('2026-10-30 12:00', 'Europe/Moscow'), null, 'povod-noch-iskusstv');
+
+        $this->assertNotNull($out);
+        $this->assertEqualsCanonicalizing([$lecture, $concert, $museum], $out['event_ids']);
+        $this->assertNotContains($morning, $out['event_ids']);
+    }
+
+    #[Test]
     public function a_weekday_without_a_date_when_days_do_not_repeat(): void
     {
         $this->onlyRubric('besplatno');
@@ -410,6 +429,23 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertMatchesRegularExpression('/\b(пн|вт|ср|чт|пт|сб|вс) \d{2}:\d{2}/u', $caption,
             'день недели и время без числа');
         $this->assertStringNotContainsString('сентября,', $caption, 'числа в строке фактов нет');
+    }
+
+    #[Test]
+    public function a_weekend_goes_under_day_headings_with_the_hour_in_the_line(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow')); // пятница
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 1, 2, 2] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+
+        $caption = $this->caption(Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertMatchesRegularExpression('/<b>Суббота, 19 сентября<\/b>\n\n.+<b>Воскресенье, 20 сентября<\/b>\n\n/us', $caption);
+        $this->assertMatchesRegularExpression('/<\/a><\/b>\n\d{2}:\d{2} · /u', $caption, 'под заголовком дня в строке только час');
     }
 
     /**
@@ -550,14 +586,14 @@ class BroadcastDigestRubricsTest extends TestCase
      * первым же нажатием.
      */
     #[Test]
-    public function the_header_counts_and_the_footer_names_the_rest(): void
+    public function the_footer_names_the_rest(): void
     {
         $this->onlyRubric('besplatno');
         $this->fill('Бесплатное', free: true);
 
         $caption = $this->caption();
 
-        $this->assertStringContainsString('6 событий', $caption, 'в шапке весь счёт окна');
+        $this->assertStringNotContainsString('событ', explode("\n", $caption)[0], 'счёт живёт в подвале, не в шапке');
         $this->assertMatchesRegularExpression('/Остальные [1-9]\d* — /u', $caption, 'в подвале остаток');
         $this->assertStringContainsString('вся бесплатная афиша', $caption);
     }
@@ -741,8 +777,8 @@ class BroadcastDigestRubricsTest extends TestCase
         // Выход через неделю: считать надо ДАЛЬНИЕ выходные, не ближние.
         $caption = $this->caption(Carbon::parse('2026-09-25 14:00', 'Europe/Moscow'));
 
-        $this->assertStringContainsString('8 событий', $caption, 'счёт по окну выхода');
-        $this->assertStringNotContainsString('5 событий', $caption);
+        preg_match('/Остальные (\d+) — /u', $caption, $rest);
+        $this->assertSame(8, (int) ($rest[1] ?? 0) + preg_match_all('~/events/\d+~', $caption), 'счёт по окну выхода');
     }
 
     /** У рубрики с `when` ссылка короткая: даты лента разворачивает сама, той же формулой. */
@@ -882,7 +918,7 @@ class BroadcastDigestRubricsTest extends TestCase
      * идёт подводка.
      */
     #[Test]
-    public function a_counted_header_is_one_sentence_with_the_city(): void
+    public function the_weekend_header_names_the_city_and_the_dates(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow')); // пятница
         $this->onlyRubric('na-vyhodnyh');
@@ -894,9 +930,7 @@ class BroadcastDigestRubricsTest extends TestCase
 
         $head = explode("\n", $this->caption(Carbon::parse('2026-09-18 14:00', 'Europe/Moscow')))[0];
 
-        $this->assertStringContainsString('в Воронеже', $head, 'город в предложном падеже');
-        $this->assertMatchesRegularExpression('/\d+ событи\w*\.<\/b>/u', $head, 'счёт внутри предложения');
-        $this->assertStringNotContainsString('·', $head, 'срока в такой шапке нет');
+        $this->assertStringContainsString('<b>На выходных в Воронеже</b> · 19–20 сентября', $head);
     }
 
     /** У рубрики, чей заголовок кончается временем, города в шапке нет. */
@@ -908,7 +942,7 @@ class BroadcastDigestRubricsTest extends TestCase
 
         $head = explode("\n", $this->caption())[0];
 
-        $this->assertStringContainsString('Бесплатно в эти дни — ', $head);
+        $this->assertStringContainsString('<b>Бесплатно в эти дни</b>', $head);
         $this->assertStringNotContainsString('в Воронеже', $head, 'два «в» подряд не пишем');
     }
 

@@ -11,6 +11,7 @@ use App\Services\Occasions\OccasionCalendar;
 use App\Support\CalmCaps;
 use App\Support\CityCase;
 use App\Support\EventStart;
+use App\Support\Telegram\DigestTitle;
 use App\Support\Telegram\KindEmoji;
 use App\Support\Telegram\VenueName;
 use App\Support\WeekendWindow;
@@ -55,6 +56,8 @@ final class BroadcastDigestComposer
 
     /** @var array<int, string> */
     private const WEEKDAYS = [1 => 'пн', 2 => 'вт', 3 => 'ср', 4 => 'чт', 5 => 'пт', 6 => 'сб', 7 => 'вс'];
+
+    private const DAY_NAMES = [1 => 'Понедельник', 2 => 'Вторник', 3 => 'Среда', 4 => 'Четверг', 5 => 'Пятница', 6 => 'Суббота', 7 => 'Воскресенье'];
 
     /**
      * Ниже этого фразу заказывать бессмысленно: в 40 знаков помещается
@@ -183,6 +186,10 @@ final class BroadcastDigestComposer
             return null;
         }
 
+        // по дням и часам, кроме «Что смотрят»: там порядок — это и есть рейтинг
+        if (($best['theme']['pick'] ?? '') !== 'views') {
+            usort($best['named'], fn ($a, $b) => self::dayOrder($a) <=> self::dayOrder($b));
+        }
         $caption = $this->buildCaption($broadcast, $best, $publishAt, $forItem);
 
         return [
@@ -625,6 +632,7 @@ final class BroadcastDigestComposer
         'interest' => 'основная тема события не из этой рубрики',
         'price' => 'не подходит рубрике по цене',
         'hour' => 'начинается раньше часа рубрики',
+        'evening' => 'идёт днём, а гид про вечер',
         'words' => 'в названии и начале описания нет слов праздника',
         'started' => 'началось до выхода подборки',
         'sold_out' => 'билеты распроданы',
@@ -902,6 +910,10 @@ final class BroadcastDigestComposer
                 "EXTRACT(HOUR FROM e.start_time AT TIME ZONE 'Europe/Moscow') >= ?",
                 [(int) ($theme['hour_from'] ?? 20)],
             ) : null,
+            // гид по ночи — про вечер: утренняя читка в 10:00 туда не идёт, музей до 23:00 идёт
+            'evening' => isset($theme['evening_from']) ? fn ($q) => $q->where('e.time_precision', '<>', 'date')
+                ->where(fn ($w) => $w->whereRaw("EXTRACT(HOUR FROM e.start_time AT TIME ZONE 'Europe/Moscow') >= ?", [(int) $theme['evening_from']])
+                    ->orWhereRaw("e.end_time > (date_trunc('day', e.start_time AT TIME ZONE 'Europe/Moscow') + make_interval(hours => ?)) AT TIME ZONE 'Europe/Moscow'", [(int) $theme['evening_from']])) : null,
             // повод по словам в названии или в начале описания: «Кошмар на улице Кирова» называет Хэллоуин только там
             // у «всего подряд» слов нет, но темы и исключения повода действуют: школьные каникулы — детское
             'words' => $pick === 'words' || $pick === 'all' ? fn ($q) => OccasionCalendar::applyWords($q, $theme, 'e') : null,
@@ -1596,46 +1608,25 @@ final class BroadcastDigestComposer
         $feed = $this->feedSpec((array) $theme, $broadcast, $from, $to);
         $total = ($theme['count'] ?? true) ? $this->feedTotal($feed['count'] ?? null) : null;
 
-        // Со счётом шапка — одно предложение, срок из неё уходит: «на выходных»
-        // уже сказало когда. Без счёта — как было, с диапазоном дат.
-        // Город в шапке ТОЛЬКО в форме со счётом. Прежнее решение «город не
-        // пишем — канал городской» верно для шапки-заголовка: там он занимал
-        // место, ничего не сообщая. В предложении «На выходных в Воронеже 136
-        // событий» он держит фразу: без него выходит «На выходных 136
-        // событий» — верно, но звучит как строка отчёта.
+        // Счёт живёт в подвале («Остальные 329 — вся афиша на выходные»), в шапке только что и когда.
+        // Город — по решению рубрики: «Бесплатно в эти дни в Воронеже» спотыкается о два «в» подряд.
         $city = CityCase::prepositional($broadcast->chat?->city?->slug);
+        $where = ! empty($theme['city_in_head']) && $city !== null ? ' в '.$city : '';
+        // у повода город в самом заголовке: «Хэллоуин в Воронеже: где отмечать»
+        $headline = trim((string) preg_replace('/\s+(?=[:,.]|$)/u', '', str_replace('{city}', $city !== null ? 'в '.$city : '', $headline)));
+        $head = trim(($theme['emoji'] ?? '').' <b>'.$this->escape($headline.$where).'</b>')
+            .(($theme['range_in_head'] ?? true) ? ' · '.$this->escape($range) : '');
 
-        if ($total !== null && $total > 0) {
-            // Город по решению рубрики: «Бесплатно в эти дни в Воронеже»
-            // спотыкается о два «в» подряд.
-            $where = ! empty($theme['city_in_head']) && $city !== null ? ' в '.$city : '';
-
-            // Тире: без него число прилипает — «Бесплатно в эти дни 26 событий».
-            $head = trim(($theme['emoji'] ?? '').' <b>'
-                .$this->escape($headline.$where.' — ')
-                .$this->escape($this->plural($total, $forms[0] ?? 'событие', $forms[1] ?? null, $forms[2] ?? null))
-                .'.</b>');
-        } else {
-            // у повода город в самом заголовке: «Хэллоуин в Воронеже: где отмечать»
-            $headline = trim((string) preg_replace('/\s+(?=[:,.]|$)/u', '', str_replace('{city}', $city !== null ? 'в '.$city : '', $headline)));
-            $head = trim(($theme['emoji'] ?? '').' <b>'.$this->escape($headline).'</b>')
-                .(($theme['range_in_head'] ?? true) ? ' · '.$this->escape($range) : '');
-        }
-
-        // Подводку берём, только если она написана под этот состав: подпись собирают до того,
-        // как из меты уберут текст под прежний состав (см. `withoutStaleDigestText`).
+        // Подводка про одно событие стоит фразой этого события: над списком она читается как
+        // оторванный абзац. Над списком — только подводка про всю подборку (`intro_event` пуст).
         $namedIds = array_map(fn ($r) => (int) $r->id, $picked['named']);
         $written = $item?->digestIntroFor($namedIds);
-        $intro = config('broadcast_digest.intro', true) && ($theme['intro'] ?? true) ? $written : null;
-
-        // Подводка — фраза своего события. Показана — событие стоит сразу под ней без строки,
-        // выключена — её текст печатается фразой события на его месте.
         $leadId = $written !== null ? $item?->digestIntroEvent() : null;
-        $leadOnTop = $intro !== null && $leadId !== null;
+        $intro = $written !== null && $leadId === null
+            && config('broadcast_digest.intro', true) && ($theme['intro'] ?? true) ? $written : null;
+
+        // порядок задают автосборка (`compose`) и ручная перестановка в админке
         $named = $picked['named'];
-        if ($leadOnTop) {
-            usort($named, fn ($a, $b) => ((int) $b->id === $leadId) <=> ((int) $a->id === $leadId));
-        }
         $this->postOrder = array_map(fn ($r) => (int) $r->id, $named);
 
         // Форма даты решается ОДИН РАЗ на весь пост: вперемешку «сб 13:30» и
@@ -1651,28 +1642,55 @@ final class BroadcastDigestComposer
         $emoji = ($theme['pick'] ?? 'interest') === 'interest'
             ? []
             : $this->emojiFor($picked['named'], $item, (string) ($theme['emoji'] ?? ''));
+        // значок у части строк выглядит как недосмотр: тогда без значков вовсе
+        if (count(array_filter($emoji)) < count($named)) {
+            $emoji = [];
+        }
 
-        $compact = ($theme['line'] ?? '') === 'compact';
+        // у гидов по поводам фраза только написанная моделью, без выжимки из описания
+        $writtenOnly = ($theme['line'] ?? '') === 'compact';
+
+        // Заголовки дней, тогда в строке хватает часа. Не ставим, если у события несколько сеансов («сб и вс»),
+        // дни идут вразнобой после ручной перестановки или каждый день из одной строки.
+        $days = array_map(fn ($r) => self::dayOf($r), $named);
+        $sortedDays = $days;
+        sort($sortedDays);
+        $perDay = array_count_values($days);
+        $byDay = $shortDates
+            && (count($perDay) === 1 || max($perDay) > 1)
+            && $days === $sortedDays
+            && array_filter($named, fn ($r) => count($sessions[(int) $r->id] ?? []) > 1) === [];
+
+        $cityName = (string) ($broadcast->chat?->city?->name ?? '');
+        $occasionWords = isset($theme['occasion']) ? self::occasionWords((array) $theme) : [];
 
         $lines = [];
         $rich = [];
+        $dayHeads = [];
+        $prevDay = null;
         foreach ($named as $row) {
             $hook = match (true) {
-                ($theme['hooks'] ?? true) === false, $leadOnTop && (int) $row->id === $leadId => '',
-                (int) $row->id !== $leadId => $this->hook($row, $item, null, $compact),
-                default => $this->hook($row, $item, $written, $compact),
+                ($theme['hooks'] ?? true) === false => '',
+                (int) $row->id !== $leadId => $this->hook($row, $item, null, $writtenOnly),
+                default => $this->hook($row, $item, $written, $writtenOnly),
             };
 
-            if ($compact) {
-                $lines[] = $this->compactLine($row, $shortDates, $sessions[(int) $row->id] ?? [], $emoji[(int) $row->id] ?? '', $item, (string) ($broadcast->chat?->city?->name ?? ''), $city);
-                $rich[] = $hook === '' ? end($lines) : end($lines).' '.$this->escape($hook);
+            $day = self::dayOf($row);
+            $dayHeads[] = $byDay && $day !== $prevDay ? '<b>'.$this->escape(self::dayHeading($row)).'</b>' : null;
+            $prevDay = $day;
 
-                continue;
+            $venue = $this->venueLabel($row);
+            if ($venue === '' && trim((string) ($row->address ?? '')) !== '') {
+                $venue = EventCaptionBuilder::placeFromAddress((string) $row->address, $cityName);
             }
-
+            // от названия гида остался один повод («Ночь искусств») — называем место, в строке его уже не повторяем
+            $title = DigestTitle::clean((string) $row->title, $venue, $cityName, $city, $occasionWords);
+            if ($title === '') {
+                $title = $venue !== '' ? $venue : (string) $row->title;
+            }
             $meta = array_values(array_filter([
-                $this->whenLabel($row, $shortDates, $sessions[(int) $row->id] ?? []),
-                $this->venueLabel($row),
+                $byDay ? self::timeLabel($row) : $this->whenLabel($row, $shortDates, $sessions[(int) $row->id] ?? []),
+                $title === $venue ? '' : $venue,
                 $this->priceLabel($row),
             ]));
 
@@ -1681,7 +1699,7 @@ final class BroadcastDigestComposer
             // Пустой значок не оставляет пробела: строка начиналась бы с отступа.
             $mark = $emoji[(int) $row->id] ?? '';
             $titleLink = trim($mark.' <b>'
-                .$this->link($this->eventUrl((int) $row->id, $item?->id), (string) $row->title).'</b>');
+                .$this->link($this->eventUrl((int) $row->id, $item?->id), $this->typography(CalmCaps::title($title))).'</b>');
             // Без курсива: пять наклонных строк подряд читаются как сноски.
             $facts = $this->escape(implode(' · ', $meta));
 
@@ -1698,7 +1716,9 @@ final class BroadcastDigestComposer
         // афишу. Обещать «ещё 36 на этой неделе» и привести на страницу, где
         // события другие, — обмануть в мелочи, которую читатель проверит первым
         // же нажатием.
-        $label = (string) ($theme['footer'] ?? 'Вся афиша '.($forms[2] ?? mb_strtolower((string) $theme['title'])));
+        $label = (string) ($theme['footer']
+            ?? (isset($theme['feed_label']) ? mb_strtoupper(mb_substr((string) $theme['feed_label'], 0, 1)).mb_substr((string) $theme['feed_label'], 1) : null)
+            ?? 'Вся афиша '.($forms[2] ?? mb_strtolower((string) $theme['title'])));
         $link = $this->link(
             $this->landingUrl($broadcast, (string) $theme['slug'], $item?->id, $theme, $feed['link'] ?? null),
             $label,
@@ -1721,6 +1741,11 @@ final class BroadcastDigestComposer
         };
 
         $top = array_values(array_filter([$head, $intro !== null ? $this->escape($intro) : null]));
+        $withDays = fn (array $blocks) => array_map(
+            fn (int $i, string $b) => $dayHeads[$i] !== null ? $dayHeads[$i]."\n\n".$b : $b,
+            array_keys($blocks),
+            $blocks,
+        );
 
         // ИЗЮМ СНИМАЕТСЯ ПО ОДНОЙ СТРОКЕ С КОНЦА, а не весь разом.
         //
@@ -1743,10 +1768,8 @@ final class BroadcastDigestComposer
         // при пяти всего 91, а модель пишет в среднем 101. То есть на пяти
         // строках фразы начали бы сниматься с конца просто потому, что порог
         // был один на всех.
-        // короткие строки идут сплошным списком: значок в начале и так их разделяет
-        $list = fn (array $rows) => $compact ? [implode("\n", $rows)] : $rows;
-        $bare = implode("\n\n", array_merge($top, $list($lines), [$footer]));
-        $phrases = max(1, count($named) - ($leadOnTop ? 1 : 0));
+        $bare = implode("\n\n", array_merge($top, $withDays($lines), [$footer]));
+        $phrases = max(1, count($named));
         $this->hookBudget = max(
             self::HOOK_BUDGET_MIN,
             (int) floor(($soft - \App\Support\Telegram\CaptionLength::visible($bare)) / $phrases),
@@ -1761,51 +1784,50 @@ final class BroadcastDigestComposer
                 array_slice($rich, 0, $keep),
                 array_slice($lines, $keep),
             );
-            $caption = implode("\n\n", array_merge($top, $list($body), [$footer]));
+            $caption = implode("\n\n", array_merge($top, $withDays($body), [$footer]));
 
             if ($keep === 0 || \App\Support\Telegram\CaptionLength::visible($caption) <= $soft) {
                 return $caption;
             }
         }
 
-        return implode("\n\n", array_merge($top, $list($lines), [$footer]));
+        return implode("\n\n", array_merge($top, $withDays($lines), [$footer]));
+    }
+
+    /** «Суббота, 31 октября» */
+    private static function dayHeading(object $row): string
+    {
+        $at = Carbon::parse($row->start_time)->setTimezone(self::TZ);
+
+        return self::DAY_NAMES[(int) $at->isoWeekday()].', '.$at->day.' '.self::MONTHS[$at->month];
+    }
+
+    /** Час под заголовком дня; у события без часа строка начинается с места. */
+    private static function timeLabel(object $row): string
+    {
+        return (string) ($row->time_precision ?? 'datetime') === 'date'
+            ? ''
+            : Carbon::parse($row->start_time)->setTimezone(self::TZ)->format('H:i');
     }
 
     /**
-     * Строка в одну фразу: «🎲 Название — сб 31 октября, 18:00 · 1500 ₽.» Площадку, которая уже
-     * есть в названии, второй раз не пишем.
+     * Имя повода, которое в названии события ничего не добавляет: «Ночь искусств» в гиде «Ночь искусств».
+     * Из слов отбора берём только сочетания с началом имени повода: «шабаш» и «тыкв» — это названия.
      *
-     * @param  list<Carbon>  $times
+     * @return list<string>
      */
-    private function compactLine(object $row, bool $shortDates, array $times, string $mark, ?TelegramChatBroadcastItem $item, string $city, ?string $cityIn = null): string
+    private static function occasionWords(array $theme): array
     {
-        $venue = $this->venueLabel($row);
-        if ($venue === '' && trim((string) ($row->address ?? '')) !== '') {
-            $venue = EventCaptionBuilder::placeFromAddress((string) $row->address, $city);
-        }
-        // имя площадки из группы ВК «Настольные игры | ПараDice | Воронеж»: в названии события бывает вторая часть
-        $parts = array_filter(array_merge([$venue], preg_split('/\s+[|\/]\s+/u', (string) ($row->venue_name ?? '')) ?: []),
-            fn ($p) => mb_strlen(trim((string) $p)) >= 3 && mb_strtolower(trim((string) $p)) !== mb_strtolower(trim($city)));
-        foreach ($parts as $part) {
-            if (mb_stripos((string) $row->title, trim((string) $part)) !== false) {
-                $venue = '';
-                break;
+        $name = mb_strtolower((string) ($theme['title'] ?? ''));
+        $out = $name !== '' ? [$name] : [];
+        foreach ((array) ($theme['words'] ?? []) as $w) {
+            $w = mb_strtolower((string) $w);
+            if (str_contains($w, ' ') && mb_substr($w, 0, 3) === mb_substr($name, 0, 3)) {
+                $out[] = $w;
             }
         }
-        // посреди строки вид заведения со строчной: «рестобар «Литера»», «рок-бар The Last of Vavilone»
-        $venue = (string) preg_replace_callback('/^[А-ЯЁ][а-яё]+(?:-[а-яё]+)?(?=\s+(?:«|\p{Latin}))/u', fn ($m) => mb_strtolower($m[0]), $venue);
 
-        $facts = implode(' · ', array_filter([
-            implode(', ', array_filter([$this->whenLabel($row, $shortDates, $times), $venue])),
-            $this->priceLabel($row),
-        ]));
-
-        // «Готический Halloween в Воронеже» под заголовком «Хэллоуин в Воронеже»: город уже назван
-        $title = $cityIn === null ? (string) $row->title
-            : (string) preg_replace('/\s+в\s+'.preg_quote($cityIn, '/').'$/u', '', (string) $row->title);
-
-        return trim($mark.' '.$this->link($this->eventUrl((int) $row->id, $item?->id), $this->typography(CalmCaps::title($title))))
-            .' — '.$this->escape($facts).'.';
+        return array_values(array_unique($out));
     }
 
     /**
