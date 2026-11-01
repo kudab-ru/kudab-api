@@ -720,6 +720,48 @@ class BroadcastDigestRubricsTest extends TestCase
     }
 
     #[Test]
+    public function the_weekend_rubric_puts_an_unusual_format_above_a_big_stage(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 2, 2, 2] as $i => $day) {
+            $big = $this->event('Спектакль на большой сцене '.($i + 1), $day, free: false, priceMin: 2500, hour: 12 + $i, description: $long);
+            DB::table('venues')->where('id', DB::table('events')->where('id', $big)->value('venue_id'))->update(['kind' => 'Сцены']);
+        }
+        $walk = $this->event('Аудиоспектакль-прогулка по старому городу', 1, free: false, priceMin: 1000, hour: 17, description: $long);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertContains($walk, $out['event_ids']);
+    }
+
+    #[Test]
+    public function the_weekend_rubric_skips_a_weak_line_added_only_for_variety(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        $this->event('Аудиоспектакль-прогулка по старому городу', 1, free: false, priceMin: 1000, hour: 12, description: $long);
+        foreach ([1, 2, 2, 2] as $i => $day) {
+            $this->event('Спектакль '.($i + 1), $day, free: false, priceMin: 700, hour: 14 + $i, description: $long);
+        }
+        $weak = $this->event('Утренник', 1, free: false, priceMin: 300, hour: 10, description: $long);
+        $kids = DB::table('interests')->insertGetId(['name' => 'Детям', 'slug' => 'kids', 'created_at' => now(), 'updated_at' => now()]);
+        DB::table('event_interest')->where('event_id', $weak)->update(['interest_id' => $kids]);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertNotContains($weak, $out['event_ids']);
+    }
+
+    #[Test]
     public function a_weekend_event_without_a_venue_card_is_named_by_its_address(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));

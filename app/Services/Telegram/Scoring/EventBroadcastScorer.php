@@ -164,6 +164,16 @@ class EventBroadcastScorer
     }
 
     /**
+     * Интерес без части слагаемых: `scale`, `rating`, `venue` и другие ключи `parts`.
+     *
+     * @param  list<string>  $skip
+     */
+    public function interestWithout(object $e, array $skip): int
+    {
+        return array_sum(array_diff_key($this->parts($e, false), array_flip($skip)));
+    }
+
+    /**
      * Что сказать человеку о событии.
      *
      * @return array{kind: string|null, repeats: int, past: int, ticketed: bool, rating: int, multi_day: bool, run_until: string|null, access: string}

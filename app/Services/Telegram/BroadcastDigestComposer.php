@@ -1363,18 +1363,22 @@ final class BroadcastDigestComposer
             }
         }
 
+        // ради разнообразия вида и дешёвой строки не берём то, что намного слабее лучшего
+        $floor = isset($theme['gems']['floor'], $ranked[0]) ? $this->gemScores[(int) $ranked[0]->id] - (int) $theme['gems']['floor'] : null;
+        $strong = fn (object $row) => $floor === null || $this->gemScores[(int) $row->id] >= $floor;
+
         $this->kindCaps = array_map('intval', (array) ($theme['kind_caps'] ?? []));
         // сначала строк одного вида не больше `kind_cap`, потом без этого предела, если мест осталось больше
         foreach ([max(1, (int) ($theme['kind_cap'] ?? 1)), 0] as $kindCap) {
             foreach ($ranked as $row) {
-                if ($this->fitsNamed($row, $named, $min, $max, $onePerDay, $kindCap)) {
+                if ($strong($row) && $this->fitsNamed($row, $named, $min, $max, $onePerDay, $kindCap)) {
                     $named[(int) $row->id] = $row;
                 }
             }
         }
 
         $named = ($theme['cheap_line'] ?? true)
-            ? $this->withCheapLine($named, $ranked, $min, $max, $onePerDay, $bothDays)
+            ? $this->withCheapLine($named, array_values(array_filter($ranked, fn ($r) => isset($named[(int) $r->id]) || $strong($r))), $min, $max, $onePerDay, $bothDays)
             : array_values($named);
 
         // по датам: подборка отвечает на вопрос «что впереди», и читать её удобно по порядку недели;
@@ -1412,6 +1416,37 @@ final class BroadcastDigestComposer
         if (isset($theme['occasion'])) {
             $ranked = $this->byOccasion($ranked, (array) ($theme['words'] ?? []));
         }
+        $this->gemScores = [];
+        if (isset($theme['gems'])) {
+            $ranked = $this->byGems($ranked, (array) $theme['gems']);
+        }
+
+        return $ranked;
+    }
+
+    /** @var array<int, int> оценки «не на виду» последнего ранжирования, по ним `pickNamed` отсекает слабые строки */
+    private array $gemScores = [];
+
+    /**
+     * Порядок «не на виду», см. `gems` у рубрики: без слагаемых, которые тянут вверх и так известное,
+     * и с прибавкой за необычный формат.
+     *
+     * @param  list<object>  $ranked
+     * @param  array<string, mixed>  $gems
+     * @return list<object>
+     */
+    private function byGems(array $ranked, array $gems): array
+    {
+        $words = (array) ($gems['format_words'] ?? []);
+        foreach ($ranked as $row) {
+            $text = mb_strtolower((string) $row->title.' '.mb_substr((string) $row->description, 0, 300));
+            $text = str_replace('ё', 'е', $text);
+            $unusual = array_filter($words, fn ($w) => mb_strpos($text, (string) $w) !== false) !== [];
+            $this->gemScores[(int) $row->id] = $this->scorer->interestWithout($row, (array) ($gems['skip'] ?? []))
+                + ($unusual ? (int) ($gems['format_bonus'] ?? 0) : 0);
+        }
+        // при равенстве остаётся прежний порядок: usort устойчив
+        usort($ranked, fn ($a, $b) => $this->gemScores[(int) $b->id] <=> $this->gemScores[(int) $a->id]);
 
         return $ranked;
     }
