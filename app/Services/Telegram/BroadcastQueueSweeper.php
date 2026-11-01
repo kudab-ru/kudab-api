@@ -74,7 +74,12 @@ final class BroadcastQueueSweeper
                 }
             }
 
-            return ['checked' => $items->count(), 'done' => $done];
+            $digests = $this->waitingDigests($broadcast, $now);
+            foreach ($digests as $item) {
+                $done[] = $this->skip($item, 'подборка осталась без дня, а все её события уже прошли');
+            }
+
+            return ['checked' => $items->count() + $digests->count(), 'done' => $done];
         });
     }
 
@@ -91,6 +96,31 @@ final class BroadcastQueueSweeper
         };
 
         return $reason === null ? null : $this->skip($item, $reason);
+    }
+
+    /**
+     * Подборка без дня: её вытеснили из слота или перенесли. Дня она сама не получит, поэтому снимаем,
+     * когда ни одного её события не осталось впереди. Пустой черновик без состава не трогаем.
+     *
+     * @return \Illuminate\Support\Collection<int, TelegramChatBroadcastItem>
+     */
+    private function waitingDigests(TelegramChatBroadcast $broadcast, Carbon $now): \Illuminate\Support\Collection
+    {
+        return TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->whereNull('posted_at')
+            ->whereNull('claimed_at')
+            ->whereNull('publish_at')
+            ->whereIn('status', [TelegramChatBroadcastItem::STATUS_PENDING, TelegramChatBroadcastItem::STATUS_PLANNED])
+            ->whereExists(fn ($q) => $q->selectRaw('1')->from('telegram.chat_broadcast_item_events as l')
+                ->whereColumn('l.item_id', 'telegram.chat_broadcast_items.id'))
+            ->whereNotExists(fn ($q) => $q->selectRaw('1')->from('telegram.chat_broadcast_item_events as l')
+                ->join('events as e', 'e.id', '=', 'l.event_id')
+                ->whereColumn('l.item_id', 'telegram.chat_broadcast_items.id')
+                ->whereNull('e.deleted_at')
+                ->where('e.start_time', '>', $now))
+            ->get();
     }
 
     private static function offReason(string $status): string

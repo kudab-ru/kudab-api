@@ -829,6 +829,9 @@ return [
     // а подводка старых подборок, написанная про всю подборку, не печатается вовсе.
     'intro' => (bool) env('BROADCAST_DIGEST_INTRO', true),
 
+    // напоминание в день повода ответом на его подборку, см. BroadcastOccasions::remind
+    'occasion_reminders' => (bool) env('BROADCAST_OCCASION_REMINDERS', false),
+
     'caption_soft_limit' => 950,
 
     /*

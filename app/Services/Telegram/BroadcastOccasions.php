@@ -137,6 +137,10 @@ final class BroadcastOccasions
      */
     private function remind(TelegramChatBroadcast $broadcast, array $theme, Carbon $now, bool $dryRun): bool
     {
+        // короткий список без подводки и картинки в канал не годится; вернётся вместе с видом подборок
+        if (! config('broadcast_digest.occasion_reminders', false)) {
+            return false;
+        }
         $lead = trim((string) ($theme['reminder'] ?? ''));
         $msk = $now->copy()->setTimezone(self::TZ);
         $day = BroadcastDigestComposer::occasionDate($theme, $now);

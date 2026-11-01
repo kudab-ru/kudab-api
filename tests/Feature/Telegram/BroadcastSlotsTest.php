@@ -905,6 +905,27 @@ class BroadcastSlotsTest extends TestCase
             'событие впереди — запись ждёт дальше');
     }
 
+    public function test_sweeper_drops_a_dateless_digest_whose_events_are_over(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-20 12:00:00', 'UTC'));
+
+        [$broadcast] = $this->channelWithEvents(0);
+        $city = City::query()->where('slug', 'voronezh')->firstOrFail();
+        $digest = fn (array $events) => tap(TelegramChatBroadcastItem::create([
+            'broadcast_id' => $broadcast->id, 'kind' => TelegramChatBroadcastItem::KIND_DIGEST,
+            'status' => TelegramChatBroadcastItem::STATUS_PENDING, 'caption' => 'Спектакли недели',
+        ]), fn ($item) => DB::table('telegram.chat_broadcast_item_events')->insert(array_map(
+            fn ($e) => ['item_id' => $item->id, 'event_id' => $e->id, 'position' => 1, 'created_at' => now()], $events,
+        )));
+        $over = $digest([$this->eventAt($city->id, 'Прошедший спектакль', Carbon::parse('2026-10-12 16:00', 'UTC'))]);
+        $ahead = $digest([$this->eventAt($city->id, 'Будущий спектакль', Carbon::parse('2026-10-25 16:00', 'UTC'))]);
+
+        $this->artisan('broadcast:sweep-queue')->assertExitCode(0);
+
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $over->fresh()->status);
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_PENDING, $ahead->fresh()->status);
+    }
+
     public function test_sweeper_leaves_scheduled_posts_alone(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-09-15 12:00:00', 'UTC'));

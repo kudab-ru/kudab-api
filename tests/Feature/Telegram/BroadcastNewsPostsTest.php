@@ -171,6 +171,7 @@ class BroadcastNewsPostsTest extends TestCase
     public function on_the_day_a_reminder_answers_the_posted_digest(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-10-31 10:00', 'Europe/Moscow'));
+        config(['broadcast_digest.occasion_reminders' => true]);
         // другие поводы тех же дней ставят свои брони
         $this->onlyRubric('povod-halloween');
         $early = $this->event('Вечеринка в ПараDice', Carbon::parse('2026-10-31 18:00', 'Europe/Moscow'));
