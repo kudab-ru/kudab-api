@@ -143,7 +143,7 @@ class VenuePortraitEnqueueTest extends TestCase
     {
         return [
             'площадка есть — портрет' => [true, TelegramChatBroadcastItem::KIND_VENUE],
-            'площадки нет — событие' => [false, TelegramChatBroadcastItem::KIND_EVENT],
+            'площадки нет — выставка, которая ещё идёт' => [false, TelegramChatBroadcastItem::KIND_EVENT],
         ];
     }
 
@@ -157,8 +157,8 @@ class VenuePortraitEnqueueTest extends TestCase
             $this->createVenue($city->id, 'Зелёный театр', 'zeleny-teatr', 'Открытая летняя сцена.');
         }
         $community = $this->createCommunity($city->id, 'Организатор');
-        $lecture = $this->createEvent($city->id, $community->id, 'Открытая лекция', Carbon::parse('2026-09-16 18:00', 'Europe/Moscow')->utc());
-        $lecture->forceFill(['price_status' => 'free'])->save();
+        $exhibition = $this->createEvent($city->id, $community->id, 'Выставка «Палех»', Carbon::parse('2026-09-10 10:00', 'Europe/Moscow')->utc());
+        $exhibition->forceFill(['price_status' => 'free', 'end_time' => Carbon::parse('2026-10-10 18:00', 'Europe/Moscow')->utc()])->save();
 
         $chat = $this->createChannelChat($city->id, -3015);
         $broadcast = $this->createBroadcast($chat->id, 'daily_10');

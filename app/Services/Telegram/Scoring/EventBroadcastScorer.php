@@ -356,7 +356,7 @@ class EventBroadcastScorer
      * Конец проката; null — не прокат. Прокат одной строкой — от недели: фестиваль на два-три дня редок,
      * как разовое событие. Выставка, заведённая днём на каждую дату, — прокат до последнего своего дня.
      */
-    private function runEnd(object $e): ?Carbon
+    public function runEnd(object $e): ?Carbon
     {
         if (! empty($e->start_time) && ! empty($e->end_time)) {
             $end = Carbon::parse($e->end_time);

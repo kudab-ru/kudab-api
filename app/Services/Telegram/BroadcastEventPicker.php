@@ -354,8 +354,8 @@ final class BroadcastEventPicker
             $notes[] = 'вы снимали его из ленты '.self::day($removedAt);
         }
         if ($this->scorer->isBigStage($e) && ! PostTiming::stageDayFits($e, $at)) {
-            [$from, $to] = PostTiming::STAGE_WEEKDAY_LEAD_DAYS;
-            $notes[] = "большая сцена: в будни автомат зовёт за {$from}–{$to} дней";
+            [$from, $to] = PostTiming::STAGE_LEAD_DAYS;
+            $notes[] = "большая сцена: автомат зовёт за {$from}–{$to} дней";
         }
         $start = $e->start_time;
         if ($start !== null && $start->gte($at) && $start->lt($at->copy()->addHours(PostTiming::MIN_LEAD_HOURS))) {

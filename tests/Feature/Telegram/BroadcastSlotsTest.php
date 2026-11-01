@@ -989,7 +989,7 @@ class BroadcastSlotsTest extends TestCase
         if ($survivorRow !== null) {
             $this->makeItem($broadcast->id, $survivor->id, $survivorRow);
         }
-        $this->eventAt($city->id, 'Спектакль', Carbon::parse('2026-09-18 19:00', 'Europe/Moscow')->utc());
+        $this->eventAt($city->id, 'Спектакль', Carbon::parse('2026-09-22 19:00', 'Europe/Moscow')->utc());
 
         $this->artisan('broadcast:sweep-queue')->assertExitCode(0);
         $this->service()->fillFeedDays($broadcast->fresh(), now());
@@ -1173,18 +1173,17 @@ class BroadcastSlotsTest extends TestCase
     }
 
     /** @return array<string, array{string, int, bool}> */
-    public static function stageLeadOnWeekdays(): array
+    public static function stageLeadDays(): array
     {
         return [
-            'вторник, спектакль в тот же день' => ['2026-09-15', 0, false],
-            'вторник, спектакль через три дня' => ['2026-09-15', 3, true],
-            'вторник, спектакль через девять дней' => ['2026-09-15', 9, false],
-            'суббота, спектакль в тот же день' => ['2026-09-19', 0, true],
+            'вторник, спектакль через три дня' => ['2026-09-15', 3, false],
+            'вторник, спектакль через неделю' => ['2026-09-15', 7, true],
+            'суббота, спектакль в тот же день' => ['2026-09-19', 0, false],
         ];
     }
 
-    #[DataProvider('stageLeadOnWeekdays')]
-    public function test_weekday_slot_calls_to_big_stage_only_days_ahead(string $day, int $inDays, bool $picked): void
+    #[DataProvider('stageLeadDays')]
+    public function test_slot_calls_to_big_stage_only_days_ahead(string $day, int $inDays, bool $picked): void
     {
         Carbon::setTestNow(Carbon::parse($day.' 06:00', 'Europe/Moscow')->utc());
 
@@ -1392,20 +1391,76 @@ class BroadcastSlotsTest extends TestCase
         $this->assertSame($amateur ? EventBroadcastScorer::W_AMATEUR : 0, $parts['amateur']);
     }
 
-    public function test_role_without_a_fitting_event_takes_the_best_of_the_rest(): void
+    /** @return array<string, array{int, bool}> */
+    public static function showDaysForBarHour(): array
+    {
+        return [
+            'спектакль на этой неделе встаёт вместо бара' => [5, true],
+            'дальше недели час пропускается' => [9, false],
+        ];
+    }
+
+    #[DataProvider('showDaysForBarHour')]
+    public function test_role_without_a_fitting_event_takes_any_event_of_the_week(int $inDays, bool $picked): void
     {
         [$broadcast, $city] = $this->roleChannel('bar');
-        $show = $this->eventAt($city->id, 'Три сестры', Carbon::parse('2026-09-18 19:00', 'Europe/Moscow')->utc(), rich: true);
+        $show = $this->eventAt($city->id, 'Три сестры', Carbon::parse('2026-09-15 19:00', 'Europe/Moscow')->addDays($inDays)->utc(), rich: true);
         $this->tag($show->id, $this->interestNamed('theatre'));
-        // трансляция того же спектакля сегодня свежее и обошла бы его, но в канал она не годится
-        $broadcastShow = $this->eventAt($city->id, 'Трансляция спектакля «Три сестры»', Carbon::parse('2026-09-15 19:00', 'Europe/Moscow')->utc(), rich: true);
+        // трансляция того же спектакля свежее и обошла бы его, но в канал она не годится
+        $broadcastShow = $this->eventAt($city->id, 'Трансляция спектакля «Три сестры»', Carbon::parse('2026-09-18 19:00', 'Europe/Moscow')->utc(), rich: true);
         $this->tag($broadcastShow->id, $this->interestNamed('theatre'));
+        // завтрашний вечер в баре канал прочтёт уже после него
+        $party = $this->eventAt($city->id, 'Вечеринка в баре', Carbon::parse('2026-09-16 21:00', 'Europe/Moscow')->utc(), rich: true);
+        $this->tag($party->id, $this->interestNamed('parties'));
 
         $this->service()->fillFeedDays($broadcast->fresh(), now());
 
         $item = TelegramChatBroadcastItem::query()->where('broadcast_id', $broadcast->id)->whereNotNull('publish_at')->first();
-        $this->assertSame($show->id, (int) $item?->event_id, 'час не пустеет');
-        $this->assertSame('bar', $item->pick_meta['role_missed'] ?? null);
+        $this->assertSame($picked ? $show->id : null, $item?->event_id === null ? null : (int) $item->event_id);
+        if ($picked) {
+            $this->assertSame('bar', $item->pick_meta['role_missed'] ?? null);
+        }
+    }
+
+    /** @return array<string, array{array<string, int>, string}> */
+    public static function runningShows(): array
+    {
+        return [
+            'идёт ещё десять дней, а не три' => [['Выставка «Палех»' => 3, 'Выставка «Космопарк»' => 10], 'Выставка «Космопарк»'],
+            'из двух долгих — та, что закроется раньше' => [['Выставка «Палех»' => 30, 'Выставка «Космопарк»' => 12], 'Выставка «Космопарк»'],
+        ];
+    }
+
+    /** @param  array<string, int>  $daysLeft */
+    #[DataProvider('runningShows')]
+    public function test_run_role_takes_a_show_that_runs_another_week(array $daysLeft, string $picked): void
+    {
+        [$broadcast, $city] = $this->roleChannel('run');
+        foreach ($daysLeft as $title => $days) {
+            $this->exhibitionDays($city, $title, $days);
+        }
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $this->assertSame([$picked], $this->pickedTitles($broadcast->id));
+    }
+
+    /** Выставка без часа, заведённая днём на каждую дату с 15.09, как её разворачивает парсер. */
+    private function exhibitionDays(City $city, string $title, int $days): void
+    {
+        $ids = [];
+        for ($i = 0; $i < $days; $i++) {
+            $day = Carbon::parse('2026-09-15', 'Europe/Moscow')->addDays($i);
+            $event = $this->eventAt($city->id, $title, $day->copy()->utc(), rich: true);
+            $event->forceFill(['start_time' => null, 'start_date' => $day->toDateString(), 'time_precision' => 'date'])->save();
+            $this->tag($event->id, $this->interestNamed('exhibitions'));
+            $ids[] = $event->id;
+        }
+        $group = DB::table('event_groups')->insertGetId([
+            'community_id' => Event::query()->find($ids[0])->community_id, 'city_id' => $city->id, 'group_key' => 'eg:test:'.md5($title),
+            'title_norm' => mb_strtolower($title), 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('events')->whereIn('id', $ids)->update(['event_group_id' => $group]);
     }
 
     /**
@@ -2124,7 +2179,7 @@ class BroadcastSlotsTest extends TestCase
 
         $city = City::query()->where('slug', 'voronezh')->firstOrFail();
         $removed = $this->eventAt($city->id, 'Спектакль', Carbon::parse('2026-09-18 19:00', 'Europe/Moscow')->utc());
-        $otherDate = $this->eventAt($city->id, 'Спектакль', Carbon::parse('2026-10-06 19:00', 'Europe/Moscow')->utc());
+        $otherDate = $this->eventAt($city->id, 'Спектакль', Carbon::parse('2026-10-10 19:00', 'Europe/Moscow')->utc());
         $group = (int) DB::table('event_groups')->insertGetId([
             'community_id' => $removed->community_id,
             'group_key' => 'show-'.$removed->id,

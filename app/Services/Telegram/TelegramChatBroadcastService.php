@@ -13,7 +13,6 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\Venue;
 use App\Services\EventSurvivor;
-use App\Services\Telegram\Scoring\EventAccess;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Support\BroadcastSafety;
 use App\Support\CityRadius;
@@ -33,6 +32,9 @@ class TelegramChatBroadcastService
      * на горизонт не ставить: конец недели выпадет из пула.
      */
     private const SCORING_CANDIDATE_LIMIT = 400;
+
+    /** Из скольких лучших по баллу «пока идёт» выбирает то, что закроется раньше. */
+    private const RUN_CHOICE = 5;
 
     /** На сколько дней вперёд от своего слота пост может звать; по нему же BroadcastWeekendHold считает, какие выходные держать. */
     public const CANDIDATE_HORIZON_DAYS = 14;
@@ -1820,7 +1822,7 @@ class TelegramChatBroadcastService
     ): array {
         $args = compact('chat', 'broadcastId', 'excludeEventIds', 'notBefore', 'repeatCap', 'avoidInterestId', 'replacedItemId', 'limit', 'optional');
         // событие в час «место» встаёт, когда площадки для портрета нет
-        $role = $role === SlotRole::PLACE ? SlotRole::WALK : $role;
+        $role = $role === SlotRole::PLACE ? SlotRole::RUN : $role;
         if ($role === null || $notBefore === null) {
             return $this->rankCandidates(...$args);
         }
@@ -1830,8 +1832,8 @@ class TelegramChatBroadcastService
             return $fitting;
         }
 
-        // для роли часа ничего не нашлось: час не пустеет, берётся лучшее из остального, кроме «не для канала»
-        return array_map(fn (array $c) => $c + ['role_missed' => $role], $this->rankCandidates(...$args, dropSkip: true));
+        // для роли часа ничего не нашлось: любое событие на неделю вперёд, нет и такого — час пропускается
+        return array_map(fn (array $c) => $c + ['role_missed' => $role], $this->rankCandidates(...$args, role: SlotRole::ANY));
     }
 
     /**
@@ -1849,7 +1851,6 @@ class TelegramChatBroadcastService
         int $limit = 4,
         bool $optional = false,
         ?string $role = null,
-        bool $dropSkip = false,
     ): array {
         $query = $this->channelCandidates($chat, $broadcastId);
 
@@ -1860,6 +1861,9 @@ class TelegramChatBroadcastService
         // у часа «по возможности» своё окно, но роль, поставленная на него, важнее
         if ($role !== null && $notBefore !== null) {
             EventStart::notAfter($query, SlotRole::lastDay($role, $notBefore), 'events');
+            if (($firstDay = SlotRole::firstDay($role, $notBefore)) !== null) {
+                EventStart::notBefore($query, $firstDay, 'events');
+            }
         } elseif ($optional && $notBefore !== null) {
             [$from, $until] = $this->optionalWindow($notBefore);
             $query->whereBetween('start_time', [$from, $until]);
@@ -1875,8 +1879,8 @@ class TelegramChatBroadcastService
         // нижняя граница от момента публикации, а не от «сейчас»: к дню поста событие может пройти.
         // upcoming() тут не нужен — он отрезал бы идущие выставки. Срок проката — закрытие, см. PostTiming
         if ($notBefore !== null) {
-            // у «зайти сегодня» и «на улице» и события без часа: выставка и ярмарка заведены днём на каждую дату
-            PostTiming::applyFits($query, $notBefore, self::MIN_LEAD_HOURS, strictRuns: true, wholeDay: in_array($role, [SlotRole::WALK, SlotRole::OUT], true));
+            // «зайти сегодня», «на улице» и «пока идёт» берут и событие без часа: выставка и ярмарка заведены днём на каждую дату
+            PostTiming::applyFits($query, $notBefore, self::MIN_LEAD_HOURS, strictRuns: true, wholeDay: in_array($role, [SlotRole::WALK, SlotRole::OUT, SlotRole::RUN], true));
             $this->weekendHold->applyTo($query, $broadcastId, $notBefore);
         } else {
             $query->upcoming();
@@ -1946,6 +1950,8 @@ class TelegramChatBroadcastService
         uksort($tiers, fn (string $a, string $b) => $this->tierRank($a) <=> $this->tierRank($b));
 
         $at = $notBefore ?? Carbon::now();
+        // «пока идёт» берёт из лучших по баллу то, что закроется раньше: на него у читателя меньше времени
+        $wanted = $role === SlotRole::RUN ? max($limit, self::RUN_CHOICE) : $limit;
         $ranked = [];
         foreach ($tiers as $tier => $events) {
             // обязательному слоту повтор лучше дыры, слоту «по возможности» — наоборот
@@ -1956,10 +1962,7 @@ class TelegramChatBroadcastService
                 if ($this->scorer->isBigStage($e) && ! PostTiming::stageDayFits($e, $at)) {
                     continue;
                 }
-                if ($role !== null && ! SlotRole::fits($role, $this->scorer->access($e), $e, $at, (array) ($e->venue?->closed_weekdays ?? []))) {
-                    continue;
-                }
-                if ($dropSkip && $this->scorer->access($e) === EventAccess::SKIP) {
+                if ($role !== null && ! SlotRole::fits($role, $this->scorer->access($e), $e, $at, (array) ($e->venue?->closed_weekdays ?? []), $this->scorer->runEnd($e))) {
                     continue;
                 }
                 $ranked[] = [
@@ -1969,13 +1972,18 @@ class TelegramChatBroadcastService
                     'dropped' => $tier === '' ? [] : explode(',', $tier),
                     'role' => $role,
                 ];
-                if (count($ranked) >= $limit) {
-                    return $ranked;
+                if (count($ranked) >= $wanted) {
+                    break 2;
                 }
             }
         }
 
-        return $ranked;
+        if ($role === SlotRole::RUN) {
+            $closes = fn (array $c) => ($this->scorer->runEnd($c['event']) ?? PostTiming::deadline($c['event']))?->getTimestamp() ?? PHP_INT_MAX;
+            usort($ranked, fn (array $a, array $b) => $closes($a) <=> $closes($b));
+        }
+
+        return array_slice($ranked, 0, $limit);
     }
 
     /** Ключ ступени для сравнения: нарушенный старший слой хуже любого набора младших. */
@@ -2665,7 +2673,7 @@ class TelegramChatBroadcastService
 
                         continue;
                     }
-                    $role = SlotRole::WALK;
+                    $role = SlotRole::RUN;
                 }
 
                 // Предел ленты канала (`feed_limit`), а не нехватка кандидатов (то — `no_candidate`). В `eve` не действует:
