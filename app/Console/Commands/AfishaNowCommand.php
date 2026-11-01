@@ -16,7 +16,7 @@ class AfishaNowCommand extends Command
     public function handle(AfishaNow $afisha): int
     {
         $s = $afisha->rebuild();
-        $this->info("событий впереди {$s['events_ahead']}, тем ".count($s['themes']));
+        $this->info("событий впереди {$s['events']}, тем ".count($s['themes']));
 
         return self::SUCCESS;
     }

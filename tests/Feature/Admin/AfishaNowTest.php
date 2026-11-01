@@ -58,6 +58,13 @@ class AfishaNowTest extends TestCase
         $this->postJson('/api/admin/afisha-now/refresh')->assertOk()->assertJsonPath('data.events', 2);
     }
 
+    public function test_scheduled_rebuild_succeeds(): void
+    {
+        $this->futureEvent('Спектакль');
+
+        $this->artisan('afisha:now')->assertSuccessful();
+    }
+
     public function test_daily_series_counts_once_and_kids_events_are_counted(): void
     {
         $groupId = (int) DB::table('event_groups')->insertGetId([
