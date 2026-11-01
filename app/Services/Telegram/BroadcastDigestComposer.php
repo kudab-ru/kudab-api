@@ -619,7 +619,6 @@ final class BroadcastDigestComposer
         'new' => 'появилось в афише после сборки',
         'gone' => 'снято с публикации',
         'city' => 'другой город',
-        'far' => 'далеко от города',
         'window' => 'вне дат рубрики',
         'no_time' => 'без часа начала',
         'timing' => 'слишком близко к выходу или уже закончилось',
@@ -871,7 +870,6 @@ final class BroadcastDigestComposer
         $filters = array_filter([
             'gone' => fn ($q) => $q->whereNull('e.deleted_at')->where('e.status', 'active'),
             'city' => fn ($q) => $q->where('c.city_id', $cityId),
-            'far' => isset($theme['max_km']) ? fn ($q) => $this->nearCity($q, $cityId, (float) $theme['max_km']) : null,
             // нижняя граница только у календарного окна: у «выходных» без неё попадал бы вечер пятницы
             'window' => fn ($q) => $q->where(fn ($w) => EventStart::notAfter($w, $until, 'e'))
                 ->when($since !== null, fn ($w) => EventStart::notBefore($w, $since, 'e')),
@@ -990,27 +988,6 @@ final class BroadcastDigestComposer
         [$hidden, $open] = $rows->partition(fn ($r) => (bool) $r->channel_hidden);
 
         return ['rows' => $this->collapseRepeats($open->concat($hidden))->sortBy('start_time')->values()];
-    }
-
-    /**
-     * Событие не дальше `$km` от центра города. Город источника тут не помогает: концерт в Боброве
-     * приходит от воронежского сообщества. Событие без координат не отсекаем.
-     */
-    private function nearCity(\Illuminate\Database\Query\Builder $q, int $cityId, float $km): void
-    {
-        $center = DB::table('cities')->where('id', $cityId)->first(['latitude', 'longitude']);
-        if ($center?->latitude === null || $center->longitude === null) {
-            return;
-        }
-
-        [$lat, $lng] = [(float) $center->latitude, (float) $center->longitude];
-        // градус широты — 111 км, градус долготы короче в cos(широты) раз; на десятках километров точности хватает
-        $q->whereRaw(
-            '(coalesce(e.latitude, v.latitude) is null or coalesce(e.longitude, v.longitude) is null
-              or power((coalesce(e.latitude, v.latitude) - ?) * 111.2, 2)
-                 + power((coalesce(e.longitude, v.longitude) - ?) * 111.2 * cos(radians(?)), 2) <= power(?, 2))',
-            [$lat, $lng, $lat, $km],
-        );
     }
 
     private static function poolQuery(): \Illuminate\Database\Query\Builder
@@ -1363,22 +1340,18 @@ final class BroadcastDigestComposer
             }
         }
 
-        // ради разнообразия вида и дешёвой строки не берём то, что намного слабее лучшего
-        $floor = isset($theme['gems']['floor'], $ranked[0]) ? $this->gemScores[(int) $ranked[0]->id] - (int) $theme['gems']['floor'] : null;
-        $strong = fn (object $row) => $floor === null || $this->gemScores[(int) $row->id] >= $floor;
-
         $this->kindCaps = array_map('intval', (array) ($theme['kind_caps'] ?? []));
         // сначала строк одного вида не больше `kind_cap`, потом без этого предела, если мест осталось больше
         foreach ([max(1, (int) ($theme['kind_cap'] ?? 1)), 0] as $kindCap) {
             foreach ($ranked as $row) {
-                if ($strong($row) && $this->fitsNamed($row, $named, $min, $max, $onePerDay, $kindCap)) {
+                if ($this->fitsNamed($row, $named, $min, $max, $onePerDay, $kindCap)) {
                     $named[(int) $row->id] = $row;
                 }
             }
         }
 
         $named = ($theme['cheap_line'] ?? true)
-            ? $this->withCheapLine($named, array_values(array_filter($ranked, fn ($r) => isset($named[(int) $r->id]) || $strong($r))), $min, $max, $onePerDay, $bothDays)
+            ? $this->withCheapLine($named, $ranked, $min, $max, $onePerDay, $bothDays)
             : array_values($named);
 
         // по датам: подборка отвечает на вопрос «что впереди», и читать её удобно по порядку недели;
@@ -1416,37 +1389,6 @@ final class BroadcastDigestComposer
         if (isset($theme['occasion'])) {
             $ranked = $this->byOccasion($ranked, (array) ($theme['words'] ?? []));
         }
-        $this->gemScores = [];
-        if (isset($theme['gems'])) {
-            $ranked = $this->byGems($ranked, (array) $theme['gems']);
-        }
-
-        return $ranked;
-    }
-
-    /** @var array<int, int> оценки «не на виду» последнего ранжирования, по ним `pickNamed` отсекает слабые строки */
-    private array $gemScores = [];
-
-    /**
-     * Порядок «не на виду», см. `gems` у рубрики: без слагаемых, которые тянут вверх и так известное,
-     * и с прибавкой за необычный формат.
-     *
-     * @param  list<object>  $ranked
-     * @param  array<string, mixed>  $gems
-     * @return list<object>
-     */
-    private function byGems(array $ranked, array $gems): array
-    {
-        $words = (array) ($gems['format_words'] ?? []);
-        foreach ($ranked as $row) {
-            $text = mb_strtolower((string) $row->title.' '.mb_substr((string) $row->description, 0, 300));
-            $text = str_replace('ё', 'е', $text);
-            $unusual = array_filter($words, fn ($w) => mb_strpos($text, (string) $w) !== false) !== [];
-            $this->gemScores[(int) $row->id] = $this->scorer->interestWithout($row, (array) ($gems['skip'] ?? []))
-                + ($unusual ? (int) ($gems['format_bonus'] ?? 0) : 0);
-        }
-        // при равенстве остаётся прежний порядок: usort устойчив
-        usort($ranked, fn ($a, $b) => $this->gemScores[(int) $b->id] <=> $this->gemScores[(int) $a->id]);
 
         return $ranked;
     }
@@ -1730,7 +1672,7 @@ final class BroadcastDigestComposer
 
             $meta = array_values(array_filter([
                 $this->whenLabel($row, $shortDates, $sessions[(int) $row->id] ?? []),
-                $this->placeLabel($row, (string) ($broadcast->chat?->city?->name ?? '')),
+                $this->venueLabel($row),
                 $this->priceLabel($row),
             ]));
 
@@ -1837,7 +1779,10 @@ final class BroadcastDigestComposer
      */
     private function compactLine(object $row, bool $shortDates, array $times, string $mark, ?TelegramChatBroadcastItem $item, string $city, ?string $cityIn = null): string
     {
-        $venue = $this->placeLabel($row, $city);
+        $venue = $this->venueLabel($row);
+        if ($venue === '' && trim((string) ($row->address ?? '')) !== '') {
+            $venue = EventCaptionBuilder::placeFromAddress((string) $row->address, $city);
+        }
         // имя площадки из группы ВК «Настольные игры | ПараDice | Воронеж»: в названии события бывает вторая часть
         $parts = array_filter(array_merge([$venue], preg_split('/\s+[|\/]\s+/u', (string) ($row->venue_name ?? '')) ?: []),
             fn ($p) => mb_strlen(trim((string) $p)) >= 3 && mb_strtolower(trim((string) $p)) !== mb_strtolower(trim($city)));
@@ -2510,17 +2455,6 @@ final class BroadcastDigestComposer
     private function venueLabel(object $row): string
     {
         return VenueName::label($row->venue_name ?? null);
-    }
-
-    /** Площадка, а у события без её карточки — место из адреса: иначе в строке остаются только день и цена. */
-    private function placeLabel(object $row, string $city): string
-    {
-        $venue = $this->venueLabel($row);
-        if ($venue === '' && trim((string) ($row->address ?? '')) !== '') {
-            return EventCaptionBuilder::placeFromAddress((string) $row->address, $city);
-        }
-
-        return $venue;
     }
 
     /**

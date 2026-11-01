@@ -205,14 +205,10 @@ final class PickReason
 
         $good = [self::KIND_WORDS[(string) ($facts['kind'] ?? '')] ?? 'событие'];
         if (empty($facts['multi_day'])) {
-            // в старых записях `past` нет: для них считаем по числу дат впереди
-            $weekly = array_key_exists('past', $facts)
-                ? (int) $facts['past'] >= EventBroadcastScorer::RECURRING_PAST_FROM
-                : $repeats >= EventBroadcastScorer::WEEKLY_FROM;
             $good[] = match (true) {
-                $weekly => 'идёт каждую неделю',
                 $repeats <= 1 => 'разовое',
-                default => 'несколько дат',
+                $repeats < EventBroadcastScorer::WEEKLY_FROM => 'несколько дат',
+                default => 'идёт каждую неделю',
             };
         }
         if (! empty($facts['ticketed'])) {
