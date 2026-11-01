@@ -101,14 +101,22 @@ class BroadcastSlotPlanner
         }
 
         $start = $from->copy()->setTimezone(self::TZ)->startOfDay();
+        $themes = collect((array) config('broadcast_digest.themes', []))->keyBy('slug');
         $held = [];
         // с завтрашнего дня: на сегодня бронь уже не встанет, она ищет день начиная с завтра
         for ($i = 1; $i < $days; $i++) {
             $day = $start->copy()->addDays($i);
             foreach ($slots as $slot) {
-                if ($day->isoWeekday() === $slot['weekday']) {
-                    $held[$this->key($day->copy()->setTime($slot['hour'], 0))] = true;
+                if ($day->isoWeekday() !== $slot['weekday']) {
+                    continue;
                 }
+                $at = $day->copy()->setTime($slot['hour'], 0);
+                // неделю отдыха рубрики раз в две недели бронь пропускает, и час достаётся обычному посту
+                $theme = $themes->get($slot['theme'] ?? '');
+                if ($theme !== null && ! DigestCadence::due((int) $broadcast->id, (array) $theme, $at)) {
+                    continue;
+                }
+                $held[$this->key($at)] = true;
             }
         }
 

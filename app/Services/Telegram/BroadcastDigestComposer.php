@@ -122,14 +122,17 @@ final class BroadcastDigestComposer
         }
 
         if ($themeSlug === self::WEEK_THEME) {
+            // тонкая тема ждёт, пока наберётся: выйдет, только если полных нет
+            $thin = null;
             foreach ($this->weekThemeOrder($broadcast) as $slug) {
                 $draft = $this->compose($broadcast, $publishAt, $forItem, $slug);
-                if ($draft !== null) {
+                if ($draft !== null && $draft['total'] >= (int) config('broadcast_digest.week_theme_pool', 0)) {
                     return $draft;
                 }
+                $thin ??= $draft;
             }
 
-            return null;
+            return $thin;
         }
 
         // Рубрики, выходившие недавно, уходят в конец очереди: канал с одной

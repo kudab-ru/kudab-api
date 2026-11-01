@@ -725,8 +725,12 @@ return [
      */
     'rotation_depth' => 4,
 
-    /* Рубрики слота «Тема недели» (BroadcastDigestComposer::WEEK_THEME), выходят по очереди. */
+    /*
+     * Рубрики слота «Тема недели» (BroadcastDigestComposer::WEEK_THEME), выходят по очереди. Очередь
+     * проходят те, у кого на неделю не меньше week_theme_pool событий: у тонкой темы в строки попадает случайное.
+     */
     'week_themes' => ['koncerty', 'spektakli', 'lekcii', 'ekskursii', 'kino', 'stendap'],
+    'week_theme_pool' => 15,
 
     /*
      * Гейт темы. Меньше — подборка получается не подборкой: «две выставки на

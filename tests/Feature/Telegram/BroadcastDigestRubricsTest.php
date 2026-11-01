@@ -1691,22 +1691,23 @@ class BroadcastDigestRubricsTest extends TestCase
     public static function weekThemeTurns(): array
     {
         return [
-            'дольше всех не выходившая' => [['music', 'theatre'], 'koncerty'],
-            'не набралась — следующая по очереди' => [['theatre'], 'spektakli'],
+            'дольше всех не выходившая' => [['music' => 8, 'theatre' => 8], 'koncerty'],
+            'не набралась — следующая по очереди' => [['theatre' => 8], 'spektakli'],
+            'тонкая ждёт, пока есть полная' => [['music' => 6, 'theatre' => 8], 'spektakli'],
         ];
     }
 
-    /** @param  list<string>  $kinds */
+    /** @param  array<string, int>  $kinds */
     #[Test]
     #[DataProvider('weekThemeTurns')]
     public function the_week_theme_goes_in_turn(array $kinds, string $expected): void
     {
         $this->onlyRubric('koncerty', 'spektakli');
-        config(['broadcast_digest.week_themes' => ['spektakli', 'koncerty']]);
+        config(['broadcast_digest.week_themes' => ['spektakli', 'koncerty'], 'broadcast_digest.week_theme_pool' => 7]);
         $this->postedDigest($this->channel(), 'spektakli');
-        foreach ($kinds as $kind) {
-            foreach ([1, 1, 2, 2, 3, 3] as $i => $day) {
-                $id = $this->event(($kind === 'music' ? 'Концерт ' : 'Спектакль ').($i + 1), $day, free: false, priceMin: 700);
+        foreach ($kinds as $kind => $count) {
+            for ($i = 0; $i < $count; $i++) {
+                $id = $this->event(($kind === 'music' ? 'Концерт ' : 'Спектакль ').($i + 1), 1 + $i % 4, free: false, priceMin: 700);
                 if ($kind === 'music') {
                     $this->retag($id, 'music');
                 }

@@ -2558,17 +2558,18 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
-    /** @return array<string, array{bool, list<int>}> */
+    /** @return array<string, array{string, ?string, list<int>}> */
     public static function digestSlotStates(): array
     {
         return [
-            'бронь ещё не встала' => [false, [10]],
-            'подборку сняли' => [true, [10, 13]],
+            'бронь ещё не встала' => ['waiting', null, [10]],
+            'подборку сняли' => ['removed', null, [10, 13]],
+            'рубрика раз в две недели на этой неделе отдыхает' => ['resting', 'bilety-zaranee', [10, 13]],
         ];
     }
 
     #[DataProvider('digestSlotStates')]
-    public function test_digest_slot_is_kept_until_the_digest_is_removed(bool $removed, array $tuesdayHours): void
+    public function test_digest_slot_is_kept_until_the_digest_is_removed(string $state, ?string $theme, array $tuesdayHours): void
     {
         Carbon::setTestNow(Carbon::parse('2026-10-05 06:00', 'Europe/Moscow')->utc()); // понедельник
 
@@ -2576,16 +2577,22 @@ class BroadcastSlotsTest extends TestCase
         $broadcast->settings = array_merge((array) $broadcast->settings, [
             'slots' => [10, 13],
             'horizon_days' => 2,
-            'digest_slots' => [['weekday' => 2, 'hour' => 13, 'theme' => null]],
+            'digest_slots' => [['weekday' => 2, 'hour' => 13, 'theme' => $theme]],
         ]);
         $broadcast->save();
 
-        if ($removed) {
+        if ($state !== 'waiting') {
             $digest = new TelegramChatBroadcastItem;
             $digest->broadcast_id = $broadcast->id;
             $digest->kind = TelegramChatBroadcastItem::KIND_DIGEST;
-            $digest->publish_at = Carbon::parse('2026-10-06 13:00', 'Europe/Moscow')->utc();
-            $digest->removeByHand();
+            if ($state === 'removed') {
+                $digest->publish_at = Carbon::parse('2026-10-06 13:00', 'Europe/Moscow')->utc();
+                $digest->removeByHand();
+            } else {
+                $digest->status = TelegramChatBroadcastItem::STATUS_POSTED;
+                $digest->posted_at = Carbon::parse('2026-09-29 13:00', 'Europe/Moscow')->utc();
+                $digest->digest_meta = ['theme' => $theme];
+            }
             $digest->save();
         }
 
