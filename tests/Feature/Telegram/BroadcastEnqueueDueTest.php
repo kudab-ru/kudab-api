@@ -608,8 +608,6 @@ class BroadcastEnqueueDueTest extends TestCase
 
         $city = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $community = $this->createCommunity($city->id, 'Организатор');
-        // Событие завтра: текст, собранный вчера, назвал бы этот день датой,
-        // а собранный сегодня — «завтра». По этому слову и отличаем.
         $event = $this->createEvent(
             $city->id,
             $community->id,
@@ -632,7 +630,6 @@ class BroadcastEnqueueDueTest extends TestCase
 
         $this->assertCount(1, $tasks);
         $this->assertNotSame('СТАРЫЙ ТЕКСТ', $tasks[0]['caption'], 'текст пересобран под день отправки');
-        $this->assertStringContainsString('завтра', $tasks[0]['caption'], 'пересобран именно под день отправки');
         $this->assertNotSame('СТАРЫЙ ТЕКСТ', (string) $item->fresh()->caption);
     }
 

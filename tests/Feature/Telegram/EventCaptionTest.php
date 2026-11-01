@@ -301,7 +301,7 @@ class EventCaptionTest extends TestCase
         $lines = explode("\n", $this->builder()->build($event, 'basic', $this->asOf()));
         $dateLine = collect($lines)->first(fn (string $line) => str_starts_with($line, '🗓'));
 
-        $this->assertSame('🗓️ до 3 окт', $dateLine);
+        $this->assertSame('🗓️ до 3 октября', $dateLine);
     }
 
     /** Строки тегов в посте нет: ключ пуст всегда, и строка убрана из шаблона. */
@@ -412,7 +412,12 @@ class EventCaptionTest extends TestCase
 
         $caption = $this->builder()->build($sessions[0]->fresh(), 'basic', CarbonImmutable::now('Europe/Moscow'));
 
-        $this->assertStringContainsString('🗓️ завтра, 19:00 · 3 дня подряд, до ', $caption);
+        $tomorrow = CarbonImmutable::now('Europe/Moscow')->addDay();
+        $this->assertStringContainsString(
+            '🗓️ '.['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'][$tomorrow->isoWeekday() - 1].', '.$tomorrow->day.' ',
+            $caption,
+        );
+        $this->assertStringContainsString(', 19:00 · 3 дня подряд, до ', $caption);
     }
 
     private function makeEvent(

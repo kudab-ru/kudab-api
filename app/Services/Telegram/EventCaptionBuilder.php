@@ -20,11 +20,13 @@ final class EventCaptionBuilder
     /** events.timezone парсер не пишет, пояс один на всех */
     private const TZ = 'Europe/Moscow';
 
-    /** как MONTHS_RU_SHORT в боте (domain/events_dto.py) */
+    /** Как в SeriesNote: строка даты и серия стоят рядом. */
     private const MONTHS = [
-        1 => 'янв', 2 => 'фев', 3 => 'мар', 4 => 'апр', 5 => 'май', 6 => 'июн',
-        7 => 'июл', 8 => 'авг', 9 => 'сен', 10 => 'окт', 11 => 'ноя', 12 => 'дек',
+        1 => 'января', 2 => 'февраля', 3 => 'марта', 4 => 'апреля', 5 => 'мая', 6 => 'июня',
+        7 => 'июля', 8 => 'августа', 9 => 'сентября', 10 => 'октября', 11 => 'ноября', 12 => 'декабря',
     ];
+
+    private const WEEKDAYS = [1 => 'пн', 2 => 'вт', 3 => 'ср', 4 => 'чт', 5 => 'пт', 6 => 'сб', 7 => 'вс'];
 
     /** Первый кусок адреса — не имя места: индекс, населённый пункт, регион, улица. */
     private const NOT_PLACE = '/\d|^(г|с|п|пгт|д|х|рп|ст|город|село|пос[её]лок|деревня|хутор|ул|улица|пр-кт|пр-т|просп\p{L}*|пер|переулок|пл|площадь|б-р|бульвар|наб|набережная|ш|шоссе|проезд|мкр)(?!\p{L})|обл|област|край|респ|округ|район|р-н/iu';
@@ -38,8 +40,7 @@ final class EventCaptionBuilder
     ) {}
 
     /**
-     * @param  CarbonImmutable|null  $asOf  день выхода поста: от него считаются «сегодня»
-     *                                      и «завтра», текст собирают заранее
+     * @param  CarbonImmutable|null  $asOf  день выхода поста: от него считается серия, текст собирают заранее
      * @param  int|null  $itemId  запись очереди, её номер уходит в utm_content (см. PostLink)
      */
     public function build(
@@ -184,7 +185,7 @@ final class EventCaptionBuilder
             'location' => $locSafe,
             'start_time' => $runsUntil !== null
                 ? $this->untilHuman($runsUntil)
-                : $this->withSeries($this->startHuman($raw, $asOf), $raw, $asOf),
+                : $this->withSeries($this->startHuman($raw), $raw, $asOf),
             'kind_emoji' => self::kindEmoji($raw),
             'price_label' => $this->priceLabel($raw, $canonicalUrl),
             'price_url' => trim((string) ($raw['price_url'] ?? '')),
@@ -246,9 +247,11 @@ final class EventCaptionBuilder
     }
 
     /**
+     * «сб, 7 ноября, 19:00». Без «сегодня» и «завтра»: пост читают и через несколько дней после выхода.
+     *
      * @param  array<string, mixed>  $raw
      */
-    private function startHuman(array $raw, ?CarbonImmutable $asOf = null): string
+    private function startHuman(array $raw): string
     {
         $rawStart = $this->firstNonEmpty($raw, ['start_time', 'start_date', 'start_at', 'start', 'date']);
         if ($rawStart === '') {
@@ -261,26 +264,13 @@ final class EventCaptionBuilder
             return $rawStart;
         }
 
-        $today = ($asOf ?? CarbonImmutable::now(self::TZ))->setTimezone(self::TZ)->startOfDay();
-        $day = $dt->startOfDay();
-
         // Полночь по МСК — признак «время неизвестно», а не «в 00:00».
         $hasTime = ! ($dt->hour === 0 && $dt->minute === 0);
-        $time = $dt->format('H:i');
+        $date = self::WEEKDAYS[$dt->isoWeekday()].', '.$dt->day.' '.self::MONTHS[$dt->month];
 
-        if ($day->equalTo($today)) {
-            return $hasTime ? "сегодня, {$time}" : 'сегодня';
-        }
-        if ($day->equalTo($today->addDay())) {
-            return $hasTime ? "завтра, {$time}" : 'завтра';
-        }
-
-        $date = $dt->day.' '.self::MONTHS[$dt->month];
-
-        return $hasTime ? "{$date} {$time}" : $date;
+        return $hasTime ? $date.', '.$dt->format('H:i') : $date;
     }
 
-    /** Всегда числом: «до сегодня» по-русски не говорят. */
     private function untilHuman(Carbon $until): string
     {
         $day = $until->copy()->setTimezone(self::TZ);
