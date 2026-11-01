@@ -1621,7 +1621,7 @@ class AdminBroadcastController extends Controller
 
         // Дубль канала: событие уже стоит своим постом. Меняем только с прямого
         // согласия и вместе со снятием того поста.
-        $taken = $this->eventTakenByAnotherPost($broadcast->id, (int) $data['in'], $item->id);
+        $taken = $this->eventTakenByAnotherPost($broadcast->id, (int) $data['in'], $item->id, forDigest: true);
         if ($taken !== null && ! $request->boolean('swap')) {
             return response()->json([
                 'ok' => false,
@@ -1751,7 +1751,11 @@ class AdminBroadcastController extends Controller
         $probe = $request->boolean('probe', true);
 
         $out = [];
-        foreach ((array) config('broadcast_digest.themes', []) as $theme) {
+        $themes = [
+            ...(array) config('broadcast_digest.themes', []),
+            ['slug' => BroadcastDigestComposer::WEEK_THEME, 'title' => 'Тема недели, по очереди', 'emoji' => '🔁'],
+        ];
+        foreach ($themes as $theme) {
             $slug = (string) ($theme['slug'] ?? '');
             if ($slug === '') {
                 continue;
@@ -2113,7 +2117,7 @@ class AdminBroadcastController extends Controller
             ], 422);
         }
 
-        $taken = $this->eventTakenByAnotherPost($broadcast->id, $inEventId, $item->id);
+        $taken = $this->eventTakenByAnotherPost($broadcast->id, $inEventId, $item->id, forDigest: true);
         if ($taken === null) {
             return null;
         }
@@ -2638,7 +2642,8 @@ class AdminBroadcastController extends Controller
      *
      * Спрашиваем связь и исключаем саму оживляемую запись: она не «другой пост».
      */
-    private function eventTakenByAnotherPost(int $broadcastId, int $eventId, ?int $exceptItemId): ?TelegramChatBroadcastItem
+    /** @param  bool  $forDigest  в подборку: вышедший пост о событии ей не мешает, см. `BroadcastDigestComposer::rejectAlreadyShown` */
+    private function eventTakenByAnotherPost(int $broadcastId, int $eventId, ?int $exceptItemId, bool $forDigest = false): ?TelegramChatBroadcastItem
     {
         return TelegramChatBroadcastItem::query()
             ->from('telegram.chat_broadcast_items as i')
@@ -2647,6 +2652,8 @@ class AdminBroadcastController extends Controller
             ->where('i.broadcast_id', $broadcastId)
             ->where('l.event_id', $eventId)
             ->when($exceptItemId !== null, fn ($q) => $q->where('i.id', '<>', $exceptItemId))
+            ->when($forDigest, fn ($q) => $q->where(fn ($w) => $w->whereNull('i.posted_at')
+                ->orWhere('i.kind', '<>', TelegramChatBroadcastItem::KIND_EVENT)))
             ->where(function ($q) {
                 $q->whereNotNull('i.posted_at')
                     ->orWhereIn('i.status', $this->openStatuses());

@@ -1370,21 +1370,22 @@ class BroadcastDigestRubricsTest extends TestCase
     {
         $this->onlyRubric('na-nedele');
         $taken = [];
-        foreach ([1, 2, 3, 4, 5] as $day) {
+        foreach ([1, 2, 3, 4] as $day) {
             $taken[] = $this->event('Спектакль '.$day, $day, free: false, priceMin: 1500);
         }
         $taken[] = $quiz = $this->event('Квиз в баре', 2, free: false, priceMin: 500);
         $this->retag($quiz, 'quiz-games');
         $this->retag($this->event('Выставка', 2, free: true), 'exhibitions');
         $this->event('Спектакль сегодня', 0, free: false, priceMin: 1500, hour: 21);
-        $this->event('Спектакль в следующий понедельник', 6, free: false, priceMin: 1500);
+        // выходные у «На выходных»
+        $this->event('Спектакль в воскресенье', 5, free: false, priceMin: 1500);
         $this->event('Спектакль через неделю', 8, free: false, priceMin: 1500);
 
         $composer = app(BroadcastDigestComposer::class);
         $theme = collect(config('broadcast_digest.themes'))->firstWhere('slug', 'na-nedele');
         $out = $composer->compose($this->channel(), Carbon::now(), null, 'na-nedele');
 
-        $this->assertSame(count($taken), $composer->poolSize($this->channel(), $theme, Carbon::now())['events'], 'без выставки, сегодняшнего и следующей недели');
+        $this->assertSame(count($taken), $composer->poolSize($this->channel(), $theme, Carbon::now())['events'], 'без выставки, сегодняшнего, воскресенья и следующей недели');
         $this->assertSame([], array_diff($out['event_ids'], $taken));
     }
 
@@ -1659,19 +1660,24 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertSame('povod-halloween', $item->fresh()->digestTheme());
     }
 
-    #[Test]
-    public function a_booked_occasion_is_not_replaced_by_another_rubric(): void
+    public static function slotRubricsThatDoNotGather(): array
     {
-        $this->onlyRubric('povod-halloween', 'besplatno');
+        return ['повод' => ['povod-halloween'], 'рубрика дня' => ['koncerty']];
+    }
+
+    #[Test]
+    #[DataProvider('slotRubricsThatDoNotGather')]
+    public function a_slot_rubric_that_does_not_gather_is_not_replaced_by_another(string $wanted): void
+    {
+        $this->onlyRubric($wanted, 'besplatno');
         $this->fill('Бесплатное', free: true);
 
         $item = new TelegramChatBroadcastItem;
         $item->broadcast_id = $this->channel()->id;
         $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
         $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
-        $item->is_off_grid = true;
         $item->publish_at = Carbon::now()->addHours(6);
-        $item->digest_meta = ['theme_wanted' => 'povod-halloween'];
+        $item->digest_meta = ['theme_wanted' => $wanted];
         $item->save();
 
         $result = app(\App\Services\Telegram\TelegramChatBroadcastService::class)
@@ -1679,6 +1685,72 @@ class BroadcastDigestRubricsTest extends TestCase
 
         $this->assertSame('failed', $result);
         $this->assertNull($item->fresh()->digestTheme());
+        $this->assertSame(TelegramChatBroadcastItem::STATUS_SKIPPED, $item->fresh()->status, 'час отдан обычному посту');
+    }
+
+    public static function weekThemeTurns(): array
+    {
+        return [
+            'дольше всех не выходившая' => [['music', 'theatre'], 'koncerty'],
+            'не набралась — следующая по очереди' => [['theatre'], 'spektakli'],
+        ];
+    }
+
+    /** @param  list<string>  $kinds */
+    #[Test]
+    #[DataProvider('weekThemeTurns')]
+    public function the_week_theme_goes_in_turn(array $kinds, string $expected): void
+    {
+        $this->onlyRubric('koncerty', 'spektakli');
+        config(['broadcast_digest.week_themes' => ['spektakli', 'koncerty']]);
+        $this->postedDigest($this->channel(), 'spektakli');
+        foreach ($kinds as $kind) {
+            foreach ([1, 1, 2, 2, 3, 3] as $i => $day) {
+                $id = $this->event(($kind === 'music' ? 'Концерт ' : 'Спектакль ').($i + 1), $day, free: false, priceMin: 700);
+                if ($kind === 'music') {
+                    $this->retag($id, 'music');
+                }
+            }
+        }
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::now(), null, BroadcastDigestComposer::WEEK_THEME);
+
+        $this->assertSame($expected, $out['theme_slug'] ?? null);
+    }
+
+    public static function earlierItemOfTheEvent(): array
+    {
+        return [
+            'свой пост на этой неделе — подборка о нём напомнит' => [TelegramChatBroadcastItem::KIND_EVENT, 6],
+            'другая подборка на этой неделе' => [TelegramChatBroadcastItem::KIND_DIGEST, 5],
+        ];
+    }
+
+    #[Test]
+    #[DataProvider('earlierItemOfTheEvent')]
+    public function a_digest_may_name_an_event_that_had_its_own_post(string $kind, int $pool): void
+    {
+        $this->onlyRubric('spektakli');
+        $this->fill('Спектакль', free: false, priceMin: 700);
+        $posted = (int) DB::table('events')->where('title', 'Спектакль 1')->value('id');
+        $itemId = DB::table('telegram.chat_broadcast_items')->insertGetId([
+            'broadcast_id' => $this->channel()->id,
+            'kind' => $kind,
+            'event_id' => $kind === TelegramChatBroadcastItem::KIND_EVENT ? $posted : null,
+            'status' => TelegramChatBroadcastItem::STATUS_POSTED,
+            'posted_at' => now()->subDays(2),
+            'digest_meta' => $kind === TelegramChatBroadcastItem::KIND_DIGEST ? json_encode(['theme' => 'na-nedele']) : null,
+            'created_at' => now()->subDays(2),
+            'updated_at' => now()->subDays(2),
+        ]);
+        DB::table('telegram.chat_broadcast_item_events')->insert([
+            'item_id' => $itemId, 'event_id' => $posted, 'position' => 1, 'created_at' => now(),
+        ]);
+
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), Carbon::now(), null, 'spektakli');
+
+        $this->assertSame($pool, $out['total'] ?? null);
     }
 
     #[Test]

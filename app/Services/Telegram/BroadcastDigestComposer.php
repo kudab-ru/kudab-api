@@ -49,6 +49,12 @@ final class BroadcastDigestComposer
      */
     public const SHOWN_WINDOW_DAYS = 7;
 
+    /**
+     * Рубрика слота «Тема недели»: по очереди одна из `week_themes` конфига, первой та, что дольше
+     * всех не выходила. В списке рубрик конфига её нет, это выбор среди них.
+     */
+    public const WEEK_THEME = 'tema-nedeli';
+
     /** @var array<int, string> */
     private const MONTHS = [
         1 => 'января', 2 => 'февраля', 3 => 'марта', 4 => 'апреля', 5 => 'мая', 6 => 'июня',
@@ -112,6 +118,17 @@ final class BroadcastDigestComposer
     ): ?array {
         $cityId = $broadcast->chat?->city_id;
         if (! $cityId) {
+            return null;
+        }
+
+        if ($themeSlug === self::WEEK_THEME) {
+            foreach ($this->weekThemeOrder($broadcast) as $slug) {
+                $draft = $this->compose($broadcast, $publishAt, $forItem, $slug);
+                if ($draft !== null) {
+                    return $draft;
+                }
+            }
+
             return null;
         }
 
@@ -203,6 +220,30 @@ final class BroadcastDigestComposer
             'total' => $best['total'],
             'venues' => $best['venues'],
         ] + $this->windowMeta((array) $best['theme'], $publishAt);
+    }
+
+    /**
+     * Рубрики «Темы недели» в очередь: сначала не выходившие ни разу, потом по давности выхода.
+     *
+     * @return list<string>
+     */
+    private function weekThemeOrder(TelegramChatBroadcast $broadcast): array
+    {
+        $slugs = array_values((array) config('broadcast_digest.week_themes', []));
+        $lastPosted = DB::table('telegram.chat_broadcast_items')
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->where('status', TelegramChatBroadcastItem::STATUS_POSTED)
+            ->whereIn(DB::raw("digest_meta->>'theme'"), $slugs)
+            ->groupBy(DB::raw("digest_meta->>'theme'"))
+            ->selectRaw("digest_meta->>'theme' as slug, max(posted_at) as at")
+            ->pluck('at', 'slug')
+            ->all();
+
+        usort($slugs, fn (string $a, string $b) => [isset($lastPosted[$a]), (string) ($lastPosted[$a] ?? '')]
+            <=> [isset($lastPosted[$b]), (string) ($lastPosted[$b] ?? '')]);
+
+        return $slugs;
     }
 
     /**
@@ -1280,7 +1321,9 @@ final class BroadcastDigestComposer
                     TelegramChatBroadcastItem::STATUS_APPROVED,
                     TelegramChatBroadcastItem::STATUS_AUTO_APPROVED,
                 ])->orWhere(function ($w) {
+                    // вышедший пост о событии подборке не мешает: она напоминает о нём, а не повторяет
                     $w->where('i.status', TelegramChatBroadcastItem::STATUS_POSTED)
+                        ->where('i.kind', '<>', TelegramChatBroadcastItem::KIND_EVENT)
                         ->where('i.posted_at', '>=', Carbon::now()->subDays(self::SHOWN_WINDOW_DAYS));
                 })->when($ownSlug !== null, fn ($q) => $q->orWhere(fn ($w) => $w
                     ->where('i.status', TelegramChatBroadcastItem::STATUS_POSTED)

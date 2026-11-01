@@ -1340,24 +1340,19 @@ class TelegramChatBroadcastService
         TelegramChatBroadcast $broadcast,
         Carbon $now,
     ): bool {
-        // Рубрику мог задать слот расписания. Не набралась — пробуем как
-        // обычно: пустой пост хуже не той рубрики.
+        // Рубрику слота другой не подменяем: не набралась — подборка снимается, и её час
+        // занимает обычный пост (снятая бронь слот отпускает, см. BroadcastSlotPlanner::digestHeld).
         $wanted = trim((string) (($item->digest_meta ?? [])['theme_wanted'] ?? '')) ?: null;
 
-        $draft = $wanted !== null
-            ? $this->digestComposer->compose($broadcast, $now, $item, $wanted)
-            : null;
-
-        // повод и «Что смотрят» другой рубрикой не подменяем: вместо Хэллоуина вышли бы спектакли недели
-        if (! BroadcastDigestComposer::ownSchedule($wanted)) {
-            $draft ??= $this->digestComposer->compose($broadcast, $now, $item);
-        }
+        $draft = $this->digestComposer->compose($broadcast, $now, $item, $wanted);
 
         if ($draft === null) {
             // следующую бронь поставит broadcast:enqueue-digests
             $this->broadcastItemRepository->markSkipped(
                 $item,
-                'подборка: на этой неделе не набралось темы с достаточным составом',
+                $wanted === null
+                    ? 'подборка: на этой неделе не набралось темы с достаточным составом'
+                    : 'подборка: рубрика слота не набрала состава, в этот час выйдет обычный пост',
             );
 
             return false;
