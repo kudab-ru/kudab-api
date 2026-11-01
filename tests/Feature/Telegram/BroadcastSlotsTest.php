@@ -168,6 +168,30 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
+    public function test_venue_posts_are_three_days_apart(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-15 03:00:00', 'UTC'));
+
+        [$broadcast, $city] = $this->channelWithVenueEvents();
+        $broadcast->slots = [10, 19];
+        $broadcast->horizon_days = 7;
+        $broadcast->save();
+
+        $this->service()->fillFeedDays($broadcast->fresh(), now());
+
+        $days = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->whereIn('event_id', Event::query()->where('venue_id', $city['crowded'])->select('id'))
+            ->pluck('publish_at')
+            ->map(fn ($at) => Carbon::parse($at)->setTimezone('Europe/Moscow')->startOfDay())
+            ->sort()
+            ->values();
+        $this->assertCount(2, $days);
+        $this->assertGreaterThanOrEqual(3, abs($days[0]->diffInDays($days[1])));
+
+        Carbon::setTestNow();
+    }
+
     /** Зазор берётся из настроек канала, а не из константы. */
     public function test_gap_comes_from_channel_settings(): void
     {

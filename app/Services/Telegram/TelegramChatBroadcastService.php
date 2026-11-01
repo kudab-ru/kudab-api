@@ -50,6 +50,9 @@ class TelegramChatBroadcastService
     /** Окно cross-time анти-дубля: не повторять тот же заголовок в канале N дней. */
     private const CROSS_TIME_WINDOW_DAYS = 14;
 
+    /** Одна площадка или сеть в ленте не чаще раза в столько дней, считая от дня слота. */
+    private const VENUE_GAP_DAYS = 3;
+
     /** Зазор между постами в минутах, если канал не найден; у канала свой min_gap_minutes. */
     private const MIN_GAP_MINUTES = 90;
 
@@ -1918,8 +1921,13 @@ class TelegramChatBroadcastService
         ));
 
         // не больше repeatCap постов на площадку и сеть, повтор заголовков этого не ловит
-        [$venueUse, $chainUse] = $this->venueUsageInFeed($broadcastId, $replacedItemId);
+        [$venueUse, $chainUse, $venueDays, $chainDays] = $this->venueUsageInFeed($broadcastId, $replacedItemId);
         $cap = $repeatCap ?? 1;
+        $slotDay = ($notBefore ?? Carbon::now())->copy()->setTimezone('Europe/Moscow')->startOfDay();
+        $tooClose = fn (array $days) => array_filter(
+            $days,
+            fn (string $d) => abs($slotDay->diffInDays(Carbon::parse($d, 'Europe/Moscow'))) < self::VENUE_GAP_DAYS,
+        ) !== [];
 
         $tiers = [];
         foreach ($candidates as $e) {
@@ -1928,7 +1936,9 @@ class TelegramChatBroadcastService
                 PickReason::LAYER_THEME => isset($sameTheme[(int) $e->id]),
                 PickReason::LAYER_TITLE => isset($recentTitles[$this->normalizeTitle($e->title)]),
                 PickReason::LAYER_VENUE => ($e->venue_id !== null && ($venueUse[(int) $e->venue_id] ?? 0) >= $cap)
-                    || ($chain !== '' && ($chainUse[$chain] ?? 0) >= $cap),
+                    || ($chain !== '' && ($chainUse[$chain] ?? 0) >= $cap)
+                    || ($e->venue_id !== null && $tooClose($venueDays[(int) $e->venue_id] ?? []))
+                    || ($chain !== '' && $tooClose($chainDays[$chain] ?? [])),
             ]));
             $tiers[implode(',', $dropped)][] = $e;
         }
@@ -2152,9 +2162,9 @@ class TelegramChatBroadcastService
 
     /**
      * Сколько раз площадка и сеть уже заняты в ленте: незакрытые записи и вышедшие за неделю.
-     * Счётчик, а не множество: порог растёт с числом слотов (venueRepeatCap).
+     * Счётчик, а не множество: порог растёт с числом слотов (venueRepeatCap). Дни выхода — для VENUE_GAP_DAYS.
      *
-     * @return array{0: array<int, int>, 1: array<string, int>}
+     * @return array{0: array<int, int>, 1: array<string, int>, 2: array<int, list<string>>, 3: array<string, list<string>>}
      */
     private function venueUsageInFeed(int $broadcastId, ?int $exceptItemId = null): array
     {
@@ -2183,22 +2193,32 @@ class TelegramChatBroadcastService
             // подборка, не занимающая свои события (см. `whereClaimsEvents`), площадки этой недели тоже не занимает
             ->tap(fn ($q) => TelegramChatBroadcastItem::whereClaimsEvents($q, 'i'))
             // i.id в выборке обязателен: без него distinct схлопнул бы разные записи одной площадки
-            ->get(['i.id as item_id', 'e.venue_id as venue_id', 'v.name as venue_name']);
+            ->get(['i.id as item_id', 'e.venue_id as venue_id', 'v.name as venue_name', 'i.posted_at', 'i.publish_at']);
 
         $ids = [];
         $chains = [];
+        $idDays = [];
+        $chainDays = [];
         foreach ($rows as $row) {
+            $at = $row->posted_at ?? $row->publish_at;
+            $day = $at ? Carbon::parse($at)->setTimezone('Europe/Moscow')->toDateString() : null;
             if ($row->venue_id !== null) {
                 $id = (int) $row->venue_id;
                 $ids[$id] = ($ids[$id] ?? 0) + 1;
+                if ($day !== null) {
+                    $idDays[$id][] = $day;
+                }
             }
             $chain = $this->venueChainKey((string) ($row->venue_name ?? ''));
             if ($chain !== '') {
                 $chains[$chain] = ($chains[$chain] ?? 0) + 1;
+                if ($day !== null) {
+                    $chainDays[$chain][] = $day;
+                }
             }
         }
 
-        return [$ids, $chains];
+        return [$ids, $chains, $idDays, $chainDays];
     }
 
     /** Сколько раз одна площадка может попасть в неделю ленты: один пост на каждые семь обязательных. */
