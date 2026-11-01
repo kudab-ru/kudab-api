@@ -619,6 +619,7 @@ final class BroadcastDigestComposer
         'new' => 'появилось в афише после сборки',
         'gone' => 'снято с публикации',
         'city' => 'другой город',
+        'far' => 'далеко от города',
         'window' => 'вне дат рубрики',
         'no_time' => 'без часа начала',
         'timing' => 'слишком близко к выходу или уже закончилось',
@@ -870,6 +871,7 @@ final class BroadcastDigestComposer
         $filters = array_filter([
             'gone' => fn ($q) => $q->whereNull('e.deleted_at')->where('e.status', 'active'),
             'city' => fn ($q) => $q->where('c.city_id', $cityId),
+            'far' => isset($theme['max_km']) ? fn ($q) => $this->nearCity($q, $cityId, (float) $theme['max_km']) : null,
             // нижняя граница только у календарного окна: у «выходных» без неё попадал бы вечер пятницы
             'window' => fn ($q) => $q->where(fn ($w) => EventStart::notAfter($w, $until, 'e'))
                 ->when($since !== null, fn ($w) => EventStart::notBefore($w, $since, 'e')),
@@ -988,6 +990,27 @@ final class BroadcastDigestComposer
         [$hidden, $open] = $rows->partition(fn ($r) => (bool) $r->channel_hidden);
 
         return ['rows' => $this->collapseRepeats($open->concat($hidden))->sortBy('start_time')->values()];
+    }
+
+    /**
+     * Событие не дальше `$km` от центра города. Город источника тут не помогает: концерт в Боброве
+     * приходит от воронежского сообщества. Событие без координат не отсекаем.
+     */
+    private function nearCity(\Illuminate\Database\Query\Builder $q, int $cityId, float $km): void
+    {
+        $center = DB::table('cities')->where('id', $cityId)->first(['latitude', 'longitude']);
+        if ($center?->latitude === null || $center->longitude === null) {
+            return;
+        }
+
+        [$lat, $lng] = [(float) $center->latitude, (float) $center->longitude];
+        // градус широты — 111 км, градус долготы короче в cos(широты) раз; на десятках километров точности хватает
+        $q->whereRaw(
+            '(coalesce(e.latitude, v.latitude) is null or coalesce(e.longitude, v.longitude) is null
+              or power((coalesce(e.latitude, v.latitude) - ?) * 111.2, 2)
+                 + power((coalesce(e.longitude, v.longitude) - ?) * 111.2 * cos(radians(?)), 2) <= power(?, 2))',
+            [$lat, $lng, $lat, $km],
+        );
     }
 
     private static function poolQuery(): \Illuminate\Database\Query\Builder
@@ -1672,7 +1695,7 @@ final class BroadcastDigestComposer
 
             $meta = array_values(array_filter([
                 $this->whenLabel($row, $shortDates, $sessions[(int) $row->id] ?? []),
-                $this->venueLabel($row),
+                $this->placeLabel($row, (string) ($broadcast->chat?->city?->name ?? '')),
                 $this->priceLabel($row),
             ]));
 
@@ -1779,10 +1802,7 @@ final class BroadcastDigestComposer
      */
     private function compactLine(object $row, bool $shortDates, array $times, string $mark, ?TelegramChatBroadcastItem $item, string $city, ?string $cityIn = null): string
     {
-        $venue = $this->venueLabel($row);
-        if ($venue === '' && trim((string) ($row->address ?? '')) !== '') {
-            $venue = EventCaptionBuilder::placeFromAddress((string) $row->address, $city);
-        }
+        $venue = $this->placeLabel($row, $city);
         // имя площадки из группы ВК «Настольные игры | ПараDice | Воронеж»: в названии события бывает вторая часть
         $parts = array_filter(array_merge([$venue], preg_split('/\s+[|\/]\s+/u', (string) ($row->venue_name ?? '')) ?: []),
             fn ($p) => mb_strlen(trim((string) $p)) >= 3 && mb_strtolower(trim((string) $p)) !== mb_strtolower(trim($city)));
@@ -2455,6 +2475,17 @@ final class BroadcastDigestComposer
     private function venueLabel(object $row): string
     {
         return VenueName::label($row->venue_name ?? null);
+    }
+
+    /** Площадка, а у события без её карточки — место из адреса: иначе в строке остаются только день и цена. */
+    private function placeLabel(object $row, string $city): string
+    {
+        $venue = $this->venueLabel($row);
+        if ($venue === '' && trim((string) ($row->address ?? '')) !== '') {
+            return EventCaptionBuilder::placeFromAddress((string) $row->address, $city);
+        }
+
+        return $venue;
     }
 
     /**

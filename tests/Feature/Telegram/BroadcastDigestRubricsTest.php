@@ -697,6 +697,49 @@ class BroadcastDigestRubricsTest extends TestCase
             'на двух днях названо больше двух — правило дня снято');
     }
 
+    #[Test]
+    public function the_weekend_rubric_leaves_out_a_town_far_from_the_city(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 1, 2, 2] as $i => $day) {
+            $this->event('Городское '.($i + 1), $day, free: false, priceMin: 700, hour: 12 + $i, description: $long);
+        }
+        // единственное недорогое: без правила его ставит строка «дешевле 500»
+        $far = $this->event('Концерт в Боброве', 1, free: false, priceMin: 500, hour: 17, description: $long);
+        // Бобров, около 85 км от центра Воронежа
+        DB::update('UPDATE events SET location = ST_SetSRID(ST_Point(?, ?), 4326) WHERE id = ?', [40.0345, 51.0973, $far]);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertNotContains($far, $out['event_ids']);
+    }
+
+    #[Test]
+    public function a_weekend_event_without_a_venue_card_is_named_by_its_address(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 2, 2] as $i => $day) {
+            $this->event('С площадкой '.($i + 1), $day, free: false, priceMin: 700, hour: 12 + $i, description: $long);
+        }
+        $home = $this->event('Наш дядя Ваня', 1, free: false, priceMin: 1000, hour: 17, description: $long,
+            address: 'А6 дом-студия, проезд Архангельский д.6');
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertContains($home, $out['event_ids']);
+        $this->assertStringContainsString('А6 дом-студия', $out['caption']);
+    }
+
     /** Во вторник такой рубрики нет: «на выходных» за четыре дня читают один раз. */
     #[Test]
     public function the_weekend_rubric_is_absent_on_a_tuesday(): void
