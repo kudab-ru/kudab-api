@@ -1999,6 +1999,49 @@ class WebEventsTest extends TestCase
             ->assertJsonPath('data.images', [$poster, $scene]);
     }
 
+    public function test_picture_shared_by_other_events_of_the_post_is_not_the_event_poster(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Афиша');
+        $make = fn (string $title) => $this->createEvent($vrn->id, $community->id, $title, now()->addDays(3));
+        [$film, $talk, $quiz, $lecture] = array_map($make, ['Носферату', 'Страшилки', 'Квиз', 'Лекция']);
+        [$rock, $jazz] = array_map($make, ['Рок-вечер', 'Джаз-вечер']);
+
+        $cover = 'https://sun9-1.userapi.com/digest-cover.jpg';
+        $poster = 'https://sun9-1.userapi.com/film.jpg';
+        $barWeek = ['https://sun9-1.userapi.com/rock.jpg', 'https://sun9-1.userapi.com/jazz.jpg'];
+        $this->addPostImages($film, ['film-post' => [$poster]]);
+        $this->addSharedPost([$film, $talk, $quiz, $lecture], 'digest', [$cover]);
+        $this->addSharedPost([$rock, $jazz], 'bar-week', $barWeek);
+
+        $this->getJson("/api/web/events/{$film->id}")->assertOk()->assertJsonPath('data.images', [$poster]);
+        $this->getJson("/api/web/events/{$talk->id}")->assertOk()->assertJsonPath('data.poster', null);
+        $this->getJson("/api/web/events/{$rock->id}")->assertOk()->assertJsonPath('data.images', $barWeek);
+    }
+
+    /**
+     * @param  list<Event>  $events
+     * @param  list<string>  $images
+     */
+    private function addSharedPost(array $events, string $post, array $images): void
+    {
+        $network = DB::table('social_networks')->where('slug', 'vk')->value('id')
+            ?? DB::table('social_networks')->insertGetId(['name' => 'VK', 'slug' => 'vk', 'created_at' => now(), 'updated_at' => now()]);
+        $link = DB::table('community_social_links')
+            ->where(['community_id' => $events[0]->community_id, 'social_network_id' => $network])->value('id')
+            ?? DB::table('community_social_links')->insertGetId([
+                'community_id' => $events[0]->community_id, 'social_network_id' => $network, 'url' => 'https://vk.com/afisha',
+                'created_at' => now(), 'updated_at' => now(),
+            ]);
+        $postId = DB::table('context_posts')->insertGetId(['social_link_id' => $link, 'created_at' => now(), 'updated_at' => now()]);
+        foreach ($events as $event) {
+            DB::table('event_sources')->insert([
+                'event_id' => $event->id, 'social_link_id' => $link, 'source' => 'vk', 'post_external_id' => $post,
+                'context_post_id' => $postId, 'images' => json_encode($images), 'created_at' => now(), 'updated_at' => now(),
+            ]);
+        }
+    }
+
     #[DataProvider('hiddenPictures')]
     public function test_picture_the_site_cannot_show_is_dropped_and_the_next_one_becomes_the_poster(string $hidden, bool $gone): void
     {

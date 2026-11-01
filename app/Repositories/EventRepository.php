@@ -26,6 +26,10 @@ class EventRepository
     // лишний повтор лучше спрятанной афиши
     private const SAME_PICTURE_DIFF = 3.0;
 
+    // картинка поста, из которого вышло больше стольких разных событий, — обложка подборки
+    // или афиша месяца, а не постер события, см. `ownPictures`
+    private const SHARED_PICTURE_MAX_SHOWS = 3;
+
     /**
      * Окно «event ещё актуален» для лент и счётчиков: события могут отображаться
      * до N дней после старта (юзер видит то, что началось час назад). Public —
@@ -2086,6 +2090,54 @@ class EventRepository
     }
 
     /**
+     * Парсер отдаёт картинки поста каждому событию из него. Здесь считаем, у скольких разных
+     * событий (по названию) из тех же постов стоит каждая картинка. В ответе только общие.
+     *
+     * @return array<string, int> адрес картинки → число событий
+     */
+    private function pictureShows(Collection $sources): array
+    {
+        // номер поста не годится: у ВК он бывает без номера стены и совпадает у разных сообществ
+        $posts = $sources->pluck('context_post_id')->filter()->unique()->values()->all();
+
+        $out = [];
+        foreach (array_chunk($posts, 500) as $chunk) {
+            $rows = DB::table('event_sources as es')
+                ->join('events as e', 'e.id', '=', 'es.event_id')
+                ->crossJoin(DB::raw("lateral jsonb_array_elements_text(case when jsonb_typeof(es.images::jsonb) = 'array' then es.images::jsonb else '[]'::jsonb end) as img(url)"))
+                ->whereIn('es.context_post_id', $chunk)
+                ->whereNull('e.deleted_at')
+                ->groupBy('img.url')
+                ->havingRaw('count(distinct lower(e.title)) > 1')
+                ->selectRaw('img.url as url, count(distinct lower(e.title)) as shows')
+                ->get();
+            foreach ($rows as $r) {
+                $out[$r->url] = max($out[$r->url] ?? 0, (int) $r->shows);
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Картинки, общие с другими событиями поста, событию не свои: чужой постер, обложка подборки.
+     * Они остаются, только если своих нет и пост небольшой.
+     *
+     * @param  list<string>  $images
+     * @param  array<string, int>  $shows  см. `pictureShows`
+     * @return list<string>
+     */
+    private static function ownPictures(array $images, array $shows): array
+    {
+        $own = array_values(array_filter($images, fn (string $u) => ! isset($shows[$u])));
+        if ($own !== []) {
+            return $own;
+        }
+
+        return array_values(array_filter($images, fn (string $u) => $shows[$u] <= self::SHARED_PICTURE_MAX_SHOWS));
+    }
+
+    /**
      * Одно фото из повторных постов приходит с разными адресами. Оставляем первую копию: её уже
      * поставил выше выбор обложки. Картинка без отпечатка остаётся.
      *
@@ -2139,10 +2191,12 @@ class EventRepository
         $eventIds = $events->pluck('id')->all();
         $postIds = $events->pluck('original_post_id')->filter()->unique()->values()->all();
 
-        $esRows = DB::table('event_sources')
-            ->select('event_id', 'images')
+        $esAll = DB::table('event_sources')
+            ->select('event_id', 'images', 'context_post_id')
             ->whereIn('event_id', $eventIds)
-            ->get()
+            ->get();
+        $shows = $this->pictureShows($esAll);
+        $esRows = $esAll
             ->groupBy('event_id')
             ->map(function (Collection $rows) {
                 $all = [];
@@ -2233,7 +2287,7 @@ class EventRepository
 
         $prints = $this->imagePrints($esRows->flatten()->merge($cpRows->flatten())->merge($evRows->flatten())->all());
 
-        $events->each(function (Event $e) use ($esRows, $cpRows, $evRows, $prints) {
+        $events->each(function (Event $e) use ($esRows, $cpRows, $evRows, $prints, $shows) {
             $images = $esRows->get($e->id, []);
             if (empty($images) && $e->original_post_id) {
                 $images = $cpRows->get($e->original_post_id, []);
@@ -2247,6 +2301,7 @@ class EventRepository
                 $images,
                 fn (string $u) => ! isset($prints['gone'][md5($u)]) && ! Event::telegramCdn($u),
             ));
+            $images = self::ownPictures($images, $shows);
 
             // Порядок обложки задаёт `App\Support\CoverPicker` — там же почему.
             if (count($images) > 1) {
