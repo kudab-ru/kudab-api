@@ -927,12 +927,9 @@ final class BroadcastDigestComposer
             'gone' => fn ($q) => $q->whereNull('e.deleted_at')->where('e.status', 'active'),
             'city' => fn ($q) => $q->where('c.city_id', $cityId),
             'far' => fn ($q) => CityRadius::apply($q, $cityId, (float) ($theme['max_km'] ?? CityRadius::CHANNEL_KM), 'e', 'v'),
-            // нижняя граница только у календарного окна: у «выходных» без неё попадали бы и будни до них
+            // нижняя граница только у календарного окна: у «выходных» без неё попадал бы вечер пятницы
             'window' => fn ($q) => $q->where(fn ($w) => EventStart::notAfter($w, $until, 'e'))
-                ->when($since !== null, fn ($w) => EventStart::notBefore($w, $since, 'e'))
-                // вечер пятницы — только события с часом: выставка без часа встала бы строкой пятницы
-                ->when(isset($theme['friday_from']) && $since?->isFriday(), fn ($w) => $w->where(fn ($x) => $x->whereNotNull('e.start_time')
-                    ->orWhere('e.start_date', '>', $since->copy()->setTimezone(self::TZ)->toDateString()))),
+                ->when($since !== null, fn ($w) => EventStart::notBefore($w, $since, 'e')),
             'no_time' => match (true) {
                 // часам повода (`hours`) событие без часа не годится: неизвестно, ночью ли оно
                 isset($theme['hours']) => fn ($q) => OccasionCalendar::applyTimed($q, $theme, 'e'),
@@ -1413,17 +1410,12 @@ final class BroadcastDigestComposer
         $bothDays = ($theme['window'] ?? '') === 'weekend';
         $ranked = $this->rankForTheme($rows, $theme, $publishAt);
         $this->kindCaps = array_map('intval', (array) ($theme['kind_caps'] ?? []));
-        $this->fridayCap = isset($theme['friday_from']) ? (int) ($theme['friday_lines'] ?? 1) : null;
 
         /** @var array<int, object> $named */
         $named = [];
 
         if ($bothDays) {
             foreach (array_unique(array_map(fn ($r) => self::dayOf($r), $ranked)) as $day) {
-                // вечер пятницы — добавка к выходным, своей строки ему не обещаем
-                if (! Carbon::parse($day)->isWeekend()) {
-                    continue;
-                }
                 foreach ($ranked as $row) {
                     // день важнее разнообразия вида: воскресенье без строки хуже двух спектаклей
                     if (self::dayOf($row) === $day && $this->fitsNamed($row, $named, $min, $max, $onePerDay)) {
@@ -1661,14 +1653,9 @@ final class BroadcastDigestComposer
 
         $kind = $this->scorer->explain($row)['kind'];
         $sameKind = 0;
-        $friday = $this->fridayCap !== null && self::onFriday($row);
-        $fridays = 0;
         foreach ($named as $other) {
             if (self::samePlace($other, $row) || self::twinCards($other, $row)) {
                 return false;
-            }
-            if ($friday && self::onFriday($other)) {
-                $fridays++;
             }
             // «одна строка на день» — для недельной подборки; на двух днях выходных это потолок в две строки
             if ($onePerDay && self::dayOf($other) === self::dayOf($row)) {
@@ -1680,9 +1667,6 @@ final class BroadcastDigestComposer
         }
         // 0 — вид не ограничен
         if ($kindCap > 0 && $sameKind >= $kindCap) {
-            return false;
-        }
-        if ($friday && $fridays >= $this->fridayCap) {
             return false;
         }
         // свой предел вида (`kind_caps`) не снимает и добор: второй квиз хуже строкой меньше
@@ -1746,14 +1730,6 @@ final class BroadcastDigestComposer
         }
 
         return array_values($named);
-    }
-
-    /** @var int|null строк вечера пятницы не больше этого, см. `friday_lines`; null — без предела */
-    private ?int $fridayCap = null;
-
-    private static function onFriday(object $row): bool
-    {
-        return Carbon::parse($row->start_time)->setTimezone(self::TZ)->isFriday();
     }
 
     /** Вечеринка без темы «Вечеринки»: по слову в названии. */
@@ -1852,9 +1828,8 @@ final class BroadcastDigestComposer
                 }
                 $t = Carbon::parse($r->start_time)->setTimezone(self::TZ);
 
-                // вечер пятницы или субботы и после полуночи
-                return (in_array($t->isoWeekday(), [5, 6], true) && $t->hour >= $nightFrom)
-                    || (in_array($t->isoWeekday(), [6, 7], true) && $t->hour < 5);
+                // вечер субботы и после полуночи
+                return ($t->isSaturday() && $t->hour >= $nightFrom) || ($t->isWeekend() && $t->hour < 5);
             },
             default => fn (object $r) => false,
         };
@@ -1900,8 +1875,7 @@ final class BroadcastDigestComposer
         usort($weakFirst, fn ($a, $b) => ($position[$b] ?? PHP_INT_MAX) <=> ($position[$a] ?? PHP_INT_MAX));
         foreach ($weakFirst as $id) {
             $other = $named[$id];
-            $alone = $bothDays && Carbon::parse(self::dayOf($other))->isWeekend()
-                && count(array_filter($named, fn ($n) => self::dayOf($n) === self::dayOf($other))) === 1;
+            $alone = $bothDays && count(array_filter($named, fn ($n) => self::dayOf($n) === self::dayOf($other))) === 1;
             if (isset($kept[$id]) || $alone) {
                 continue;
             }
@@ -2011,18 +1985,11 @@ final class BroadcastDigestComposer
         $from = $since ?? $publishAt->copy()->setTimezone(self::TZ);
         $forms = (array) ($theme['forms'] ?? []);
 
-        // У «выходных» с вечером пятницы число и ссылка подвала — по субботе и воскресенью, как лента
-        // ?when=weekend; пятница в шапке, только если она есть в строках.
-        $weekend = ($theme['window'] ?? '') === 'weekend';
-        $pageFrom = $weekend ? WeekendWindow::for($publishAt->copy()->setTimezone(self::TZ))[0] : $from;
-        $onPage = array_filter($picked['named'], fn ($r) => ! $weekend || ! Carbon::parse($r->start_time)->lt($pageFrom));
-        $headFrom = count($onPage) < count($picked['named']) ? $from : $pageFrom;
-
         // Город в шапке не пишем — канал городской, а площадки в строках
         // фактов и так его называют.
-        $range = $headFrom->month === $to->month
-            ? sprintf('%d–%d %s', $headFrom->day, $to->day, self::MONTHS[$to->month])
-            : sprintf('%d %s – %d %s', $headFrom->day, self::MONTHS[$headFrom->month], $to->day, self::MONTHS[$to->month]);
+        $range = $from->month === $to->month
+            ? sprintf('%d–%d %s', $from->day, $to->day, self::MONTHS[$to->month])
+            : sprintf('%d %s – %d %s', $from->day, self::MONTHS[$from->month], $to->day, self::MONTHS[$to->month]);
 
         // «Спектакли НЕДЕЛИ» — про тему, и это верно. Но «Вечером недели» или
         // «Бесплатно недели» по-русски не говорят: у рубрик по поводу заголовок
@@ -2031,7 +1998,7 @@ final class BroadcastDigestComposer
 
         // Число — из той же выборки, на которую ведёт подвал. У рубрик без
         // фильтра ленты (тематических) его нет, и шапка остаётся как была.
-        $feed = $this->feedSpec((array) $theme, $broadcast, $pageFrom, $to);
+        $feed = $this->feedSpec((array) $theme, $broadcast, $from, $to);
         $total = ($theme['count'] ?? true) ? $this->feedTotal($feed['count'] ?? null) : null;
 
         // Счёт живёт в подвале («Остальные 329 — вся афиша на выходные»), в шапке только что и когда.
@@ -2161,7 +2128,7 @@ final class BroadcastDigestComposer
 
         // «Остальные N» — только когда N посчитан по той же выборке и правда
         // остались. Названные входят в total, поэтому вычитаем их.
-        $rest = $total !== null ? $total - count($onPage) : 0;
+        $rest = $total !== null ? $total - count($picked['named']) : 0;
 
         // Число БЕЗ существительного: рядом стоит подпись ссылки, и «остальные
         // 23 события — вся афиша событий» повторяет слово дважды в семи словах.
@@ -2645,8 +2612,8 @@ final class BroadcastDigestComposer
     /**
      * Окно рубрики — один метод на отбор и на шапку: пока их было два, шапка
      * обещала восемь дней там, где отбор смотрел пять. У «N дней вперёд» низа
-     * нет (его держит [[PostTiming]]), у «выходных» он обязателен: пятница
-     * в окне только с часа `friday_from`.
+     * нет (его держит [[PostTiming]]), у «выходных» он обязателен — иначе в
+     * подборку попадёт вечер пятницы.
      *
      * @param  array<string, mixed>  $theme
      * @return array{0: Carbon|null, 1: Carbon}
@@ -2658,14 +2625,7 @@ final class BroadcastDigestComposer
         if (($theme['window'] ?? '') === 'weekend') {
             // Той же формулой, что и лента: подвал такой рубрики ведёт на
             // ?when=weekend, и разойтись им нельзя. См. [[WeekendWindow]].
-            [$from, $to] = WeekendWindow::for($at);
-            // вечер пятницы — тоже выходные, если подборка выходит раньше него; число в подвале
-            // всё равно по субботе и воскресенью, см. buildCaption
-            if (isset($theme['friday_from']) && $from->isSaturday() && $at->lt($from)) {
-                $from = $from->copy()->subDay()->setTime((int) $theme['friday_from'], 0);
-            }
-
-            return [$from, $to];
+            return WeekendWindow::for($at);
         }
 
         if (isset($theme['occasion'])) {
