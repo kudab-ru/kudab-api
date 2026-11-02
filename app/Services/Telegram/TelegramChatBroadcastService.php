@@ -270,11 +270,15 @@ class TelegramChatBroadcastService
         string $claimToken,
         ?DateTimeInterface $moment = null,
         ?int $messageId = null,
+        bool $pinned = false,
     ): bool {
         $ok = $this->broadcastItemRepository->markPostedIfClaimed($itemId, $claimToken, $moment);
 
         if ($ok) {
             $this->rememberMessageId($itemId, $messageId);
+            if ($pinned && $messageId !== null && $messageId > 0) {
+                app(BroadcastPin::class)->remember($itemId, $messageId, Carbon::now());
+            }
             $this->bookNextDigestAfter($itemId);
         }
 
@@ -547,6 +551,12 @@ class TelegramChatBroadcastService
                 $tasks[] = $countTask;
             }
 
+            // правка вышедшего поста не новый пост: зазор канала её не держит
+            $editTask = app(BroadcastWeekendEdit::class)->task($broadcast, $chat, $now);
+            if ($editTask !== null) {
+                $tasks[] = $editTask;
+            }
+
             // зазор на весь канал, а не в гейтах по типу: иначе каждая новая рубрика его обходила бы
             $lastPostedAt = $this->lastPostedAt((int) $broadcast->id);
             $channelFreeAt = $lastPostedAt?->copy()->addMinutes($broadcast->min_gap_minutes);
@@ -806,7 +816,7 @@ class TelegramChatBroadcastService
                     'type' => 'publish',
                     'telegram_id' => (int) $ownerTelegramId,
                     'claim_token' => $claimToken,
-                ];
+                ] + app(BroadcastPin::class)->forTask($item, $broadcast, $now);
             }
 
             if (\count($tasks) >= $limit) {

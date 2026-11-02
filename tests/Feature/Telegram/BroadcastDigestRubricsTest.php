@@ -801,6 +801,42 @@ class BroadcastDigestRubricsTest extends TestCase
     }
 
     #[Test]
+    public function on_saturday_morning_the_bot_rewrites_the_weekend_post_once(): void
+    {
+        [$item] = $this->postedWeekendWithFriday();
+        $item->message_id = 300;
+        $item->save();
+
+        $this->assertNull($this->weekendEditAt('2026-09-19 04:59'));
+
+        $task = $this->weekendEditAt('2026-09-19 05:00');
+        $this->assertSame(300, $task['message_id'] ?? null);
+        $this->assertStringNotContainsString('Спектакль в пятницу', (string) ($task['caption'] ?? ''));
+        $this->botReportsEdit((int) $item->id, true);
+
+        $this->assertNull($this->weekendEditAt('2026-09-19 06:00'));
+    }
+
+    #[Test]
+    public function a_failed_weekend_edit_is_retried_after_a_pause_and_then_left_alone(): void
+    {
+        [$item] = $this->postedWeekendWithFriday();
+        $item->message_id = 300;
+        $item->save();
+
+        $this->assertNotNull($this->weekendEditAt('2026-09-19 05:00'));
+        $this->botReportsEdit((int) $item->id, false);
+        $this->assertNull($this->weekendEditAt('2026-09-19 05:01'));
+
+        $this->assertNotNull($this->weekendEditAt('2026-09-19 05:16'));
+        $this->botReportsEdit((int) $item->id, false);
+        $this->assertNotNull($this->weekendEditAt('2026-09-19 05:32'));
+        $this->botReportsEdit((int) $item->id, false);
+
+        $this->assertNull($this->weekendEditAt('2026-09-19 06:00'));
+    }
+
+    #[Test]
     public function the_weekend_rubric_always_names_a_free_event_with_a_time(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow'));
@@ -2123,6 +2159,27 @@ class BroadcastDigestRubricsTest extends TestCase
         }
 
         return [$item->fresh(), $friday];
+    }
+
+    /** @return array<string, mixed>|null задача боту переписать вышедший пост */
+    private function weekendEditAt(string $at): ?array
+    {
+        Carbon::setTestNow(Carbon::parse($at, 'Europe/Moscow'));
+
+        return collect(app(\App\Services\Telegram\TelegramChatBroadcastService::class)->collectDueSingleRuns(Carbon::now(), 10))
+            ->first(fn ($t) => ($t['type'] ?? null) === 'edit');
+    }
+
+    private function botReportsEdit(int $itemId, bool $ok): void
+    {
+        config(['services.bot.shared_token' => 'test-bot-token']);
+        $this->withHeader('Authorization', 'Bearer test-bot-token')
+            ->postJson('/api/bot/broadcast/single/mark-item-edited', [
+                'item_id' => $itemId,
+                'ok' => $ok,
+                'error' => $ok ? null : 'Bad Request: message to edit not found',
+            ])
+            ->assertOk()->assertJson(['ok' => true]);
     }
 
     /** Пять сильных строк «не на виду» на субботу и воскресенье после четверга: слабое встанет только обязательной строкой. */

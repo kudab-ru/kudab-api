@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Bot;
 use App\Http\Controllers\Controller;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\TelegramMessageTemplate;
+use App\Services\Telegram\BroadcastWeekendEdit;
 use App\Services\Telegram\TelegramChatBroadcastService;
 use App\Services\Telegram\TelegramMessageTemplateService;
 use Carbon\Carbon;
@@ -423,6 +424,8 @@ class TelegramChatBroadcastController extends Controller
             'claim_token' => ['required', 'string', 'max:40'],
             'posted_at' => ['nullable', 'string'],
             'message_id' => ['nullable', 'integer'],
+            // бот закрепил пост; старый бот поля не шлёт
+            'pinned' => ['sometimes', 'boolean'],
         ]);
 
         $moment = null;
@@ -440,6 +443,7 @@ class TelegramChatBroadcastController extends Controller
                 (string) $validated['claim_token'],
                 $moment,
                 isset($validated['message_id']) ? (int) $validated['message_id'] : null,
+                (bool) ($validated['pinned'] ?? false),
             );
 
             return response()->json(['ok' => $ok]);
@@ -448,6 +452,30 @@ class TelegramChatBroadcastController extends Controller
 
             return response()->json(['ok' => false, 'error' => 'Не удалось отметить портрет как опубликованный.']);
         }
+    }
+
+    /**
+     * Чем кончилась правка вышедшего поста, см. BroadcastWeekendEdit.
+     *
+     * POST /api/bot/broadcast/single/mark-item-edited
+     * Body: { "item_id": 987, "ok": false, "error": "..." }
+     */
+    public function markItemEdited(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'item_id' => ['required', 'integer'],
+            'ok' => ['required', 'boolean'],
+            'error' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $ok = app(BroadcastWeekendEdit::class)->record(
+            (int) $validated['item_id'],
+            (bool) $validated['ok'],
+            $validated['error'] ?? null,
+            Carbon::now(),
+        );
+
+        return response()->json(['ok' => $ok]);
     }
 
     /**

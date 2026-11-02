@@ -374,6 +374,8 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     // Портрет площадки: mark по item_id (у venue-поста нет event_id)
     Route::post('/broadcast/single/mark-item-sent', [TelegramChatBroadcastController::class, 'markItemSent']);
     Route::post('/broadcast/single/mark-item-failed', [TelegramChatBroadcastController::class, 'markItemFailed']);
+    // правка вышедшего поста: «На выходных» в субботу без пятницы (BroadcastWeekendEdit)
+    Route::post('/broadcast/single/mark-item-edited', [TelegramChatBroadcastController::class, 'markItemEdited']);
 
     // Замер подписчиков: число отдаёт телеграм только боту, задачу на замер
     // ставит API раз в сутки вместе с остальными задачами опроса.
