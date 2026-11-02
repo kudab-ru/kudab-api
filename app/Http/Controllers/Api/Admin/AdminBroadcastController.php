@@ -4761,9 +4761,7 @@ class AdminBroadcastController extends Controller
                 TelegramChatBroadcastItem::KIND_VENUE => $venue ? 'Портрет: '.$venue->name : null,
                 // Рубрика, а не общее слово: подборок в неделю бывает
                 // несколько, и по «Подборка недели» их не различить.
-                TelegramChatBroadcastItem::KIND_DIGEST => trim((string) (
-                    ($i->digest_meta ?? [])['theme_title'] ?? ''
-                )) ?: 'Подборка',
+                TelegramChatBroadcastItem::KIND_DIGEST => $i->digestRubricTitle() ?? 'Подборка',
                 default => null,
             },
             // Имя чистим тем же правилом, что печатает пост, — [[VenueName]].

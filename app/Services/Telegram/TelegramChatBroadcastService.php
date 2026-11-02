@@ -3535,8 +3535,7 @@ class TelegramChatBroadcastService
                 continue;
             }
 
-            $slug = $item->digestTheme() ?? ($item->digest_meta['theme_wanted'] ?? null);
-            $title = collect((array) config('broadcast_digest.themes', []))->firstWhere('slug', $slug)['title'] ?? null;
+            $title = $item->digestRubricTitle();
 
             $tasks[] = [
                 'type' => 'notice',

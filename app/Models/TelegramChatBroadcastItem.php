@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Telegram\BroadcastDigestComposer;
 use App\Services\Telegram\PickReason;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -246,6 +247,22 @@ class TelegramChatBroadcastItem extends Model
         $v = trim((string) (($this->digest_meta['theme'] ?? '')));
 
         return $v === '' ? null : $v;
+    }
+
+    /** Рубрика для людей: у собранной подборки — какой она вышла, у брони — какую ждёт её день в сетке. */
+    public function digestRubricTitle(): ?string
+    {
+        $title = trim((string) ($this->digest_meta['theme_title'] ?? ''));
+        if ($title !== '') {
+            return $title;
+        }
+
+        $slug = $this->digestTheme() ?? ($this->digest_meta['theme_wanted'] ?? null);
+        if ($slug === BroadcastDigestComposer::WEEK_THEME) {
+            return 'Тема недели';
+        }
+
+        return collect((array) config('broadcast_digest.themes', []))->firstWhere('slug', $slug)['title'] ?? null;
     }
 
     /** Рубрике не нужен текст модели (`text => false` в config/broadcast_digest.php). */

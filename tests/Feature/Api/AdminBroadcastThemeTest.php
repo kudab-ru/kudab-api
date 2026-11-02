@@ -14,6 +14,7 @@ use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
@@ -70,6 +71,34 @@ class AdminBroadcastThemeTest extends TestCase
 
         $this->assertSame('Концерты', $row['theme']['name'] ?? null,
             'по теме в ленте видно, чем занята неделя');
+    }
+
+    public static function digestRubrics(): array
+    {
+        return [
+            'бронь рубрики' => [['theme_wanted' => 'besplatno'], 'Бесплатно'],
+            'бронь «Темы недели»' => [['theme_wanted' => 'tema-nedeli'], 'Тема недели'],
+            'собранная подборка' => [['theme_wanted' => 'tema-nedeli', 'theme' => 'spektakli', 'theme_title' => 'Спектакли'], 'Спектакли'],
+        ];
+    }
+
+    #[DataProvider('digestRubrics')]
+    public function test_digest_row_is_named_by_its_rubric_before_it_is_composed(array $meta, string $title): void
+    {
+        $broadcast = $this->makeChannel();
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $broadcast->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_PENDING;
+        $item->publish_at = Carbon::now()->addDays(2)->setTime(16, 0);
+        $item->digest_meta = $meta;
+        $item->save();
+
+        $res = $this->getJson("/api/admin/broadcast/channels/{$broadcast->id}/feed");
+
+        $res->assertOk();
+        $this->assertSame($title, collect($res->json('data.items'))->firstWhere('id', $item->id)['title'] ?? null);
     }
 
     /**
