@@ -63,6 +63,18 @@ final class WeekendPage
     }
 
     /**
+     * «Главное» ближайших выходных для главной сайта, с запасом: в пятницу часть его уже стоит в стене главной.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function picks(City $city, Carbon $now): array
+    {
+        [$from, $to] = $this->windows($now)[0];
+
+        return $this->weekend($city, $from, $to)['picks'];
+    }
+
+    /**
      * @param  array<string, mixed>  $current
      * @return array<string, mixed>
      */

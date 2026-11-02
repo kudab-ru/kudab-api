@@ -2058,6 +2058,33 @@ class EventRepository
     }
 
     /**
+     * Карточки ленты для готового списка событий, в его порядке: «Главное» главной сайта отбирает
+     * OccasionPage, а показывать его надо так же, как ленту. Невидимое на сайте выпадает.
+     *
+     * @param  list<int>  $ids
+     */
+    public function webCardsByIds(array $ids): EloquentCollection
+    {
+        if ($ids === []) {
+            return new EloquentCollection;
+        }
+        $order = array_flip($ids);
+        $items = $this->webVisibleBaseQuery()
+            ->whereIn('events.id', $ids)
+            ->with(['venue:id,slug,name,kind', 'interests:id,slug,name'])
+            ->get()
+            ->sortBy(fn (Event $e) => $order[(int) $e->id])
+            ->values();
+        $items = new EloquentCollection($items->all());
+
+        $this->hydrateImages($items);
+        $items->each(fn ($e) => $e->makeHidden(['__past_rank', '__is_past', '__gray_rank', '__img_rank']));
+        $this->hydrateSiblings($items);
+
+        return $items;
+    }
+
+    /**
      * Сверка картинок по `image_prints`: серые копии для поиска повторов и картинки, которых у
      * источника больше нет. Ключ — md5 адреса.
      *

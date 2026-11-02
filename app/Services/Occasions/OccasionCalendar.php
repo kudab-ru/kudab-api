@@ -49,17 +49,7 @@ final class OccasionCalendar
     public static function occurrence(array $theme, Carbon $at): ?array
     {
         $at = $at->copy()->setTimezone(self::TZ);
-        $raw = $theme['occasion'];
-        $dates = match (true) {
-            $raw === 'floating' => self::floating((string) $theme['slug']),
-            is_array($raw) => array_map(fn ($d) => [(string) $d, null], $raw),
-            default => array_map(
-                fn (int $year) => [sprintf('%d-%s', $year, $raw), null],
-                [$at->year, $at->year + 1],
-            ),
-        };
-
-        foreach ($dates as [$start, $end]) {
+        foreach (self::dates($theme, $at) as [$start, $end]) {
             $day = Carbon::parse($start, self::TZ)->startOfDay();
             [$from, $to] = self::span($theme, $day, $end);
             if ($to->gte($at)) {
@@ -68,6 +58,47 @@ final class OccasionCalendar
         }
 
         return null;
+    }
+
+    /**
+     * Последний повод, окно которого уже кончилось: вне сезона страница показывает, как он прошёл.
+     *
+     * @param  array<string, mixed>  $theme
+     * @return array{day: Carbon, from: Carbon, to: Carbon}|null
+     */
+    public static function previous(array $theme, Carbon $at): ?array
+    {
+        $at = $at->copy()->setTimezone(self::TZ);
+        $last = null;
+        foreach (self::dates($theme, $at) as [$start, $end]) {
+            $day = Carbon::parse($start, self::TZ)->startOfDay();
+            [$from, $to] = self::span($theme, $day, $end);
+            if ($to->lt($at)) {
+                $last = ['day' => $day, 'from' => $from, 'to' => $to];
+            }
+        }
+
+        return $last;
+    }
+
+    /**
+     * Даты повода по порядку: [начало, конец или null]. У «месяц-день» берётся и прошлый год:
+     * окно ёлок от 31 декабря идёт до 10 января, и в эти дни праздник ещё прошлогодний.
+     *
+     * @return list<array{0: string, 1: string|null}>
+     */
+    private static function dates(array $theme, Carbon $at): array
+    {
+        $raw = $theme['occasion'];
+
+        return match (true) {
+            $raw === 'floating' => self::floating((string) $theme['slug']),
+            is_array($raw) => array_map(fn ($d) => [(string) $d, null], $raw),
+            default => array_map(
+                fn (int $year) => [sprintf('%d-%s', $year, $raw), null],
+                [$at->year - 1, $at->year, $at->year + 1],
+            ),
+        };
     }
 
     /**

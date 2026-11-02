@@ -53,6 +53,19 @@ final class DayPage
     }
 
     /**
+     * Сборка одного дня без вкладок и погоды: главной сайта нужны только «Главное» и программа.
+     *
+     * @param  int  $offset  0 — сегодня, 1 — завтра
+     * @return array<string, mixed>
+     */
+    public function data(City $city, Carbon $now, int $offset): array
+    {
+        $day = $now->copy()->setTimezone(self::TZ)->startOfDay()->addDays($offset);
+
+        return $this->day($city, $day, $offset === 0);
+    }
+
+    /**
      * @param  array<string, mixed>  $current
      * @return array<string, mixed>
      */

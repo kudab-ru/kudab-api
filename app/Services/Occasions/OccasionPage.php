@@ -43,6 +43,9 @@ final class OccasionPage
     /** столько картинок листает карточка под мышью: дальше обычно повторы и случайные кадры */
     private const SLIDES = 4;
 
+    /** столько строк прошлой программы показывает страница вне сезона, см. past */
+    private const PAST_LIMIT = 15;
+
     private const WEEKDAYS = [1 => 'понедельник', 2 => 'вторник', 3 => 'среда', 4 => 'четверг', 5 => 'пятница', 6 => 'суббота', 7 => 'воскресенье'];
 
     private const WEEKDAYS_AT = [1 => 'в понедельник', 2 => 'во вторник', 3 => 'в среду', 4 => 'в четверг', 5 => 'в пятницу', 6 => 'в субботу', 7 => 'в воскресенье'];
@@ -109,7 +112,8 @@ final class OccasionPage
         $headline = trim((string) preg_replace('/\s+(?=[:,.]|$)/u', '',
             str_replace('{city}', $cityIn !== null ? 'в '.$cityIn : '', (string) ($theme['headline'] ?? $theme['title']))));
         $total = count($rows);
-        $lead = $this->lead($theme, $total, $rows, $kinds);
+        $past = $total < 3 ? $this->past($theme, $city, $now) : null;
+        $lead = $total === 0 && $past !== null ? $this->pastLead($past) : $this->lead($theme, $total, $rows, $kinds);
 
         return [
             'occasion' => [
@@ -136,8 +140,51 @@ final class OccasionPage
             'kinds' => $kinds,
             'faq' => $this->faq($theme, $cityIn, $day, $picks, $rows),
             'next' => $this->next($theme, $now),
-            'seo' => $this->seo($headline, $total, $day, $window, $theme, $lead),
+            'past' => $past,
+            'seo' => $this->seo($headline, $total, $day, $window, $theme, $lead, $past),
         ];
+    }
+
+    /**
+     * Как прошёл повод в прошлый раз. Пока новой программы нет, страница показывает прошлую и остаётся
+     * в поиске, иначе каждый год её пришлось бы находить заново. null — прошлого раза нет или в нём меньше трёх событий.
+     *
+     * @param  array<string, mixed>  $theme
+     * @return array{year: int, total: int, venues: int, kinds: list<array{key: string, label: string, count: int}>, days: list<array<string, mixed>>}|null
+     */
+    private function past(array $theme, City $city, Carbon $now): ?array
+    {
+        $prev = OccasionCalendar::previous(OccasionCalendar::forPage($theme), $now);
+        if ($prev === null) {
+            return null;
+        }
+        $window = [$prev['from'], $prev['to']];
+        $events = $this->events($theme, $city, $window);
+        $this->scorer->prepare($events->all());
+        $rows = $this->foldSeries($this->rows($events, $now));
+        if (count($rows) < 3) {
+            return null;
+        }
+        // самое интересное, но по порядку дней и часов, как в программе
+        $top = collect($rows)->sortByDesc('score')->take(self::PAST_LIMIT)->sortKeys()->values()->all();
+
+        return [
+            'year' => $prev['day']->year,
+            'total' => count($rows),
+            'venues' => count(array_unique(array_map(fn (array $r) => $r['venue_id'] ?? 'a'.mb_strtolower((string) $r['venue']), $rows))),
+            'kinds' => $this->kinds($rows),
+            'days' => array_map(fn (array $d) => array_diff_key($d, ['rest' => true]), $this->days($top, null)),
+        ];
+    }
+
+    /** @param  array{year: int, total: int, venues: int, kinds: list<array{key: string, label: string, count: int}>}  $past */
+    private function pastLead(array $past): string
+    {
+        $list = $this->kindList($past['kinds']);
+
+        return 'Программа появится ближе к дате. В '.$past['year'].' году было '.$past['total'].' '
+            .$this->plural($past['total'], 'событие', 'события', 'событий').' на '.$past['venues'].' '
+            .$this->plural($past['venues'], 'площадке', 'площадках', 'площадках').($list !== '' ? ': '.$list : '').'.';
     }
 
     /**
@@ -620,12 +667,14 @@ final class OccasionPage
         $kinds = [];
         foreach ($ranked as [$e]) {
             $series = 's'.($e->event_group_id ?: mb_strtolower(trim((string) $e->title)));
+            // «Кафе "Отчаяние"» и «Спектакль «Кафе «Отчаяние»»» у двух записей одного театра — одно событие
+            $title = 't'.$this->sameTitle((string) $e->title);
             $place = 'p'.($e->venue_id ?: mb_strtolower((string) $e->address));
             $kind = $this->kindOf($e);
-            if (isset($seen[$series]) || isset($seen[$place]) || ($kinds[$kind] ?? 0) >= 2) {
+            if (isset($seen[$series]) || isset($seen[$title]) || isset($seen[$place]) || ($kinds[$kind] ?? 0) >= 2) {
                 continue;
             }
-            $seen[$series] = $seen[$place] = true;
+            $seen[$series] = $seen[$title] = $seen[$place] = true;
             $kinds[$kind] = ($kinds[$kind] ?? 0) + 1;
             $ids[] = (int) $e->id;
             if (count($ids) >= $limit) {
@@ -815,12 +864,23 @@ final class OccasionPage
         $from = Carbon::parse(min($dates), self::TZ);
         $to = Carbon::parse(max($dates), self::TZ);
         $span = $this->span($from, $to);
+        $list = $this->kindList($kinds);
+
+        return $total.' '.$this->plural($total, 'событие', 'события', 'событий').' '.$span.($list !== '' ? ': '.$list : '').'.';
+    }
+
+    /**
+     * «вечеринки, квизы и маркеты» — три самых частых вида.
+     *
+     * @param  list<array{key: string, label: string, count: int}>  $kinds
+     */
+    private function kindList(array $kinds): string
+    {
         $names = array_map(fn ($k) => $this->kindLabel($k['key'], $k['count']),
             array_values(array_filter($kinds, fn ($k) => $k['key'] !== 'for-kids')));
         $names = array_slice($names, 0, 3);
-        $list = count($names) > 1 ? implode(', ', array_slice($names, 0, -1)).' и '.end($names) : ($names[0] ?? '');
 
-        return $total.' '.$this->plural($total, 'событие', 'события', 'событий').' '.$span.($list !== '' ? ': '.$list : '').'.';
+        return count($names) > 1 ? implode(', ', array_slice($names, 0, -1)).' и '.end($names) : ($names[0] ?? '');
     }
 
     /**
@@ -998,9 +1058,10 @@ final class OccasionPage
     /**
      * @param  array<string, mixed>  $theme
      * @param  array{0: Carbon, 1: Carbon}|null  $window
+     * @param  array{year: int, total: int, venues: int}|null  $past  см. past
      * @return array{title: string, description: string}
      */
-    private function seo(string $headline, int $total, ?Carbon $day, ?array $window, array $theme, string $lead): array
+    private function seo(string $headline, int $total, ?Carbon $day, ?array $window, array $theme, string $lead, ?array $past = null): array
     {
         $when = $window ? $this->windowLabel($theme, $window) : '';
         $date = $this->titleDate($theme, $day, $window);
@@ -1010,9 +1071,13 @@ final class OccasionPage
 
         return [
             'title' => $title,
-            'description' => $total > 0
-                ? $headline.'. '.$lead.' Главное с ценами и вся программа по дням.'
-                : $headline.' '.$when.': программа появится ближе к празднику.',
+            'description' => match (true) {
+                $total > 0 => $headline.'. '.$lead.' Главное с ценами и вся программа по дням.',
+                $past !== null => $headline.' '.$when.': программа появится ближе к празднику. В '.$past['year'].' году было '
+                    .$past['total'].' '.$this->plural($past['total'], 'событие', 'события', 'событий').' на '.$past['venues'].' '
+                    .$this->plural($past['venues'], 'площадке', 'площадках', 'площадках').'.',
+                default => $headline.' '.$when.': программа появится ближе к празднику.',
+            },
         ];
     }
 
@@ -1045,10 +1110,14 @@ final class OccasionPage
         return (isset($theme['hours']) ? 'вечер ' : '').$this->dayMonth($day).' · '.self::WEEKDAYS[$day->isoWeekday()];
     }
 
-    /** Праздник длиной в неделю и больше: события растянуты, одного дня у него нет. */
+    /**
+     * Праздник длиной в неделю и больше: события растянуты, одного дня у него нет. У плавающего окно задают
+     * вписанные даты, а не `window_*`, поэтому сезон у него помечен в конфиге (`season`).
+     */
     private function isSeason(array $theme): bool
     {
-        return ! isset($theme['hours']) && (int) ($theme['window_before'] ?? 0) + (int) ($theme['window_after'] ?? 0) >= 6;
+        return ! empty($theme['season'])
+            || (! isset($theme['hours']) && (int) ($theme['window_before'] ?? 0) + (int) ($theme['window_after'] ?? 0) >= 6);
     }
 
     /** «31 октября»; у окна в несколько дней — «с 19 декабря по 10 января», у ночи — «вечер 31 декабря». */

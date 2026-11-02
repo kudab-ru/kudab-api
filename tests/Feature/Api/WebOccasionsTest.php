@@ -326,6 +326,30 @@ class WebOccasionsTest extends TestCase
     }
 
     #[Test]
+    public function in_early_january_the_yolki_page_keeps_the_current_season(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2027-01-05 12:00', 'Europe/Moscow'));
+        $show = $this->event('Новогодний спектакль для малышей', '2027-01-06 11:00');
+        $this->theme($show, 'theatre');
+
+        $this->assertSame([$show], $this->shown('elki'));
+    }
+
+    #[Test]
+    public function out_of_season_the_page_shows_how_the_holiday_went_last_time(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-11-02 12:00', 'Europe/Moscow'));
+        $this->event('Хэллоуин в баре', '2026-10-30 19:00');
+        $this->event('Квиз: Хэллоуин', '2026-10-31 18:00');
+        $this->event('Хэллоуинская вечеринка', '2026-10-31 22:00');
+
+        $data = $this->getJson('/api/web/occasions/halloween?city=voronezh')->assertOk()->json('data');
+
+        $this->assertSame(0, $data['occasion']['total']);
+        $this->assertSame([2026, 3], [$data['past']['year'], $data['past']['total']]);
+    }
+
+    #[Test]
     public function a_new_year_night_without_an_hour_counts_when_it_names_the_night(): void
     {
         $night = $this->event('Новогодняя ночь в ресторане «Балаган»', '2026-12-31 00:00');

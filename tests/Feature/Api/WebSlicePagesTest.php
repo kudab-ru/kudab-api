@@ -166,6 +166,18 @@ class WebSlicePagesTest extends TestCase
     }
 
     #[Test]
+    public function the_home_wall_puts_todays_main_events_before_the_nearest_ones(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-23 12:00', 'Europe/Moscow'));
+        $this->withPhoto($this->event('Квест «Тайна подвала»', '2026-10-23 13:00'));
+        $this->withTheme($this->withPhoto($this->event('Концерт группы Сова', '2026-10-23 19:00')), 'music');
+
+        $wall = array_column($this->getJson('/api/web/home?city=voronezh')->assertOk()->json('data.wall'), 'title');
+
+        $this->assertSame(['Концерт группы Сова', 'Квест «Тайна подвала»'], $wall);
+    }
+
+    #[Test]
     public function the_holiday_events_stay_in_the_programme_while_its_card_leads_the_main(): void
     {
         $party = $this->withPhoto($this->event('Хэллоуинская вечеринка', '2026-10-31 18:00'));
