@@ -1092,6 +1092,30 @@ class BroadcastDigestPrepareTest extends TestCase
         $this->assertTrue($item->is_off_grid);
         $this->assertNotEmpty($item->pick_meta['held'] ?? null);
         $this->assertCount(2, $this->rosterOf($item));
+
+        $told = fn () => collect(app(\App\Services\Telegram\TelegramChatBroadcastService::class)->collectDueSingleRuns(Carbon::now()))
+            ->where('kind', 'digest_held')->count();
+        $this->assertSame(1, $told(), 'владельцу пишут о снятии');
+        $this->assertSame(0, $told(), 'и только раз');
+    }
+
+    public function test_hand_made_digest_whose_events_pass_before_its_slot_is_held_a_day_ahead(): void
+    {
+        [$item, $named, $candidate] = $this->composedDigestWithSpare();
+        $this->postJson("/api/admin/broadcast/items/{$item->id}/digest-events/replace", [
+            'out' => $named[2]['id'],
+            'in' => $candidate,
+        ])->assertOk();
+        Carbon::setTestNow(Carbon::now()->addDays(7));
+        $item->refresh();
+        $item->publish_at = Carbon::now()->addHours(12);
+        $item->save();
+
+        $this->artisan('broadcast:prepare-digests')->assertSuccessful();
+
+        $item->refresh();
+        $this->assertNull($item->publish_at);
+        $this->assertNotEmpty($item->pick_meta['held'] ?? null);
     }
 
     /** @return list<array<string, mixed>> */

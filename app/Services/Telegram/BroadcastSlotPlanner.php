@@ -134,6 +134,15 @@ class BroadcastSlotPlanner
             ->where('publish_at', '>=', $start->copy()->utc())
             ->pluck('publish_at');
 
+        // подборку сняли с дня до выхода: её час свободен для обычного поста
+        $released = $released->merge(TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->whereNull('publish_at')
+            ->whereNotNull('pick_meta->'.TelegramChatBroadcastService::DIGEST_HELD_FROM)
+            ->pluck('pick_meta')
+            ->map(fn ($meta) => ((array) $meta)[TelegramChatBroadcastService::DIGEST_HELD_FROM]));
+
         foreach ($released as $at) {
             unset($held[$this->key($at)]);
         }

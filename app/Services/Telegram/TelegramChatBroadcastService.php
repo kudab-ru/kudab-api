@@ -539,6 +539,8 @@ class TelegramChatBroadcastService
                 $tasks[] = $tomorrowNotice;
             }
 
+            array_push($tasks, ...$this->buildHeldNoticeTasks($broadcast, $chat, $now));
+
             // тоже до поиска активной записи: подписчиков считаем и у канала без неё
             $countTask = $this->buildSubscriberCountTask($broadcast, $chat, $now);
             if ($countTask !== null) {
@@ -1033,7 +1035,7 @@ class TelegramChatBroadcastService
      * Собрать подборку заранее (prepare_hours до слота). Замораживается состав,
      * подпись всё равно пересоберётся перед отправкой.
      *
-     * @return string что случилось: composed | text_requested | ready | failed
+     * @return string что случилось: composed | text_requested | ready | held | failed
      */
     public function prepareDigestAhead(
         TelegramChatBroadcastItem $item,
@@ -1044,6 +1046,12 @@ class TelegramChatBroadcastService
         $at = $item->publish_at ? Carbon::parse($item->publish_at) : $now;
 
         if ($this->digestRosterSize($item) > 0 && $item->digestTheme() !== null) {
+            // снимаем сейчас, а не в час выхода: слот успеет занять обычный пост,
+            // и текст не закажут под события, которые к выходу пройдут
+            if ($this->heldAsThin($item, $at, $now)) {
+                return 'held';
+            }
+
             // текст просим один раз (text_asked): прогон почасовой, и неудачная генерация
             // иначе переспрашивалась бы каждый час, за деньги
             $meta = (array) ($item->digest_meta ?? []);
@@ -1106,18 +1114,15 @@ class TelegramChatBroadcastService
             return true;
         }
 
-        $byHand = $this->digestTouchedByHand($item);
-        $dropped = $this->healDigestRoster($item, $now, $byHand);
-        if ($byHand && $dropped > 0 && $this->digestRosterSize($item) < self::HAND_DIGEST_MIN) {
-            $this->holdDigest($item, 'из состава пропали события, осталось строк: '.$this->digestRosterSize($item));
-
+        if ($this->heldAsThin($item, $now, $now)) {
             return false;
         }
 
+        $byHand = $this->digestTouchedByHand($item);
         $draft = $this->digestComposer->recompose($item, $broadcast, $now);
 
         if ($draft === null && $byHand) {
-            $this->holdDigest($item, 'состав не собирается к часу выхода');
+            $this->holdDigest($item, 'состав не собирается к часу выхода', $now);
 
             return false;
         }
@@ -1169,6 +1174,30 @@ class TelegramChatBroadcastService
 
     /** Ключ `pick_meta`: почему подборку сняли с дня и ждут человека; показывает админка. */
     public const DIGEST_HELD = 'held';
+
+    /** Ключ `pick_meta`: на какой час стояла снятая подборка. Без него владельцу о снятии не пишем. */
+    public const DIGEST_HELD_FROM = 'held_from';
+
+    /**
+     * Свести состав к часу выхода `$at`. Подборку, которую трогал человек, с числом строк меньше
+     * HAND_DIGEST_MIN снять с дня: решает он. true — снята.
+     */
+    private function heldAsThin(TelegramChatBroadcastItem $item, Carbon $at, Carbon $now): bool
+    {
+        $byHand = $this->digestTouchedByHand($item);
+        $dropped = $this->healDigestRoster($item, $at, $byHand);
+        if (! $byHand || $dropped === 0 || $this->digestRosterSize($item) >= self::HAND_DIGEST_MIN) {
+            return false;
+        }
+
+        $this->holdDigest(
+            $item,
+            'из состава выпали события, которые к часу выхода прошли или удалены; строк осталось: '.$this->digestRosterSize($item),
+            $now,
+        );
+
+        return true;
+    }
 
     /**
      * Подборку трогал человек: правил состав, время, текст или картинки, либо поставил её сам. Такую
@@ -1264,11 +1293,16 @@ class TelegramChatBroadcastService
      * Снять подборку с дня: вне очереди и без дня она уходит только по кнопке. Причину видно в ленте
      * админки и в сводке канала.
      */
-    private function holdDigest(TelegramChatBroadcastItem $item, string $reason): void
+    private function holdDigest(TelegramChatBroadcastItem $item, string $reason, Carbon $now): void
     {
+        $from = $item->publish_at ? Carbon::parse($item->publish_at) : $now;
         $item->publish_at = null;
         $item->is_off_grid = true;
-        $item->pick_meta = [...(array) ($item->pick_meta ?? []), self::DIGEST_HELD => $reason];
+        $item->pick_meta = [
+            ...(array) ($item->pick_meta ?? []),
+            self::DIGEST_HELD => $reason,
+            self::DIGEST_HELD_FROM => $from->toIso8601String(),
+        ];
         $item->save();
 
         Log::warning('broadcast.digest.held', ['item_id' => $item->id, 'reason' => $reason]);
@@ -3169,6 +3203,26 @@ class TelegramChatBroadcastService
     }
 
     /**
+     * Сколько часов тишины уже простой: самый длинный обычный перерыв между слотами плюс ещё окно.
+     * При пороге в два окна ночь между последним и первым слотом уже была бы простоем, и сигнал приходил бы каждое утро.
+     */
+    public function idleAfterHours(TelegramChatBroadcast $broadcast): ?int
+    {
+        $window = $this->periodWindowHours($broadcast);
+        $slots = $this->slotPlanner->requiredSlots($broadcast);
+        if ($window === null || count($slots) < 2 || ! str_starts_with(trim((string) $broadcast->period), 'daily_')) {
+            return $window === null ? null : $window * 2;
+        }
+
+        $gaps = [24 - end($slots) + $slots[0]];
+        foreach (array_slice($slots, 1) as $i => $hour) {
+            $gaps[] = $hour - $slots[$i];
+        }
+
+        return max($gaps) + $window;
+    }
+
+    /**
      * Попросить бота посчитать подписчиков, раз в сутки. Через бота: getChatMemberCount
      * отвечает только админу канала с токеном, а api в телеграм не ходит.
      *
@@ -3298,7 +3352,7 @@ class TelegramChatBroadcastService
     }
 
     /**
-     * Задача «канал молчит» или null. Порог — два пропущенных окна подряд (periodWindowHours),
+     * Задача «канал молчит» или null. Порог — idleAfterHours,
      * напоминание не чаще раза в сутки: поллер тикает каждую минуту.
      */
     private function buildIdleNoticeTask(
@@ -3310,8 +3364,8 @@ class TelegramChatBroadcastService
             return null;
         }
 
-        $windowHours = $this->periodWindowHours($broadcast);
-        if ($windowHours === null) {
+        $idleAfter = $this->idleAfterHours($broadcast);
+        if ($idleAfter === null) {
             return null;
         }
 
@@ -3335,7 +3389,7 @@ class TelegramChatBroadcastService
         // diffInHours отдаёт float — приводим явно, иначе PHP 8.4 ругается
         // на потерю точности при неявном приведении.
         $silentHours = (int) $since->diffInHours($now);
-        if ($silentHours < $windowHours * 2) {
+        if ($silentHours < $idleAfter) {
             return null;
         }
 
@@ -3428,6 +3482,62 @@ class TelegramChatBroadcastService
                 $hours,
             ),
         ];
+    }
+
+    /**
+     * Сказать владельцу о снятой подборке, один раз на каждое снятие: сама она не уйдёт,
+     * а причину в админке видно, только если туда заглянуть.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function buildHeldNoticeTasks(TelegramChatBroadcast $broadcast, TelegramChat $chat, Carbon $now): array
+    {
+        $ownerTelegramId = $chat->owner?->telegram_id ?? null;
+        if (! $ownerTelegramId) {
+            return [];
+        }
+
+        $held = TelegramChatBroadcastItem::query()
+            ->where('broadcast_id', $broadcast->id)
+            ->where('kind', TelegramChatBroadcastItem::KIND_DIGEST)
+            ->whereIn('status', [TelegramChatBroadcastItem::STATUS_PENDING, TelegramChatBroadcastItem::STATUS_PLANNED])
+            ->whereNull('publish_at')
+            ->whereNull('posted_at')
+            ->whereNotNull('pick_meta->'.self::DIGEST_HELD_FROM)
+            ->get();
+
+        $where = $chat->username ? '@'.$chat->username : (string) $chat->telegram_chat_id;
+        $tasks = [];
+        foreach ($held as $item) {
+            $meta = (array) $item->pick_meta;
+            $from = Carbon::parse((string) $meta[self::DIGEST_HELD_FROM]);
+            // снятые давно не поднимаем, иначе после выката они пришли бы пачкой
+            if ($from->lt($now->copy()->subDay())
+                || ! Cache::add('broadcast:digest-held:'.$item->id.':'.$from->timestamp, 1, $now->copy()->addDays(3))) {
+                continue;
+            }
+
+            $slug = $item->digestTheme() ?? ($item->digest_meta['theme_wanted'] ?? null);
+            $title = collect((array) config('broadcast_digest.themes', []))->firstWhere('slug', $slug)['title'] ?? null;
+
+            $tasks[] = [
+                'type' => 'notice',
+                'kind' => 'digest_held',
+                'broadcast_id' => (int) $broadcast->id,
+                'telegram_chat_id' => (int) $chat->telegram_chat_id,
+                'notify_telegram_id' => (int) $ownerTelegramId,
+                'text' => sprintf(
+                    "⚠️ Канал %s: подборка%s на %s не выйдет — %s.\n\n"
+                    .'Она в ленте канала в группе «Вне очереди»: поправь состав и верни на день или удали.',
+                    $where,
+                    $title ? ' «'.$title.'»' : '',
+                    $from->copy()->setTimezone(self::SCHEDULE_TZ)->format('d.m H:i'),
+                    (string) ($meta[self::DIGEST_HELD] ?? 'снята с дня'),
+                ),
+            ];
+        }
+
+        return $tasks;
     }
 
     /**

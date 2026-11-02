@@ -4677,17 +4677,15 @@ class AdminBroadcastController extends Controller
             ];
         }
 
-        // Порог тот же, что у ЛС-сигнала, и правило берём ОТТУДА ЖЕ: здесь
-        // стояла вторая копия, и со слотами они разъехались бы — окно делится
-        // на число постов в день, а копия про слоты не знает.
-        $windowHours = $this->broadcasts->periodWindowHours($b) ?? 24;
+        // порог тот же, что у сигнала в личку
+        $idleAfter = $this->broadcasts->idleAfterHours($b) ?? 48;
         if ($lastPosted) {
             $silent = (int) Carbon::parse($lastPosted)->diffInHours(now());
-            if ($silent >= $windowHours * 2) {
+            if ($silent >= $idleAfter) {
                 $days = intdiv($silent, 24);
                 $out[] = [
                     'level' => 'danger',
-                    'text' => "Канал молчит {$days} дн. — это дольше двух окон расписания.",
+                    'text' => 'Канал молчит '.($days > 0 ? "{$days} дн." : "{$silent} ч.").' — это дольше обычного перерыва между постами.',
                 ];
             }
         } else {

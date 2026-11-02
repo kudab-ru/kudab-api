@@ -217,23 +217,26 @@ class BroadcastSlotsTest extends TestCase
         Carbon::setTestNow();
     }
 
-    /** Окно простоя делится на число обязательных слотов: два поста в день — окно вдвое короче. */
-    public function test_idle_window_is_divided_by_slots(): void
+    /** @return array<string, array{list<int>, list<int>, int}> */
+    public static function idleThresholds(): array
+    {
+        return [
+            'один пост в день' => [[], [], 48],
+            'два слота' => [[10, 19], [], 27],
+            'тихий день без слота 16:00 — не простой' => [[10, 16, 19], [16], 27],
+            'ночь между 19:00 и 10:00 — не простой' => [[10, 12, 15, 19], [], 21],
+        ];
+    }
+
+    #[DataProvider('idleThresholds')]
+    public function test_idle_starts_after_the_longest_normal_gap(array $slots, array $optional, int $hours): void
     {
         [$broadcast] = $this->channelWithEvents(1);
-
-        $this->assertSame(24, $this->service()->periodWindowHours($broadcast));
-
-        $broadcast->slots = [10, 19];
+        $broadcast->slots = $slots;
+        $broadcast->optional_slots = $optional;
         $broadcast->save();
 
-        $this->assertSame(12, $this->service()->periodWindowHours($broadcast->fresh()));
-
-        $broadcast->slots = [10, 16, 19];
-        $broadcast->optional_slots = [16];
-        $broadcast->save();
-
-        $this->assertSame(12, $this->service()->periodWindowHours($broadcast->fresh()), 'тихий день без слота 16:00 — не простой');
+        $this->assertSame($hours, $this->service()->idleAfterHours($broadcast->fresh()));
     }
 
     private function countFromVenue(int $broadcastId, int $venueId): int
@@ -2565,6 +2568,7 @@ class BroadcastSlotsTest extends TestCase
         return [
             'бронь ещё не встала' => ['waiting', null, [10]],
             'подборку сняли' => ['removed', null, [10, 13]],
+            'подборку сняли с дня до выхода' => ['held', null, [10, 13]],
             'рубрика раз в две недели на этой неделе отдыхает' => ['resting', 'bilety-zaranee', [10, 13]],
         ];
     }
@@ -2589,6 +2593,13 @@ class BroadcastSlotsTest extends TestCase
             if ($state === 'removed') {
                 $digest->publish_at = Carbon::parse('2026-10-06 13:00', 'Europe/Moscow')->utc();
                 $digest->removeByHand();
+            } elseif ($state === 'held') {
+                $digest->status = TelegramChatBroadcastItem::STATUS_PENDING;
+                $digest->is_off_grid = true;
+                $digest->pick_meta = [
+                    TelegramChatBroadcastService::DIGEST_HELD => 'строк осталось: 0',
+                    TelegramChatBroadcastService::DIGEST_HELD_FROM => Carbon::parse('2026-10-06 13:00', 'Europe/Moscow')->toIso8601String(),
+                ];
             } else {
                 $digest->status = TelegramChatBroadcastItem::STATUS_POSTED;
                 $digest->posted_at = Carbon::parse('2026-09-29 13:00', 'Europe/Moscow')->utc();

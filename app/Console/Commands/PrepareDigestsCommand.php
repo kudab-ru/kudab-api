@@ -110,13 +110,15 @@ class PrepareDigestsCommand extends Command
                 continue;
             }
 
+            // снятая подборка теряет час выхода, поэтому берём его до подготовки
+            $slot = Carbon::parse($item->publish_at);
             $result = $service->prepareDigestAhead($item, $broadcast, $now);
             $summary[$result] = ($summary[$result] ?? 0) + 1;
 
             $this->line(sprintf(
                 '  запись #%d: слот %s → %s',
                 $item->id,
-                Carbon::parse($item->publish_at)->toDateTimeString(),
+                $slot->toDateTimeString(),
                 $result,
             ));
 
@@ -124,8 +126,8 @@ class PrepareDigestsCommand extends Command
                 Log::info('broadcast.digest.prepared_ahead', [
                     'item_id' => $item->id,
                     'broadcast_id' => $broadcast->id,
-                    'publish_at' => Carbon::parse($item->publish_at)->toIso8601String(),
-                    'hours_ahead' => round(Carbon::parse($item->publish_at)->floatDiffInHours($now), 1),
+                    'publish_at' => $slot->toIso8601String(),
+                    'hours_ahead' => round($slot->floatDiffInHours($now), 1),
                     'result' => $result,
                 ]);
             }
