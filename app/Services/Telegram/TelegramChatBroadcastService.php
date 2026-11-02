@@ -1660,7 +1660,15 @@ class TelegramChatBroadcastService
      */
     public function digestPhotoUrls(int $itemId, int $limit = 4): array
     {
-        return self::digestCovers($this->digestPhotoGroups($itemId, 1), $limit);
+        $groups = $this->digestPhotoGroups($itemId, 1);
+        // у «На выходных» обложки только с субботы и воскресенья: в субботу утром пятницу из подписи убирают, а альбом остаётся
+        $item = TelegramChatBroadcastItem::query()->find($itemId);
+        $friday = $item === null ? [] : app(BroadcastDigestComposer::class)->fridayLineIds($item);
+        if ($friday !== []) {
+            $groups = array_values(array_filter($groups, fn (array $g) => ! in_array((int) $g['event_id'], $friday, true)));
+        }
+
+        return self::digestCovers($groups, $limit);
     }
 
     /**

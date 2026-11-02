@@ -717,7 +717,7 @@ class BroadcastDigestRubricsTest extends TestCase
     }
 
     #[Test]
-    public function the_weekend_footer_counts_saturday_and_sunday_like_its_link(): void
+    public function the_weekend_count_leaves_out_friday_evening(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow')); // четверг
         $this->onlyRubric('na-vyhodnyh');
@@ -726,16 +726,78 @@ class BroadcastDigestRubricsTest extends TestCase
         foreach ([2, 2, 2, 3, 3] as $i => $day) {
             $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
         }
+        // экскурсии — не сцена и не бар: в раздел пятницы не встают, но в окне подборки есть
         foreach ([19, 21] as $hour) {
-            $this->poster($this->event('Пятница '.$hour, 1, free: false, priceMin: 500, hour: $hour, description: $long));
+            $this->retag($this->event('Пятница '.$hour, 1, free: false, priceMin: 500, hour: $hour, description: $long), 'excursions');
         }
 
         $caption = $this->caption(Carbon::parse('2026-09-17 19:00', 'Europe/Moscow'));
 
-        // строка пятницы одна, вторая пятница в число не входит: лента по ссылке ?when=weekend её не покажет
+        // лента по ссылке ?when=weekend пятницу не покажет — и в число она не входит
         preg_match('/Остальные (\d+) — /u', $caption, $rest);
-        $this->assertSame(5, (int) ($rest[1] ?? 0) + preg_match_all('~/events/\d+~', $caption) - 1);
-        $this->assertStringContainsString('18–20 сентября', $caption, 'пятница в шапке, раз она есть в строках');
+        $this->assertSame(5, (int) ($rest[1] ?? 0) + preg_match_all('~/events/\d+~', $caption));
+        $this->assertStringContainsString('19–20 сентября', $caption, 'без строк пятницы в шапке суббота и воскресенье');
+    }
+
+    #[Test]
+    public function the_friday_section_takes_a_stage_and_a_bar_but_not_a_series_with_weekend_shows(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow')); // четверг
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([2, 2, 2, 3, 3] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+        $stage = $this->event('Спектакль в пятницу', 1, free: false, priceMin: 700, hour: 19, description: $long);
+        $bar = $this->event('Концерт в баре', 1, free: false, priceMin: 800, hour: 21, description: $long);
+        $this->retag($bar, 'music');
+        DB::table('venues')->where('id', DB::table('events')->where('id', $bar)->value('venue_id'))->update(['kind' => 'Клубы и бары']);
+        // у серии есть показ в субботу: с афишей пятничный встал бы первым, но его место — в выходных
+        $group = $this->group();
+        $series = $this->event('Сериал на сцене', 1, free: false, priceMin: 700, hour: 20, description: $long, groupId: $group);
+        $this->event('Сериал на сцене', 2, free: false, priceMin: 700, hour: 20, description: $long, groupId: $group);
+        $this->poster($series);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-17 19:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertContains($stage, $out['event_ids']);
+        $this->assertContains($bar, $out['event_ids']);
+        $this->assertNotContains($series, $out['event_ids']);
+        $this->assertStringContainsString('Пятница вечером', $out['caption']);
+        $this->assertMatchesRegularExpression('/href="[^"]*date_from=2026-09-18[^"]*tod=evening[^"]*">вечер пятницы/u', $out['caption']);
+        $this->assertStringNotContainsString('Остальные', $out['caption'], 'с пятницей подвал без чисел');
+    }
+
+    #[Test]
+    public function the_saturday_caption_drops_the_friday_section(): void
+    {
+        [$item, $friday] = $this->postedWeekendWithFriday();
+
+        $at = Carbon::parse('2026-09-19 05:00', 'Europe/Moscow');
+        Carbon::setTestNow($at);
+        $caption = app(BroadcastDigestComposer::class)->saturdayCaption($item, $this->channel(), $at);
+
+        $this->assertNotNull($caption);
+        $this->assertStringNotContainsString('Спектакль в пятницу', $caption);
+        $this->assertStringContainsString('19–20 сентября', $caption);
+        $this->assertStringNotContainsString('вечер пятницы', $caption, 'подвал выходных, без ссылки на пятницу');
+
+        DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->where('event_id', $friday)->delete();
+        $this->assertNull(app(BroadcastDigestComposer::class)->saturdayCaption($item, $this->channel(), $at), 'без пятницы править нечего');
+    }
+
+    #[Test]
+    public function the_weekend_album_takes_no_friday_cover(): void
+    {
+        [$item, $friday] = $this->postedWeekendWithFriday();
+
+        $covers = app(\App\Services\Telegram\TelegramChatBroadcastService::class)->digestPhotoUrls((int) $item->id);
+
+        $this->assertNotEmpty($covers);
+        $this->assertNotContains('https://example.test/poster-'.$friday.'.jpg', $covers, 'в субботу пятница из поста уходит, а альбом остаётся');
     }
 
     #[Test]
@@ -2022,6 +2084,45 @@ class BroadcastDigestRubricsTest extends TestCase
             'created_at' => now(),
             'updated_at' => now(),
         ]);
+    }
+
+    /**
+     * Вышедшая в четверг «На выходных» со строкой пятницы: у всех строк афиша, пятничная встаёт первой.
+     *
+     * @return array{0: TelegramChatBroadcastItem, 1: int} запись и событие пятницы
+     */
+    private function postedWeekendWithFriday(): array
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow')); // четверг
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([2, 2, 2, 3, 3] as $i => $day) {
+            $this->poster($this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long));
+        }
+        $friday = $this->event('Спектакль в пятницу', 1, free: false, priceMin: 700, hour: 19, description: $long);
+        $this->poster($friday);
+
+        $at = Carbon::parse('2026-09-17 19:00', 'Europe/Moscow');
+        $out = app(BroadcastDigestComposer::class)->compose($this->channel(), $at);
+        $this->assertNotNull($out);
+        $this->assertSame($friday, $out['event_ids'][0], 'строка пятницы первая');
+
+        $item = new TelegramChatBroadcastItem;
+        $item->broadcast_id = $this->channel()->id;
+        $item->kind = TelegramChatBroadcastItem::KIND_DIGEST;
+        $item->status = TelegramChatBroadcastItem::STATUS_POSTED;
+        $item->publish_at = $at->copy()->utc();
+        $item->posted_at = $at->copy()->utc();
+        $item->digest_meta = ['theme' => 'na-vyhodnyh'];
+        $item->save();
+        foreach ($out['event_ids'] as $i => $id) {
+            DB::table('telegram.chat_broadcast_item_events')->insert([
+                'item_id' => $item->id, 'event_id' => $id, 'position' => $i + 1, 'created_at' => now(),
+            ]);
+        }
+
+        return [$item->fresh(), $friday];
     }
 
     /** Пять сильных строк «не на виду» на субботу и воскресенье после четверга: слабое встанет только обязательной строкой. */

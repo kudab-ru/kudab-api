@@ -158,9 +158,9 @@ return [
             'feed' => ['when' => 'weekend'],
             'feed_label' => 'вся афиша на выходные',
             'address_as_place' => true,
-            // подборка выходит в четверг вечером: вечер пятницы с этого часа тоже её, но не больше `friday_lines` строк
-            'friday_from' => 18,
-            'friday_lines' => 1,
+            // подборка выходит в четверг вечером: вечер пятницы с этого часа — её раздел, см. BroadcastDigestComposer::fridayLines;
+            // час — начало «вечера» ленты сайта (?tod=evening), на неё ведёт ссылка подвала
+            'friday_from' => 17,
             // обязательные строки по порядку, см. BroadcastDigestComposer::withRequired: бесплатное с часом,
             // выставка, которая открывается или закрывается, вечеринка вечером в пятницу или субботу (с `night_from`)
             'require' => ['free', 'exhibition', 'night'],
