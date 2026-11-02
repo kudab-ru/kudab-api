@@ -87,14 +87,15 @@ final class DigestTitle
     {
         // trim() режет байты, а «» и тире многобайтные: откусил бы конец последней буквы
         $p = mb_strtolower((string) preg_replace('/^[\s"«»]+|[\s"«»]+$/u', '', $part));
+        // «6 ноября (Воронеж)», «5.11 Воронеж»: город рядом с датой не делает её названием
+        if ($city !== null && $city !== '') {
+            $p = trim((string) preg_replace('/\(?\s*(?:г\.\s*)?(?<!\p{L})'.preg_quote(mb_strtolower($city), '/').'(?!\p{L})\s*\)?/u', ' ', $p));
+        }
         if ($p === '') {
             return true;
         }
         if (preg_match('/^\d{1,2}([.\/]\d{1,2}([.\/]\d{2,4})?)?$/u', $p) === 1
             || preg_match('/^\d{1,2}\s+(?:'.self::MONTHS.')\p{L}*$/u', $p) === 1) {
-            return true;
-        }
-        if ($city !== null && $p === mb_strtolower($city)) {
             return true;
         }
         $v = mb_strtolower(trim(str_replace(['«', '»', '"'], '', (string) $venue)));
