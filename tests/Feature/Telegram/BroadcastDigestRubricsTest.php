@@ -683,8 +683,20 @@ class BroadcastDigestRubricsTest extends TestCase
 
     /* ──────────────── окно «выходные» ──────────────── */
 
+    /** @return array<string, array{int, string, bool}> */
+    public static function fridayStarts(): array
+    {
+        // час, точность времени, назван ли: подборка выходит в четверг, вечер пятницы — тоже выходные
+        return [
+            'вечер пятницы' => [20, 'datetime', true],
+            'пятница днём' => [15, 'datetime', false],
+            'пятница без часа' => [0, 'date', false],
+        ];
+    }
+
     #[Test]
-    public function the_weekend_rubric_takes_saturday_and_sunday_only(): void
+    #[DataProvider('fridayStarts')]
+    public function the_weekend_rubric_takes_friday_only_from_the_evening(int $hour, string $precision, bool $named): void
     {
         Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow')); // четверг
         $this->onlyRubric('na-vyhodnyh');
@@ -694,14 +706,36 @@ class BroadcastDigestRubricsTest extends TestCase
             $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
         }
         // с афишей оно первое по интересу: не назвать его может только окно
-        $friday = $this->event('Пятничный вечер', 1, free: false, priceMin: 500, hour: 20, description: $long);
+        $friday = $this->event('Пятничный вечер', 1, free: false, priceMin: 500, hour: $hour, description: $long, timePrecision: $precision);
         $this->poster($friday);
 
         $out = app(BroadcastDigestComposer::class)
             ->compose($this->channel(), Carbon::parse('2026-09-17 19:00', 'Europe/Moscow'));
 
         $this->assertNotNull($out);
-        $this->assertNotContains($friday, $out['event_ids'], 'пятница — у «На неделе», не у выходных');
+        $this->assertSame($named, in_array($friday, $out['event_ids'], true));
+    }
+
+    #[Test]
+    public function the_weekend_footer_counts_saturday_and_sunday_like_its_link(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow')); // четверг
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([2, 2, 2, 3, 3] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+        foreach ([19, 21] as $hour) {
+            $this->poster($this->event('Пятница '.$hour, 1, free: false, priceMin: 500, hour: $hour, description: $long));
+        }
+
+        $caption = $this->caption(Carbon::parse('2026-09-17 19:00', 'Europe/Moscow'));
+
+        // строка пятницы одна, вторая пятница в число не входит: лента по ссылке ?when=weekend её не покажет
+        preg_match('/Остальные (\d+) — /u', $caption, $rest);
+        $this->assertSame(5, (int) ($rest[1] ?? 0) + preg_match_all('~/events/\d+~', $caption) - 1);
+        $this->assertStringContainsString('18–20 сентября', $caption, 'пятница в шапке, раз она есть в строках');
     }
 
     #[Test]
