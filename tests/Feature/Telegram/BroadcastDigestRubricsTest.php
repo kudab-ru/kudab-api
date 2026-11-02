@@ -1727,6 +1727,30 @@ class BroadcastDigestRubricsTest extends TestCase
     }
 
     #[Test]
+    public function the_kids_weekend_rubric_takes_shows_for_children_with_the_age(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-18 08:00', 'Europe/Moscow')); // пятница
+        $this->onlyRubric('deti-na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 1, 1, 2, 2] as $i => $day) {
+            $show = $this->event('Кукольный спектакль '.($i + 1), $day, free: false, priceMin: 500, hour: 11 + $i, description: $long);
+            DB::table('events')->where('id', $show)->update(['audience' => 'kids', 'age_restriction' => 6]);
+        }
+        // взрослый концерт выше спектакля по виду: без детского правила он встал бы в строки
+        $concert = $this->event('Сольный концерт', 1, free: false, priceMin: 1500, hour: 13, description: $long);
+        $this->retag($concert, 'music');
+        DB::table('events')->where('id', $concert)->update(['age_restriction' => 18]);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-18 15:00', 'Europe/Moscow'), null, 'deti-na-vyhodnyh');
+
+        $this->assertNotNull($out);
+        $this->assertNotContains($concert, $out['event_ids']);
+        $this->assertStringContainsString(' · 6+ · ', $out['caption'], 'возраст в строке');
+    }
+
+    #[Test]
     public function the_new_year_night_takes_the_evening_and_the_small_hours(): void
     {
         $this->onlyRubric('povod-novyj-god');

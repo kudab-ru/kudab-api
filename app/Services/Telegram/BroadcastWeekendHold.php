@@ -36,7 +36,8 @@ final class BroadcastWeekendHold
     {
         $slugs = array_column(array_filter(
             (array) config('broadcast_digest.themes', []),
-            fn ($theme) => ($theme['window'] ?? '') === 'weekend',
+            // «С детьми» выходит в пятницу днём и выходные не держит (`hold`): одиночным постам до неё нечего было бы взять
+            fn ($theme) => ($theme['window'] ?? '') === 'weekend' && ($theme['hold'] ?? true),
         ), 'slug');
 
         $broadcast = TelegramChatBroadcast::query()->find($broadcastId);

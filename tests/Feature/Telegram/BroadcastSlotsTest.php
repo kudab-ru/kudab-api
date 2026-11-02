@@ -2516,6 +2516,7 @@ class BroadcastSlotsTest extends TestCase
             'бронь «На выходных»' => [true, 'na-vyhodnyh', false],
             'брони ещё нет, «На выходных» в расписании' => [false, 'na-vyhodnyh', false],
             'подборка без рубрики' => [true, null, true],
+            'в расписании только «С детьми на выходных»' => [false, 'deti-na-vyhodnyh', true],
         ];
     }
 

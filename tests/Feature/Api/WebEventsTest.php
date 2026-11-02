@@ -929,15 +929,20 @@ class WebEventsTest extends TestCase
             'детское 16+' => ['kids', 16, [], 'Тени Готэма', false],
             'взрослым' => ['adults', null, ['kids'], 'Девичник', false],
             'обычный спектакль' => ['general', null, ['theatre'], 'Господа Головлёвы', false],
+            'сказка в ресторане' => [null, null, [], 'Сказки и вино', false, 'Клубы и бары'],
         ];
     }
 
     #[DataProvider('kidsCases')]
-    public function test_kids_filter_picks_what_suits_children(?string $audience, ?int $age, array $topics, string $title, bool $shown): void
+    public function test_kids_filter_picks_what_suits_children(?string $audience, ?int $age, array $topics, string $title, bool $shown, ?string $venueKind = null): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $event = $this->createEvent($vrn->id, $this->createCommunity($vrn->id, 'Организатор')->id, $title, now()->addDay());
-        DB::table('events')->where('id', $event->id)->update(['audience' => $audience, 'age_restriction' => $age]);
+        $venueId = $venueKind === null ? null : DB::table('venues')->insertGetId([
+            'city_id' => $vrn->id, 'name' => 'Ресторан', 'slug' => 'restoran-'.uniqid(), 'kind' => $venueKind,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('events')->where('id', $event->id)->update(['audience' => $audience, 'age_restriction' => $age, 'venue_id' => $venueId]);
         foreach ($topics as $slug) {
             $this->tagEventLeafOnly($event->id, $this->createInterest($slug, $slug)->id);
         }

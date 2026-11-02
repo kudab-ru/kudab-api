@@ -405,7 +405,7 @@ final class BroadcastDigestComposer
                 // price_text — ради «по регистрации»: отдельного поля под это нет,
                 // слово живёт только в тексте цены. time_precision — ради событий
                 // без времени: у них в start_time полночь, и «сб 00:00» это враньё.
-                'e.price_text', 'e.time_precision', 'e.content_kind', 'e.address',
+                'e.price_text', 'e.time_precision', 'e.content_kind', 'e.address', 'e.age_restriction',
                 'v.name as venue_name',
             ])
             ->get()
@@ -679,6 +679,7 @@ final class BroadcastDigestComposer
         'interest' => 'основная тема события не из этой рубрики',
         'price' => 'не подходит рубрике по цене',
         'hour' => 'начинается раньше часа рубрики',
+        'kids' => 'не детское и не семейное по правилу сайта',
         'evening' => 'идёт днём, а гид про вечер',
         'words' => 'в названии и начале описания нет слов праздника',
         'started' => 'началось до выхода подборки',
@@ -894,7 +895,7 @@ final class BroadcastDigestComposer
         // конфиге («fre» вместо «free») тихо превращала бы рубрику про деньги
         // в подборку всего подряд, и заметить это можно было бы только в
         // канале.
-        if (! in_array($pick, ['interest', 'free', 'price_max', 'tod', 'all', 'ahead', 'words', 'views', 'access'], true)) {
+        if (! in_array($pick, ['interest', 'free', 'price_max', 'tod', 'all', 'ahead', 'words', 'views', 'access', 'kids'], true)) {
             Log::warning('broadcast.digest.unknown_pick', [
                 'theme' => $theme['slug'] ?? null, 'pick' => $pick,
             ]);
@@ -957,6 +958,8 @@ final class BroadcastDigestComposer
                             ->whereIn('es.source', Scoring\EventInterestSignals::TICKET_SOURCES))),
                 default => null,
             },
+            // тем же правилом, что лента сайта ?kids=1: число в подвале сходится со страницей
+            'kids' => $pick === 'kids' ? fn ($q) => $q->whereIn('e.id', Event::query()->webKids()->select('events.id')) : null,
             'hour' => $pick === 'tod' ? fn ($q) => $q->whereRaw(
                 "EXTRACT(HOUR FROM e.start_time AT TIME ZONE 'Europe/Moscow') >= ?",
                 [(int) ($theme['hour_from'] ?? 20)],
@@ -988,8 +991,8 @@ final class BroadcastDigestComposer
                 // слово живёт только в тексте цены. time_precision — ради событий
                 // без времени: у них в start_time полночь, и «сб 00:00» это враньё.
                 'e.price_text', 'e.time_precision', 'e.content_kind',
-                // для оценки интереса в pickNamed: прокат или разовое, детское ли
-                'e.end_time', 'e.audience',
+                // для оценки интереса в pickNamed: прокат или разовое, детское ли; возраст — в строку «С детьми»
+                'e.end_time', 'e.audience', 'e.age_restriction',
                 // место события без площадки — у повода, см. `address_as_place`
                 'e.address',
                 'v.name as venue_name',
@@ -1466,6 +1469,11 @@ final class BroadcastDigestComposer
         $ranked = $this->scorer->rankRows($rows->filter(
             fn ($r) => $r->venue_id !== null || ($byAddress && trim((string) ($r->address ?? '')) !== ''),
         )->values()->all());
+        // слагаемые, которые рубрике не нужны: «С детьми» не штрафует детское
+        if (isset($theme['rank_skip'])) {
+            $skip = (array) $theme['rank_skip'];
+            usort($ranked, fn ($a, $b) => $this->scorer->interestWithout($b, $skip) <=> $this->scorer->interestWithout($a, $skip));
+        }
         if (! empty($theme['ties_by_price'])) {
             usort($ranked, fn ($a, $b) => [$this->scorer->interest($b), (int) ($b->price_min ?? 0)]
                 <=> [$this->scorer->interest($a), (int) ($a->price_min ?? 0)]);
@@ -2098,7 +2106,8 @@ final class BroadcastDigestComposer
             if (! empty($theme['run_label'])) {
                 $when = $this->runLabel($row, $publishAt) ?? $when;
             }
-            $meta = array_values(array_filter([$when, $place, $this->priceLabel($row)]));
+            $age = ! empty($theme['age_in_line']) && ($row->age_restriction ?? null) !== null ? $row->age_restriction.'+' : '';
+            $meta = array_values(array_filter([$when, $place, $age, $this->priceLabel($row)]));
 
             // НЕ $head: этим именем выше назван заголовок поста, и повторное
             // использование затирало его названием последнего события.

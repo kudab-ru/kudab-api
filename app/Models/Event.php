@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\DB;
 
 class Event extends Model
 {
@@ -235,7 +236,7 @@ class Event extends Model
     /**
      * «С детьми»: аудитория «детям» или «семье», тема «детям», детское слово в названии или
      * возраст 0+ и 6+, если это не обычный концерт (у них 6+ стоит просто по закону).
-     * 16+ и «взрослым» не попадают никогда.
+     * 16+, «взрослым» и бары не попадают никогда: «Сказки и вино», квиз про мультфильмы.
      */
     public function scopeWebKids($q)
     {
@@ -247,6 +248,8 @@ class Event extends Model
         return $q
             ->where(fn ($w) => $w->whereNull('events.age_restriction')->orWhere('events.age_restriction', '<', 16))
             ->where(fn ($w) => $w->whereNull('events.audience')->orWhere('events.audience', '<>', 'adults'))
+            ->where(fn ($w) => $w->whereNull('events.venue_id')
+                ->orWhereNotIn('events.venue_id', DB::table('venues')->select('id')->where('kind', 'Клубы и бары')))
             ->where(function ($w) use ($topic) {
                 $w->whereIn('events.audience', ['kids', 'family'])
                     ->orWhereHas('interests', $topic(['kids']))
