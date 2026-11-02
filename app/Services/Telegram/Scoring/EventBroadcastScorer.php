@@ -88,6 +88,9 @@ class EventBroadcastScorer
 
     public const MIN_DESCRIPTION_LEN = 120;
 
+    /** Серию видим дольше — это постоянное (океанариум, постоянная экспозиция), а не выставка со сроком. */
+    public const LASTING_DAYS = 100;
+
     /** Прокат редок только в последние дни: столько дней до закрытия — «последний шанс». */
     public const LAST_CHANCE_DAYS = 7;
 
@@ -117,6 +120,7 @@ class EventBroadcastScorer
     private const NO_SIGNALS = [
         'slug' => null, 'parent' => null, 'repeats' => 1, 'past' => 0, 'run_until' => null, 'ticketed' => false,
         'rating' => 0, 'photo' => false, 'venue_kind' => null, 'venue_name' => null,
+        'first' => null, 'last' => null, 'until' => null, 'seen' => null,
     ];
 
     /** @var array<int, array<string, mixed>> */
@@ -181,7 +185,7 @@ class EventBroadcastScorer
     /**
      * Что сказать человеку о событии.
      *
-     * @return array{kind: string|null, repeats: int, past: int, ticketed: bool, rating: int, multi_day: bool, run_until: string|null, access: string}
+     * @return array{kind: string|null, repeats: int, past: int, ticketed: bool, rating: int, multi_day: bool, run_until: string|null, access: string, venue_kind: string|null}
      */
     public function explain(object $e): array
     {
@@ -190,6 +194,7 @@ class EventBroadcastScorer
 
         return [
             'kind' => $s['parent'] ?? $s['slug'],
+            'venue_kind' => $s['venue_kind'],
             'repeats' => (int) $s['repeats'],
             'past' => (int) ($s['past'] ?? 0),
             'ticketed' => (bool) $s['ticketed'],
@@ -198,6 +203,43 @@ class EventBroadcastScorer
             'run_until' => $runEnd?->copy()->setTimezone('Europe/Moscow')->toDateString(),
             'access' => EventAccess::of($s, $e),
         ];
+    }
+
+    /**
+     * Слагаемые интереса по отдельности, без поправки на дату.
+     *
+     * @return array<string, int>
+     */
+    public function partsOf(object $e): array
+    {
+        return $this->parts($e, false);
+    }
+
+    /**
+     * Открытие и конец проката, если они известны. Конец — объявленный у серии или последний день выставки без
+     * часа: последний сеанс с часом конца не знает, касса выкладывает сеансы на месяц вперёд. Открытие — первый
+     * день серии, если её увидели раньше этого дня: у выставки, найденной посреди проката, первый день — день находки.
+     *
+     * @return array{opens: Carbon|null, ends: Carbon|null, lasting: bool}
+     */
+    public function runSpan(object $e): array
+    {
+        $s = $this->signal($e);
+        // у постоянного «конец» серии — край продаж кассы, а не закрытие
+        if (! empty($s['seen']) && $s['seen'] < now(self::TZ)->subDays(self::LASTING_DAYS)->toDateString()) {
+            return ['opens' => null, 'ends' => null, 'lasting' => true];
+        }
+        $ends = match (true) {
+            ! empty($s['until']) => Carbon::parse((string) $s['until'], self::TZ)->endOfDay(),
+            ($e->time_precision ?? null) === 'date' && ! empty($s['last']) => Carbon::parse((string) $s['last'], self::TZ)->endOfDay(),
+            ! empty($e->start_time) && ! empty($e->end_time) => $this->runEnd($e),
+            default => null,
+        };
+        $opens = ! empty($s['first']) && ! empty($s['seen']) && $s['seen'] < $s['first']
+            ? Carbon::parse((string) $s['first'], self::TZ)->startOfDay()
+            : null;
+
+        return ['opens' => $opens, 'ends' => $ends, 'lasting' => false];
     }
 
     /** Как попасть на событие, см. EventAccess. */

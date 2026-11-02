@@ -207,8 +207,8 @@ final class BroadcastDigestComposer
             return null;
         }
 
-        // по дням и часам, кроме «Что смотрят»: там порядок — это и есть рейтинг
-        if (($best['theme']['pick'] ?? '') !== 'views') {
+        // по дням и часам, кроме «Что смотрят» и «Выставок»: там порядок — это и есть рейтинг
+        if (($best['theme']['pick'] ?? '') !== 'views' && ($best['theme']['order'] ?? '') !== 'run') {
             usort($best['named'], fn ($a, $b) => self::dayOrder($a) <=> self::dayOrder($b));
         }
         $caption = $this->buildCaption($broadcast, $best, $publishAt, $forItem);
@@ -483,7 +483,7 @@ final class BroadcastDigestComposer
 
         return [
             'theme' => $theme,
-            'named' => $this->pickNamed($rows, $theme),
+            'named' => $this->pickNamed($rows, $theme, $publishAt),
             'total' => $total,
             'venues' => $venues,
         ];
@@ -672,6 +672,7 @@ final class BroadcastDigestComposer
         'gone' => 'снято с публикации',
         'city' => 'другой город',
         'far' => 'далеко от города',
+        'lasting' => 'идёт постоянно, не выставка со сроком',
         'window' => 'вне дат рубрики',
         'no_time' => 'без часа начала',
         'timing' => 'слишком близко к выходу или уже закончилось',
@@ -737,7 +738,7 @@ final class BroadcastDigestComposer
             return ['rule' => $rule, 'note' => self::MISS_NOTES[$rule]];
         }
 
-        $ranked = $this->rankForTheme($pool['rows'], $theme);
+        $ranked = $this->rankForTheme($pool['rows'], $theme, $publishAt);
         foreach ($ranked as $i => $row) {
             if ((int) $row->id !== $eventId) {
                 continue;
@@ -925,9 +926,12 @@ final class BroadcastDigestComposer
             'gone' => fn ($q) => $q->whereNull('e.deleted_at')->where('e.status', 'active'),
             'city' => fn ($q) => $q->where('c.city_id', $cityId),
             'far' => fn ($q) => CityRadius::apply($q, $cityId, (float) ($theme['max_km'] ?? CityRadius::CHANNEL_KM), 'e', 'v'),
-            // нижняя граница только у календарного окна: у «выходных» без неё попадал бы вечер пятницы
+            // нижняя граница только у календарного окна: у «выходных» без неё попадали бы и будни до них
             'window' => fn ($q) => $q->where(fn ($w) => EventStart::notAfter($w, $until, 'e'))
-                ->when($since !== null, fn ($w) => EventStart::notBefore($w, $since, 'e')),
+                ->when($since !== null, fn ($w) => EventStart::notBefore($w, $since, 'e'))
+                // вечер пятницы — только события с часом: выставка без часа встала бы строкой пятницы
+                ->when(isset($theme['friday_from']) && $since?->isFriday(), fn ($w) => $w->where(fn ($x) => $x->whereNotNull('e.start_time')
+                    ->orWhere('e.start_date', '>', $since->copy()->setTimezone(self::TZ)->toDateString()))),
             // часам повода (`hours`) событие без часа не годится: неизвестно, ночью ли оно
             'no_time' => isset($theme['hours']) ? fn ($q) => OccasionCalendar::applyTimed($q, $theme, 'e') : null,
             // срок общим правилом (`PostTiming`): многодневку берём до закрытия, иначе «Выставки недели»
@@ -1002,6 +1006,12 @@ final class BroadcastDigestComposer
         if ($pick === 'views') {
             $rows = $this->withViews($rows, $theme, $publishAt);
             $this->traceLoss($rows, 'views');
+        }
+        // «Выставки недели» — со сроком: постоянное (океанариум) идёт месяцами и строки не заслуживает
+        if (! empty($theme['run_only'])) {
+            $this->scorer->prepare($rows);
+            $rows = $rows->reject(fn ($r) => $this->scorer->runSpan($r)['lasting'])->values();
+            $this->traceLoss($rows, 'lasting');
         }
         if ($pick === 'access') {
             $this->scorer->prepare($rows);
@@ -1380,18 +1390,24 @@ final class BroadcastDigestComposer
      * @param  array<string, mixed>  $theme  рубрика: сколько назвать, правила дня и цены, порядок
      * @return list<object>
      */
-    private function pickNamed(\Illuminate\Support\Collection $rows, array $theme): array
+    private function pickNamed(\Illuminate\Support\Collection $rows, array $theme, Carbon $publishAt): array
     {
         [$min, $max] = self::namedRange($theme);
         $onePerDay = (bool) ($theme['one_per_day'] ?? true);
         $bothDays = ($theme['window'] ?? '') === 'weekend';
-        $ranked = $this->rankForTheme($rows, $theme);
+        $ranked = $this->rankForTheme($rows, $theme, $publishAt);
+        $this->kindCaps = array_map('intval', (array) ($theme['kind_caps'] ?? []));
+        $this->fridayCap = isset($theme['friday_from']) ? (int) ($theme['friday_lines'] ?? 1) : null;
 
         /** @var array<int, object> $named */
         $named = [];
 
         if ($bothDays) {
             foreach (array_unique(array_map(fn ($r) => self::dayOf($r), $ranked)) as $day) {
+                // вечер пятницы — добавка к выходным, своей строки ему не обещаем
+                if (! Carbon::parse($day)->isWeekend()) {
+                    continue;
+                }
                 foreach ($ranked as $row) {
                     // день важнее разнообразия вида: воскресенье без строки хуже двух спектаклей
                     if (self::dayOf($row) === $day && $this->fitsNamed($row, $named, $min, $max, $onePerDay)) {
@@ -1406,7 +1422,6 @@ final class BroadcastDigestComposer
         $floor = isset($theme['gems']['floor'], $ranked[0]) ? $this->gemScores[(int) $ranked[0]->id] - (int) $theme['gems']['floor'] : null;
         $strong = fn (object $row) => $floor === null || $this->gemScores[(int) $row->id] >= $floor;
 
-        $this->kindCaps = array_map('intval', (array) ($theme['kind_caps'] ?? []));
         // сначала строк одного вида не больше `kind_cap`, потом без этого предела, если мест осталось больше;
         // у рубрики могут быть свои ступени, см. `kind_steps`
         $steps = (array) ($theme['kind_steps'] ?? [max(1, (int) ($theme['kind_cap'] ?? 1)), 0]);
@@ -1418,13 +1433,17 @@ final class BroadcastDigestComposer
             }
         }
 
-        $named = ($theme['cheap_line'] ?? true)
-            ? $this->withCheapLine($named, array_values(array_filter($ranked, fn ($r) => isset($named[(int) $r->id]) || $strong($r))), $min, $max, $onePerDay, $bothDays)
-            : array_values($named);
+        $named = match (true) {
+            isset($theme['require']) => $this->withRequired($named, $ranked, $theme, $publishAt, $min, $max, $onePerDay, $bothDays, $strong),
+            (bool) ($theme['cheap_line'] ?? true) => $this->withCheapLine($named, array_values(array_filter($ranked, fn ($r) => isset($named[(int) $r->id]) || $strong($r))), $min, $max, $onePerDay, $bothDays),
+            default => array_values($named),
+        };
 
         // по датам: подборка отвечает на вопрос «что впереди», и читать её удобно по порядку недели;
-        // «Что смотрят» — по числу людей, это и есть её смысл
-        if (($theme['pick'] ?? '') !== 'views') {
+        // «Что смотрят» — по числу людей, это и есть её смысл; выставки идут одновременно — по `run_order`
+        if (($theme['order'] ?? '') === 'run') {
+            usort($named, fn ($a, $b) => ($this->runScores[(int) $b->id] ?? 0) <=> ($this->runScores[(int) $a->id] ?? 0));
+        } elseif (($theme['pick'] ?? '') !== 'views') {
             usort($named, fn ($a, $b) => self::dayOrder($a) <=> self::dayOrder($b));
         } else {
             usort($named, fn ($a, $b) => (int) ($b->views ?? 0) <=> (int) ($a->views ?? 0));
@@ -1439,7 +1458,7 @@ final class BroadcastDigestComposer
      * @param  array<string, mixed>  $theme
      * @return list<object>
      */
-    private function rankForTheme(\Illuminate\Support\Collection $rows, array $theme): array
+    private function rankForTheme(\Illuminate\Support\Collection $rows, array $theme, Carbon $publishAt): array
     {
         // без площадки не называем: строка без места говорит половину нужного; повод берёт и адрес,
         // вечеринку в баре без карточки площадки тоже ищут
@@ -1461,8 +1480,90 @@ final class BroadcastDigestComposer
         if (isset($theme['gems'])) {
             $ranked = $this->byGems($ranked, (array) $theme['gems']);
         }
+        $this->runScores = [];
+        if (($theme['order'] ?? '') === 'run' || in_array('exhibition', (array) ($theme['require'] ?? []), true)) {
+            $runOrder = $this->byRun($ranked, $publishAt);
+            if (($theme['order'] ?? '') === 'run') {
+                $ranked = $runOrder;
+            }
+        }
 
         return $ranked;
+    }
+
+    /** @var array<int, int> оценки по `run_order` последнего ранжирования, см. byRun */
+    private array $runScores = [];
+
+    /**
+     * Порядок выставок по `run_order` в конфиге: то, что смотрят на сайте, большая платная не в музее,
+     * открытие и последние дни; вид и «идёт постоянно» у выставок одинаковы и не в счёт.
+     *
+     * @param  list<object>  $ranked
+     * @return list<object>
+     */
+    private function byRun(array $ranked, Carbon $publishAt): array
+    {
+        $rule = (array) config('broadcast_digest.run_order', []);
+        $at = $publishAt->copy()->setTimezone(self::TZ);
+        $views = $this->seriesViews($ranked, (int) ($rule['views_days'] ?? 14), $publishAt);
+        foreach ($ranked as $row) {
+            ['opens' => $opens, 'ends' => $ends] = $this->scorer->runSpan($row);
+            $big = (int) ($row->price_min ?? 0) >= (int) ($rule['big_from'] ?? 300)
+                && $this->scorer->explain($row)['venue_kind'] !== Scoring\EventInterestSignals::MUSEUM_VENUE_KIND;
+            $this->runScores[(int) $row->id] = $this->scorer->interestWithout($row, (array) ($rule['skip'] ?? []))
+                + min((int) ($rule['views_max'] ?? 0), ($views[(int) $row->id] ?? 0) * (int) ($rule['per_view'] ?? 0))
+                + ($big ? (int) ($rule['big'] ?? 0) : 0)
+                + ($this->opensSoon($opens, $at) ? (int) ($rule['opens'] ?? 0) : 0)
+                + ($this->closesSoon($ends, $at) ? (int) ($rule['closes'] ?? 0) : 0);
+        }
+        usort($ranked, fn ($a, $b) => $this->runScores[(int) $b->id] <=> $this->runScores[(int) $a->id]);
+
+        return $ranked;
+    }
+
+    /** Открылась за последние `opens_days` дней или откроется позже. */
+    private function opensSoon(?Carbon $opens, Carbon $at): bool
+    {
+        return $opens !== null
+            && $opens->gte($at->copy()->subDays((int) config('broadcast_digest.run_order.opens_days', 7))->startOfDay());
+    }
+
+    /** Закрывается в ближайшие `closes_days` дней. */
+    private function closesSoon(?Carbon $ends, Carbon $at): bool
+    {
+        return $ends !== null && $ends->gte($at)
+            && $ends->lte($at->copy()->addDays((int) config('broadcast_digest.run_order.closes_days', 9))->endOfDay());
+    }
+
+    /**
+     * Сколько людей открывали карточку события или другие даты той же серии: у выставки на каждый день
+     * своя карточка, а интерес у неё общий.
+     *
+     * @param  list<object>  $rows
+     * @return array<int, int>
+     */
+    private function seriesViews(array $rows, int $days, Carbon $at): array
+    {
+        if ($rows === [] || $days <= 0) {
+            return [];
+        }
+        $groups = array_values(array_unique(array_filter(array_map(fn ($r) => $r->event_group_id !== null ? (int) $r->event_group_id : null, $rows))));
+        $ids = array_map(fn ($r) => (int) $r->id, $rows);
+        $to = $at->copy()->setTimezone(self::TZ);
+        $byKey = DB::table('event_views as w')
+            ->join('events as e', 'e.id', '=', 'w.event_id')
+            ->where(fn ($q) => $q->whereIn('e.id', $ids)->when($groups !== [], fn ($w) => $w->orWhereIn('e.event_group_id', $groups)))
+            ->whereBetween('w.day', [$to->copy()->subDays($days)->toDateString(), $to->toDateString()])
+            ->groupByRaw('coalesce(e.event_group_id, -e.id)')
+            ->selectRaw('coalesce(e.event_group_id, -e.id) as k, count(distinct w.visitor) as n')
+            ->pluck('n', 'k');
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[(int) $row->id] = (int) ($byKey[$row->event_group_id !== null ? (int) $row->event_group_id : -(int) $row->id] ?? 0);
+        }
+
+        return $out;
     }
 
     /** @var array<int, int> оценки «не на виду» последнего ранжирования, по ним `pickNamed` отсекает слабые строки */
@@ -1539,9 +1640,14 @@ final class BroadcastDigestComposer
 
         $kind = $this->scorer->explain($row)['kind'];
         $sameKind = 0;
+        $friday = $this->fridayCap !== null && self::onFriday($row);
+        $fridays = 0;
         foreach ($named as $other) {
             if (self::samePlace($other, $row) || self::twinCards($other, $row)) {
                 return false;
+            }
+            if ($friday && self::onFriday($other)) {
+                $fridays++;
             }
             // «одна строка на день» — для недельной подборки; на двух днях выходных это потолок в две строки
             if ($onePerDay && self::dayOf($other) === self::dayOf($row)) {
@@ -1553,6 +1659,9 @@ final class BroadcastDigestComposer
         }
         // 0 — вид не ограничен
         if ($kindCap > 0 && $sameKind >= $kindCap) {
+            return false;
+        }
+        if ($friday && $fridays >= $this->fridayCap) {
             return false;
         }
         // свой предел вида (`kind_caps`) не снимает и добор: второй квиз хуже строкой меньше
@@ -1616,6 +1725,175 @@ final class BroadcastDigestComposer
         }
 
         return array_values($named);
+    }
+
+    /** @var int|null строк вечера пятницы не больше этого, см. `friday_lines`; null — без предела */
+    private ?int $fridayCap = null;
+
+    private static function onFriday(object $row): bool
+    {
+        return Carbon::parse($row->start_time)->setTimezone(self::TZ)->isFriday();
+    }
+
+    /** Вечеринка без темы «Вечеринки»: по слову в названии. */
+    private const PARTY_TITLE = '/дискотек|танцпол|вечеринк|(?<!\p{L})(пати|party|dj|диджей|рейв|rave)(?!\p{L})/iu';
+
+    /**
+     * Обязательные строки рубрики (`require`) по порядку. Нет такой среди названных — лучшая подходящая встаёт
+     * в свободное место или вместо самой слабой строки, порог «не на виду» ей не помеха. Бесплатного с часом
+     * не нашлось — встаёт дешёвое, как раньше в withCheapLine. Уже вставшие обязательные строки не снимаем.
+     *
+     * @param  array<int, object>  $named
+     * @param  list<object>  $ranked
+     * @param  array<string, mixed>  $theme
+     * @return list<object>
+     */
+    private function withRequired(array $named, array $ranked, array $theme, Carbon $publishAt, int $min, int $max, bool $onePerDay, bool $bothDays, \Closure $strong): array
+    {
+        $kept = [];
+        foreach ((array) $theme['require'] as $need) {
+            foreach ($need === 'free' ? ['free', 'cheap'] : [(string) $need] as $step) {
+                [$named, $id] = $this->requiredLine($step, $named, $kept, $ranked, $theme, $publishAt, $strong, $min, $max, $onePerDay, $bothDays);
+                if ($id !== null) {
+                    $kept[$id] = true;
+                    break;
+                }
+            }
+        }
+
+        return array_values($named);
+    }
+
+    /**
+     * Строка шага `$step` среди названных или лучшая подходящая из пула; null — подходящей нет.
+     *
+     * @param  array<int, object>  $named
+     * @param  array<int, true>  $kept
+     * @param  list<object>  $ranked
+     * @param  array<string, mixed>  $theme
+     * @return array{0: array<int, object>, 1: int|null}
+     */
+    private function requiredLine(string $step, array $named, array $kept, array $ranked, array $theme, Carbon $publishAt, \Closure $strong, int $min, int $max, bool $onePerDay, bool $bothDays): array
+    {
+        $fits = $this->requirement($step, $theme, $publishAt);
+        foreach ($named as $id => $row) {
+            if ($fits($row)) {
+                return [$named, (int) $id];
+            }
+        }
+
+        $pool = match ($step) {
+            // дешёвое — как раньше, не намного слабее лучшего
+            'cheap' => array_filter($ranked, $strong),
+            'exhibition' => $this->byRunScore($ranked),
+            default => $ranked,
+        };
+        foreach ($pool as $row) {
+            // бесплатное и вечеринка — не еженедельные и не любительские: такое канал называл бы каждую неделю
+            if (! $fits($row) || (in_array($step, ['free', 'night'], true) && ! $this->notRoutine($row))) {
+                continue;
+            }
+            $placed = $this->placeLine($row, $named, $kept, $ranked, $min, $max, $onePerDay, $bothDays);
+            if ($placed !== null) {
+                return [$placed, (int) $row->id];
+            }
+        }
+
+        return [$named, null];
+    }
+
+    /**
+     * @param  array<string, mixed>  $theme
+     * @return \Closure(object): bool
+     */
+    private function requirement(string $step, array $theme, Carbon $publishAt): \Closure
+    {
+        $at = $publishAt->copy()->setTimezone(self::TZ);
+        $nightFrom = (int) ($theme['night_from'] ?? 18);
+
+        return match ($step) {
+            // с часом: выставка без часа идёт неделями, это не «сходить в субботу»
+            'free' => fn (object $r) => in_array($r->price_status, ['free', 'donation'], true) && ($r->time_precision ?? null) !== 'date',
+            'cheap' => fn (object $r) => in_array($r->price_status, ['free', 'donation'], true)
+                || ((int) ($r->price_min ?? 0) > 0 && (int) $r->price_min <= self::CHEAP_MAX),
+            'exhibition' => function (object $r) use ($at) {
+                if ($this->scorer->explain($r)['kind'] !== 'exhibitions') {
+                    return false;
+                }
+                ['opens' => $opens, 'ends' => $ends] = $this->scorer->runSpan($r);
+
+                return $this->opensSoon($opens, $at) || $this->closesSoon($ends, $at);
+            },
+            'night' => function (object $r) use ($nightFrom) {
+                if (($r->time_precision ?? null) === 'date'
+                    || ($this->scorer->explain($r)['kind'] !== 'parties' && preg_match(self::PARTY_TITLE, (string) $r->title) !== 1)) {
+                    return false;
+                }
+                $t = Carbon::parse($r->start_time)->setTimezone(self::TZ);
+
+                // вечер пятницы или субботы и после полуночи
+                return (in_array($t->isoWeekday(), [5, 6], true) && $t->hour >= $nightFrom)
+                    || (in_array($t->isoWeekday(), [6, 7], true) && $t->hour < 5);
+            },
+            default => fn (object $r) => false,
+        };
+    }
+
+    private function notRoutine(object $row): bool
+    {
+        $parts = $this->scorer->partsOf($row);
+
+        return $parts['dates'] >= 0 && $parts['amateur'] === 0;
+    }
+
+    /**
+     * @param  list<object>  $ranked
+     * @return list<object>
+     */
+    private function byRunScore(array $ranked): array
+    {
+        usort($ranked, fn ($a, $b) => ($this->runScores[(int) $b->id] ?? 0) <=> ($this->runScores[(int) $a->id] ?? 0));
+
+        return $ranked;
+    }
+
+    /**
+     * Поставить строку в свободное место, иначе вместо самой слабой, которую можно снять: не обязательной
+     * и не единственной строки субботы или воскресенья.
+     *
+     * @param  array<int, object>  $named
+     * @param  array<int, true>  $kept
+     * @param  list<object>  $ranked
+     * @return array<int, object>|null
+     */
+    private function placeLine(object $row, array $named, array $kept, array $ranked, int $min, int $max, bool $onePerDay, bool $bothDays): ?array
+    {
+        if ($this->fitsNamed($row, $named, $min, $max, $onePerDay)) {
+            $named[(int) $row->id] = $row;
+
+            return $named;
+        }
+
+        $position = array_flip(array_map(fn ($r) => (int) $r->id, $ranked));
+        $weakFirst = array_keys($named);
+        usort($weakFirst, fn ($a, $b) => ($position[$b] ?? PHP_INT_MAX) <=> ($position[$a] ?? PHP_INT_MAX));
+        foreach ($weakFirst as $id) {
+            $other = $named[$id];
+            $alone = $bothDays && Carbon::parse(self::dayOf($other))->isWeekend()
+                && count(array_filter($named, fn ($n) => self::dayOf($n) === self::dayOf($other))) === 1;
+            if (isset($kept[$id]) || $alone) {
+                continue;
+            }
+            $without = $named;
+            unset($without[$id]);
+            if ($this->fitsNamed($row, $without, $min, $max, $onePerDay)) {
+                $without[(int) $row->id] = $row;
+
+                return $without;
+            }
+        }
+
+        return null;
     }
 
     /** Слова названий, которые есть у разных событий одного часа: по ним двойника не узнать. */
@@ -1703,11 +1981,18 @@ final class BroadcastDigestComposer
         $from = $since ?? $publishAt->copy()->setTimezone(self::TZ);
         $forms = (array) ($theme['forms'] ?? []);
 
+        // У «выходных» с вечером пятницы число и ссылка подвала — по субботе и воскресенью, как лента
+        // ?when=weekend; пятница в шапке, только если она есть в строках.
+        $weekend = ($theme['window'] ?? '') === 'weekend';
+        $pageFrom = $weekend ? WeekendWindow::for($publishAt->copy()->setTimezone(self::TZ))[0] : $from;
+        $onPage = array_filter($picked['named'], fn ($r) => ! $weekend || ! Carbon::parse($r->start_time)->lt($pageFrom));
+        $headFrom = count($onPage) < count($picked['named']) ? $from : $pageFrom;
+
         // Город в шапке не пишем — канал городской, а площадки в строках
         // фактов и так его называют.
-        $range = $from->month === $to->month
-            ? sprintf('%d–%d %s', $from->day, $to->day, self::MONTHS[$to->month])
-            : sprintf('%d %s – %d %s', $from->day, self::MONTHS[$from->month], $to->day, self::MONTHS[$to->month]);
+        $range = $headFrom->month === $to->month
+            ? sprintf('%d–%d %s', $headFrom->day, $to->day, self::MONTHS[$to->month])
+            : sprintf('%d %s – %d %s', $headFrom->day, self::MONTHS[$headFrom->month], $to->day, self::MONTHS[$to->month]);
 
         // «Спектакли НЕДЕЛИ» — про тему, и это верно. Но «Вечером недели» или
         // «Бесплатно недели» по-русски не говорят: у рубрик по поводу заголовок
@@ -1716,7 +2001,7 @@ final class BroadcastDigestComposer
 
         // Число — из той же выборки, на которую ведёт подвал. У рубрик без
         // фильтра ленты (тематических) его нет, и шапка остаётся как была.
-        $feed = $this->feedSpec((array) $theme, $broadcast, $from, $to);
+        $feed = $this->feedSpec((array) $theme, $broadcast, $pageFrom, $to);
         $total = ($theme['count'] ?? true) ? $this->feedTotal($feed['count'] ?? null) : null;
 
         // Счёт живёт в подвале («Остальные 329 — вся афиша на выходные»), в шапке только что и когда.
@@ -1769,6 +2054,7 @@ final class BroadcastDigestComposer
         sort($sortedDays);
         $perDay = array_count_values($days);
         $byDay = $shortDates
+            && ($theme['order'] ?? '') !== 'run'
             && (count($perDay) === 1 || max($perDay) > 1)
             && $days === $sortedDays
             && array_filter($named, fn ($r) => count($sessions[(int) $r->id] ?? []) > 1) === [];
@@ -1808,11 +2094,11 @@ final class BroadcastDigestComposer
             if ($place !== '' && self::titleNamesVenue($title, $place, (string) ($row->venue_name ?? ''), $cityName)) {
                 $place = '';
             }
-            $meta = array_values(array_filter([
-                $byDay ? self::timeLabel($row) : $this->whenLabel($row, $shortDates, $sessions[(int) $row->id] ?? []),
-                $place,
-                $this->priceLabel($row),
-            ]));
+            $when = $byDay ? self::timeLabel($row) : $this->whenLabel($row, $shortDates, $sessions[(int) $row->id] ?? []);
+            if (! empty($theme['run_label'])) {
+                $when = $this->runLabel($row, $publishAt) ?? $when;
+            }
+            $meta = array_values(array_filter([$when, $place, $this->priceLabel($row)]));
 
             // НЕ $head: этим именем выше назван заголовок поста, и повторное
             // использование затирало его названием последнего события.
@@ -1844,7 +2130,7 @@ final class BroadcastDigestComposer
 
         // «Остальные N» — только когда N посчитан по той же выборке и правда
         // остались. Названные входят в total, поэтому вычитаем их.
-        $rest = $total !== null ? $total - count($picked['named']) : 0;
+        $rest = $total !== null ? $total - count($onPage) : 0;
 
         // Число БЕЗ существительного: рядом стоит подпись ссылки, и «остальные
         // 23 события — вся афиша событий» повторяет слово дважды в семи словах.
@@ -1928,6 +2214,27 @@ final class BroadcastDigestComposer
         $name = self::DAY_NAMES[(int) $at->isoWeekday()];
 
         return $datesInHead ? $name : $name.', '.$at->day.' '.self::MONTHS[$at->month];
+    }
+
+    /** Срок выставки вместо дня: «до 6 декабря», «с 5 по 22 ноября»; срок неизвестен — null. */
+    private function runLabel(object $row, Carbon $publishAt): ?string
+    {
+        if ($this->scorer->explain($row)['kind'] !== 'exhibitions') {
+            return null;
+        }
+        ['opens' => $opens, 'ends' => $ends] = $this->scorer->runSpan($row);
+        $day = Carbon::parse($row->start_time)->setTimezone(self::TZ)->startOfDay();
+        // открытие пишем, только если оно после дня выхода: открывшаяся выставка — просто «до …»
+        $opens = $opens?->gt($publishAt->copy()->setTimezone(self::TZ)->endOfDay()) ? $opens->copy()->setTimezone(self::TZ) : null;
+        $ends = $ends?->gte($day) ? $ends->copy()->setTimezone(self::TZ) : null;
+        $date = fn (Carbon $d) => $d->day.' '.self::MONTHS[$d->month];
+
+        return match (true) {
+            $opens !== null && $ends !== null => 'с '.($opens->month === $ends->month ? $opens->day : $date($opens)).' по '.$date($ends),
+            $opens !== null => 'с '.$date($opens),
+            $ends !== null => 'до '.$date($ends),
+            default => null,
+        };
     }
 
     /** Час под заголовком дня; у события без часа строка начинается с места. */
@@ -2307,8 +2614,8 @@ final class BroadcastDigestComposer
     /**
      * Окно рубрики — один метод на отбор и на шапку: пока их было два, шапка
      * обещала восемь дней там, где отбор смотрел пять. У «N дней вперёд» низа
-     * нет (его держит [[PostTiming]]), у «выходных» он обязателен — иначе в
-     * подборку попадёт вечер пятницы.
+     * нет (его держит [[PostTiming]]), у «выходных» он обязателен: пятница
+     * в окне только с часа `friday_from`.
      *
      * @param  array<string, mixed>  $theme
      * @return array{0: Carbon|null, 1: Carbon}
@@ -2320,7 +2627,14 @@ final class BroadcastDigestComposer
         if (($theme['window'] ?? '') === 'weekend') {
             // Той же формулой, что и лента: подвал такой рубрики ведёт на
             // ?when=weekend, и разойтись им нельзя. См. [[WeekendWindow]].
-            return WeekendWindow::for($at);
+            [$from, $to] = WeekendWindow::for($at);
+            // вечер пятницы — тоже выходные, если подборка выходит раньше него; число в подвале
+            // всё равно по субботе и воскресенью, см. buildCaption
+            if (isset($theme['friday_from']) && $from->isSaturday() && $at->lt($from)) {
+                $from = $from->copy()->subDay()->setTime((int) $theme['friday_from'], 0);
+            }
+
+            return [$from, $to];
         }
 
         if (isset($theme['occasion'])) {

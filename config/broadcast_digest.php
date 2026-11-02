@@ -32,7 +32,16 @@ return [
         ['slug' => 'spektakli', 'interest' => 'theatre', 'title' => 'Спектакли', 'emoji' => '🎭',
             'forms' => ['спектакль', 'спектакля', 'спектаклей']],
         ['slug' => 'vystavki', 'interest' => 'exhibitions', 'title' => 'Выставки', 'emoji' => '🖼',
-            'forms' => ['выставка', 'выставки', 'выставок']],
+            'forms' => ['выставка', 'выставки', 'выставок'],
+            // выставки идут неделями одновременно: строки по `run_order`, а не по дням, в строке срок
+            'order' => 'run',
+            'run_label' => true,
+            'run_only' => true,
+            'one_per_day' => false,
+            'cheap_line' => false,
+            'named' => [3, 4],
+            // выходит каждую субботу: названную выставку месяц не повторяем
+            'repeat_days' => 28],
         ['slug' => 'kvizy', 'interest' => 'quiz-games', 'title' => 'Квизы', 'emoji' => '🧠',
             'forms' => ['квиз', 'квиза', 'квизов']],
         ['slug' => 'ekskursii', 'interest' => 'excursions', 'title' => 'Экскурсии', 'emoji' => '🚶',
@@ -149,6 +158,14 @@ return [
             'feed' => ['when' => 'weekend'],
             'feed_label' => 'вся афиша на выходные',
             'address_as_place' => true,
+            // подборка выходит в четверг вечером: вечер пятницы с этого часа тоже её, но не больше `friday_lines` строк
+            'friday_from' => 18,
+            'friday_lines' => 1,
+            // обязательные строки по порядку, см. BroadcastDigestComposer::withRequired: бесплатное с часом,
+            // выставка, которая открывается или закрывается, вечеринка вечером в пятницу или субботу (с `night_from`)
+            'require' => ['free', 'exhibition', 'night'],
+            'night_from' => 18,
+            'run_label' => true,
             // названное здесь месяц не повторяем: «Сердцелесье» идёт каждое воскресенье
             'repeat_days' => 28,
             // сначала разные виды, потом до двух одного вида, остаток — лучшим без предела:
@@ -731,6 +748,26 @@ return [
      */
     'week_themes' => ['koncerty', 'spektakli', 'lekcii', 'ekskursii', 'kino', 'stendap'],
     'week_theme_pool' => 15,
+
+    /*
+     * Порядок выставок: по нему ранжирует «Выставки» и выбирает свою выставку «На выходных»
+     * (BroadcastDigestComposer::byRun). Вверх — кого открывали на сайте за `views_days` суток (по `per_view`
+     * за человека, не больше `views_max`), большая платная не в музее (привозная), открытие за последние
+     * `opens_days` дней или впереди, закрытие в ближайшие `closes_days`. Вид и «идёт постоянно» не в счёт.
+     */
+    'run_order' => [
+        'skip' => ['kind', 'dates', 'time'],
+        'views_days' => 14,
+        'per_view' => 2,
+        'views_max' => 20,
+        'big_from' => 300,
+        // привозная выше открытий и закрытий: её ищут по названию
+        'big' => 40,
+        'opens_days' => 7,
+        'opens' => 20,
+        'closes_days' => 9,
+        'closes' => 20,
+    ],
 
     /*
      * Гейт темы. Меньше — подборка получается не подборкой: «две выставки на

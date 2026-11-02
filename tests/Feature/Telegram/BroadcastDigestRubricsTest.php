@@ -683,29 +683,169 @@ class BroadcastDigestRubricsTest extends TestCase
 
     /* ──────────────── окно «выходные» ──────────────── */
 
-    /**
-     * Календарное окно: суббота и воскресенье, а не «N дней вперёд».
-     *
-     * Выход в пятницу, значит выходные — завтра и послезавтра. Событие
-     * пятничного вечера в такую подборку попасть не должно: оно не «на
-     * выходных», оно сегодня.
-     */
-    #[Test]
-    public function the_weekend_rubric_takes_saturday_and_sunday_only(): void
+    /** @return array<string, array{int, string, bool}> */
+    public static function fridayStarts(): array
     {
-        Carbon::setTestNow(Carbon::parse('2026-09-18 10:00', 'Europe/Moscow')); // пятница
+        // час, точность времени, назван ли: подборка выходит в четверг, вечер пятницы — тоже выходные
+        return [
+            'вечер пятницы' => [20, 'datetime', true],
+            'пятница днём' => [15, 'datetime', false],
+            'пятница без часа' => [0, 'date', false],
+        ];
+    }
+
+    #[Test]
+    #[DataProvider('fridayStarts')]
+    public function the_weekend_rubric_takes_friday_only_from_the_evening(int $hour, string $precision, bool $named): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow')); // четверг
         $this->onlyRubric('na-vyhodnyh');
 
         $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
-        $this->event('Пятничный вечер', 0, free: false, priceMin: 500, hour: 20, description: $long);
-        foreach ([1, 1, 1, 2, 2] as $i => $day) {
+        foreach ([2, 2, 2, 3, 3] as $i => $day) {
             $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
         }
+        // с афишей оно первое по интересу: не назвать его может только окно
+        $friday = $this->event('Пятничный вечер', 1, free: false, priceMin: 500, hour: $hour, description: $long, timePrecision: $precision);
+        $this->poster($friday);
 
-        $caption = $this->caption(Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-17 19:00', 'Europe/Moscow'));
 
-        $this->assertStringNotContainsString('Пятничный вечер', $caption, 'пятница — не выходные');
-        $this->assertStringContainsString('На выходных', $caption);
+        $this->assertNotNull($out);
+        $this->assertSame($named, in_array($friday, $out['event_ids'], true));
+    }
+
+    #[Test]
+    public function the_weekend_footer_counts_saturday_and_sunday_like_its_link(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow')); // четверг
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([2, 2, 2, 3, 3] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+        foreach ([19, 21] as $hour) {
+            $this->poster($this->event('Пятница '.$hour, 1, free: false, priceMin: 500, hour: $hour, description: $long));
+        }
+
+        $caption = $this->caption(Carbon::parse('2026-09-17 19:00', 'Europe/Moscow'));
+
+        // строка пятницы одна, вторая пятница в число не входит: лента по ссылке ?when=weekend её не покажет
+        preg_match('/Остальные (\d+) — /u', $caption, $rest);
+        $this->assertSame(5, (int) ($rest[1] ?? 0) + preg_match_all('~/events/\d+~', $caption) - 1);
+        $this->assertStringContainsString('18–20 сентября', $caption, 'пятница в шапке, раз она есть в строках');
+    }
+
+    #[Test]
+    public function the_weekend_rubric_always_names_a_free_event_with_a_time(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+        $this->unusualWeekend();
+
+        $talk = $this->event('Архитектура старого города', 2, free: true, hour: 12, description: str_repeat('описание события достаточной длины и подробностей. ', 8));
+        $this->retag($talk, 'education');
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-17 19:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertContains($talk, $out['event_ids']);
+    }
+
+    /** @return array<string, array{int, int, int, bool}> */
+    public static function exhibitionRuns(): array
+    {
+        // первый и последний день выставки от дня выхода, сколько дней назад её увидели, названа ли
+        return [
+            'закрывается в воскресенье' => [-20, 3, 30, true],
+            'открылась вчера' => [-1, 30, 5, true],
+            'идёт ещё месяц' => [-20, 30, 30, false],
+        ];
+    }
+
+    #[Test]
+    #[DataProvider('exhibitionRuns')]
+    public function the_weekend_rubric_names_an_exhibition_that_opens_or_closes(int $first, int $last, int $seen, bool $named): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+        $this->unusualWeekend();
+
+        $show = $this->event('Выставка графики', 2, free: false, priceMin: 200, timePrecision: 'date',
+            description: str_repeat('описание события достаточной длины и подробностей. ', 8));
+        $this->retag($show, 'exhibitions');
+        $this->series($show, $first, $last, $seen);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-17 19:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertSame($named, in_array($show, $out['event_ids'], true));
+    }
+
+    /** @return array<string, array{int, bool}> */
+    public static function partyHours(): array
+    {
+        return ['ночь субботы' => [23, true], 'суббота днём' => [15, false]];
+    }
+
+    #[Test]
+    #[DataProvider('partyHours')]
+    public function the_weekend_rubric_keeps_a_line_for_a_party_at_night(int $hour, bool $named): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+        $this->unusualWeekend();
+
+        // дорогой билет тянет вниз: сама по интересу вечеринка не встала бы
+        $party = $this->event('Танцпол нулевых', 2, free: false, priceMin: 2500, hour: $hour,
+            description: str_repeat('описание события достаточной длины и подробностей. ', 8));
+        $this->retag($party, 'parties');
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-17 19:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertSame($named, in_array($party, $out['event_ids'], true));
+    }
+
+    #[Test]
+    public function the_exhibitions_rubric_puts_a_touring_show_first_with_its_closing_date(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-19 08:00', 'Europe/Moscow')); // суббота
+        $this->onlyRubric('vystavki');
+        $this->museumShows();
+        // позже музейных по дням: без прибавки за привозную стояла бы последней
+        $touring = $this->event('Магия воды и света', 5, free: false, priceMin: 400, timePrecision: 'date',
+            description: str_repeat('описание события достаточной длины и подробностей. ', 8));
+        $this->retag($touring, 'exhibitions');
+        $this->series($touring, -30, 30, 40, until: 60);
+
+        $caption = $this->caption(Carbon::parse('2026-09-19 10:00', 'Europe/Moscow'));
+
+        $this->assertLessThan(mb_strpos($caption, 'Выставка музея'), mb_strpos($caption, 'Магия воды и света'));
+        $this->assertStringContainsString('до 18 ноября', $caption, 'срок вместо дня недели');
+    }
+
+    #[Test]
+    public function the_exhibitions_rubric_leaves_out_what_has_been_on_for_months(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-19 08:00', 'Europe/Moscow'));
+        $this->onlyRubric('vystavki');
+        $this->museumShows();
+        $aquarium = $this->event('Океанариум', 1, free: false, priceMin: 900, timePrecision: 'date',
+            description: str_repeat('описание события достаточной длины и подробностей. ', 8));
+        $this->retag($aquarium, 'exhibitions');
+        $this->series($aquarium, -5, 20, 150, until: 20);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-19 10:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertNotContains($aquarium, $out['event_ids']);
     }
 
     /**
@@ -1834,6 +1974,43 @@ class BroadcastDigestRubricsTest extends TestCase
             'created_at' => now(),
             'updated_at' => now(),
         ]);
+    }
+
+    /** Пять сильных строк «не на виду» на субботу и воскресенье после четверга: слабое встанет только обязательной строкой. */
+    private function unusualWeekend(): void
+    {
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([2, 2, 2, 3, 3] as $i => $day) {
+            $this->event('Аудиоспектакль-прогулка '.($i + 1), $day, free: false, priceMin: 1000, hour: 12 + $i, description: $long);
+        }
+    }
+
+    /** Пять бесплатных выставок в музеях на неделю вперёд. */
+    private function museumShows(): void
+    {
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([1, 2, 3, 4, 4] as $i => $day) {
+            $id = $this->event('Выставка музея '.($i + 1), $day, free: true, timePrecision: 'date', description: $long);
+            $this->retag($id, 'exhibitions');
+            DB::table('venues')->where('id', DB::table('events')->where('id', $id)->value('venue_id'))->update(['kind' => 'Музеи']);
+            $this->series($id, -10, 40, 20);
+        }
+    }
+
+    /** Серия выставки: первый, последний и объявленный последний день от сегодня, когда её увидели впервые. */
+    private function series(int $eventId, int $first, int $last, int $seenDaysAgo, ?int $until = null): void
+    {
+        $day = fn (int $offset) => Carbon::now('Europe/Moscow')->addDays($offset)->toDateString();
+        $group = $this->group();
+        DB::table('event_groups')->where('id', $group)->update([
+            'series_meta' => json_encode(array_filter([
+                'first' => $day($first),
+                'last' => $day($last),
+                'until' => $until === null ? null : $day($until),
+            ])),
+            'created_at' => Carbon::now()->subDays($seenDaysAgo),
+        ]);
+        DB::table('events')->where('id', $eventId)->update(['event_group_id' => $group]);
     }
 
     /* ──────────────── рубрику выбирает человек ──────────────── */

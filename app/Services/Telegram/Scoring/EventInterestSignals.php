@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Telegram\Scoring;
 
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -21,12 +22,14 @@ final class EventInterestSignals
     /** Театр, филармония, концертный зал: у платного вечера там своя касса, даже без сайта-кассы среди источников. */
     public const STAGE_VENUE_KIND = 'Сцены';
 
+    public const MUSEUM_VENUE_KIND = 'Музеи';
+
     /** Даты серии считаются вперёд на этот срок. */
     public const REPEATS_DAYS = 30;
 
     /**
      * @param  list<int>  $eventIds
-     * @return array<int, array{slug: string|null, parent: string|null, repeats: int, past: int, run_until: string|null, ticketed: bool, rating: int, photo: bool, venue_kind: string|null, venue_name: string|null}>
+     * @return array<int, array{slug: string|null, parent: string|null, repeats: int, past: int, run_until: string|null, ticketed: bool, rating: int, photo: bool, venue_kind: string|null, venue_name: string|null, first: string|null, last: string|null, until: string|null, seen: string|null}>
      */
     public function forEvents(array $eventIds): array
     {
@@ -54,6 +57,10 @@ final class EventInterestSignals
                 'photo' => false,
                 'venue_kind' => $venueKind,
                 'venue_name' => $row->venue_name !== null ? (string) $row->venue_name : null,
+                'first' => null,
+                'last' => null,
+                'until' => null,
+                'seen' => null,
             ];
             if ($row->event_group_id !== null) {
                 $groups[(int) $row->id] = (int) $row->event_group_id;
@@ -103,6 +110,23 @@ final class EventInterestSignals
                 if ($row !== null && (int) $row->days > 1) {
                     $out[$id]['run_until'] = substr((string) $row->last_day, 0, 10);
                 }
+            }
+
+            // срок серии целиком, а не за месяц вокруг: объявленный конец (`until`), первый и последний день;
+            // `seen` — день, когда серию увидели впервые, см. EventBroadcastScorer::runSpan
+            $series = DB::table('event_groups')
+                ->whereIn('id', array_values(array_unique($groups)))
+                ->get(['id', 'series_meta', 'created_at'])
+                ->keyBy('id');
+            foreach ($groups as $id => $group) {
+                $g = $series[$group] ?? null;
+                $meta = $g !== null ? (json_decode((string) $g->series_meta, true) ?: []) : [];
+                $out[$id]['first'] = isset($meta['first']) ? (string) $meta['first'] : null;
+                $out[$id]['last'] = isset($meta['last']) ? (string) $meta['last'] : null;
+                $out[$id]['until'] = isset($meta['until']) ? (string) $meta['until'] : null;
+                $out[$id]['seen'] = $g?->created_at !== null
+                    ? Carbon::parse($g->created_at)->setTimezone('Europe/Moscow')->toDateString()
+                    : null;
             }
         }
 
