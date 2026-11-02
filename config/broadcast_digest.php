@@ -36,12 +36,12 @@ return [
             // выставки идут неделями одновременно: строки по `run_order`, а не по дням, в строке срок
             'order' => 'run',
             'run_label' => true,
-            'run_only' => true,
+            'skip_lasting' => true,
             'one_per_day' => false,
             'cheap_line' => false,
             'named' => [3, 4],
-            // выходит каждую субботу: названную выставку месяц не повторяем
-            'repeat_days' => 28],
+            // выходит каждую субботу: названную выставку три недели не повторяем, за месяц выставки кончаются
+            'repeat_days' => 21],
         ['slug' => 'kvizy', 'interest' => 'quiz-games', 'title' => 'Квизы', 'emoji' => '🧠',
             'forms' => ['квиз', 'квиза', 'квизов']],
         ['slug' => 'ekskursii', 'interest' => 'excursions', 'title' => 'Экскурсии', 'emoji' => '🚶',
@@ -211,6 +211,8 @@ return [
             // выставка 6+ в музее — по закону, а не для детей: больше одной не берём
             'kind_caps' => ['quiz-games' => 0, 'exhibitions' => 1],
             'age_in_line' => true,
+            'skip_lasting' => true,
+            'timed_only' => true,
             // спектакли для детей идут каждую неделю: названное месяц не повторяем
             'repeat_days' => 28,
             'city_in_head' => true],

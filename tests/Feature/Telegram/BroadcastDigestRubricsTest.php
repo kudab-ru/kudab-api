@@ -990,6 +990,30 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertNotContains($again, $out['event_ids']);
     }
 
+    #[Test]
+    public function the_weekend_rubric_does_not_repeat_a_show_under_another_card(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow')); // четверг
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([2, 2, 2, 3, 3] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 700, hour: 12 + $i, description: $long);
+        }
+        $earlier = $this->event('Цирк Крокус Воронеж', -12, free: false, priceMin: 1000, hour: 13, description: $long);
+        // та же площадка, другое название карточки; с афишей встало бы первым
+        $again = $this->event('Цирк «Крокус»', 2, free: false, priceMin: 1000, hour: 13, description: $long);
+        DB::table('events')->where('id', $again)->update(['venue_id' => DB::table('events')->where('id', $earlier)->value('venue_id')]);
+        $this->poster($again);
+        $this->postedDigest($this->channel(), 'na-vyhodnyh', 14, [$earlier]);
+
+        $out = app(BroadcastDigestComposer::class)
+            ->compose($this->channel(), Carbon::parse('2026-09-17 19:00', 'Europe/Moscow'));
+
+        $this->assertNotNull($out);
+        $this->assertNotContains($again, $out['event_ids']);
+    }
+
     /** @return array<string, array{int|null, bool, int, int, bool}> */
     public static function weekendPrices(): array
     {

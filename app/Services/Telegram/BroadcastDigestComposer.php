@@ -933,8 +933,13 @@ final class BroadcastDigestComposer
                 // вечер пятницы — только события с часом: выставка без часа встала бы строкой пятницы
                 ->when(isset($theme['friday_from']) && $since?->isFriday(), fn ($w) => $w->where(fn ($x) => $x->whereNotNull('e.start_time')
                     ->orWhere('e.start_date', '>', $since->copy()->setTimezone(self::TZ)->toDateString()))),
-            // часам повода (`hours`) событие без часа не годится: неизвестно, ночью ли оно
-            'no_time' => isset($theme['hours']) ? fn ($q) => OccasionCalendar::applyTimed($q, $theme, 'e') : null,
+            'no_time' => match (true) {
+                // часам повода (`hours`) событие без часа не годится: неизвестно, ночью ли оно
+                isset($theme['hours']) => fn ($q) => OccasionCalendar::applyTimed($q, $theme, 'e'),
+                // «С детьми» — куда сходить к часу; что идёт весь день без часа, туда не берём
+                ! empty($theme['timed_only']) => fn ($q) => $q->where('e.time_precision', '<>', 'date'),
+                default => null,
+            },
             // срок общим правилом (`PostTiming`): многодневку берём до закрытия, иначе «Выставки недели»
             // не назвали бы выставку, открытую неделю назад
             'timing' => fn ($q) => $q->where(fn ($w) => PostTiming::applyFits($w, $publishAt, PostTiming::MIN_LEAD_HOURS, 'e', wholeDay: true)),
@@ -1010,8 +1015,8 @@ final class BroadcastDigestComposer
             $rows = $this->withViews($rows, $theme, $publishAt);
             $this->traceLoss($rows, 'views');
         }
-        // «Выставки недели» — со сроком: постоянное (океанариум) идёт месяцами и строки не заслуживает
-        if (! empty($theme['run_only'])) {
+        // постоянное (океанариум) идёт месяцами: «Выставкам недели» и «С детьми» оно не новость
+        if (! empty($theme['skip_lasting'])) {
             $this->scorer->prepare($rows);
             $rows = $rows->reject(fn ($r) => $this->scorer->runSpan($r)['lasting'])->values();
             $this->traceLoss($rows, 'lasting');
@@ -1346,15 +1351,23 @@ final class BroadcastDigestComposer
                     ->where('i.posted_at', '>=', Carbon::now()->subDays($ownDays))
                     ->whereRaw("i.digest_meta->>'theme' = ?", [$ownSlug])));
             })
-            ->get(['e.id', 'e.event_group_id', 'e.title']);
+            ->get(['e.id', 'e.event_group_id', 'e.title', 'e.venue_id']);
 
         $ids = $shown->pluck('id')->map(fn ($v) => (int) $v)->all();
         $groups = $shown->pluck('event_group_id')->filter()->map(fn ($v) => (int) $v)->all();
         $titles = $shown->pluck('title')->map(fn ($t) => $this->titleKey((string) $t))->all();
+        // та же вещь другой карточкой: «Цирк Крокус Воронеж» и «Цирк «Крокус»» на одной площадке
+        $byVenue = [];
+        foreach ($shown as $s) {
+            if ($s->venue_id !== null) {
+                $byVenue[(int) $s->venue_id] = [...($byVenue[(int) $s->venue_id] ?? []), ...self::rareWords((string) $s->title)];
+            }
+        }
 
         return $rows->reject(fn ($row) => in_array((int) $row->id, $ids, true)
             || ($row->event_group_id !== null && in_array((int) $row->event_group_id, $groups, true))
-            || in_array($this->titleKey((string) $row->title), $titles, true))->values();
+            || in_array($this->titleKey((string) $row->title), $titles, true)
+            || ($row->venue_id !== null && array_intersect(self::rareWords((string) $row->title), $byVenue[(int) $row->venue_id] ?? []) !== []))->values();
     }
 
     /**
@@ -1915,12 +1928,21 @@ final class BroadcastDigestComposer
         if ((string) $a->start_time !== (string) $b->start_time) {
             return false;
         }
-        $words = fn (object $r) => array_filter(
-            preg_split('/[^\p{L}\p{N}]+/u', str_replace('ё', 'е', mb_strtolower((string) $r->title))) ?: [],
-            fn ($w) => mb_strlen($w) >= 5 && ! in_array($w, self::TWIN_COMMON, true),
-        );
 
-        return array_intersect($words($a), $words($b)) !== [];
+        return array_intersect(self::rareWords((string) $a->title), self::rareWords((string) $b->title)) !== [];
+    }
+
+    /**
+     * Слова названия, по которым одно событие узнаётся в другой карточке: от пяти букв и не из `TWIN_COMMON`.
+     *
+     * @return list<string>
+     */
+    private static function rareWords(string $title): array
+    {
+        return array_values(array_filter(
+            preg_split('/[^\p{L}\p{N}]+/u', str_replace('ё', 'е', mb_strtolower($title))) ?: [],
+            fn ($w) => mb_strlen($w) >= 5 && ! in_array($w, self::TWIN_COMMON, true),
+        ));
     }
 
     /** Одна площадка — одна строка; у события без площадки место — его адрес. */
