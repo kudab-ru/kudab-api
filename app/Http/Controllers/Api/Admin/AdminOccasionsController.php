@@ -156,7 +156,7 @@ final class AdminOccasionsController extends Controller
         abort_if($theme === null || empty($theme['page']), 404);
 
         $city = $broadcast->chat?->city;
-        $window = OccasionCalendar::window($theme, Carbon::now(self::TZ));
+        $window = OccasionCalendar::window($theme, Carbon::now(self::TZ), $city?->id);
         if ($city === null || $window === null) {
             abort(response()->json(['error' => 'У праздника нет дат в этом году или у канала не задан город.'], 422));
         }
@@ -290,13 +290,17 @@ final class AdminOccasionsController extends Controller
         return response()->json(['data' => $this->row($broadcast, $theme, Carbon::now(self::TZ))]);
     }
 
-    /** Вписать дату праздника, который назначают каждый год заново; конец — у школьных каникул. */
+    /**
+     * Вписать дату праздника, который назначают каждый год заново; конец — у школьных каникул.
+     * Дата городского праздника (`per_city`) — для города канала `channel_id`, остальные общие.
+     */
     public function addDate(Request $request, string $slug): JsonResponse
     {
         $theme = $this->floatingTheme($slug);
         $validator = validator($request->all(), [
             'starts_on' => ['required', 'date_format:Y-m-d', 'after_or_equal:today'],
             'ends_on' => ['nullable', 'date_format:Y-m-d', 'after_or_equal:starts_on'],
+            'channel_id' => ['nullable', 'integer'],
         ], [
             'starts_on.required' => 'Нужна дата начала.',
             'starts_on.after_or_equal' => 'Эта дата уже прошла.',
@@ -311,22 +315,44 @@ final class AdminOccasionsController extends Controller
             return response()->json(['error' => 'Больше месяца — это уже не праздник: проверьте даты.'], 422);
         }
 
+        [$cityId, $viewCity] = $this->dateCity($theme, $v['channel_id'] ?? null);
         DB::table('occasion_dates')->updateOrInsert(
-            ['slug' => $theme['slug'], 'starts_on' => $v['starts_on']],
+            ['slug' => $theme['slug'], 'city_id' => $cityId, 'starts_on' => $v['starts_on']],
             ['ends_on' => $v['ends_on'] ?? null, 'updated_at' => now(), 'created_at' => now()],
         );
         OccasionCalendar::forgetFloating((string) $theme['slug']);
 
-        return response()->json(['data' => $this->dates((string) $theme['slug'])]);
+        return response()->json(['data' => $this->dates((string) $theme['slug'], $viewCity)]);
     }
 
-    public function removeDate(string $slug, string $date): JsonResponse
+    public function removeDate(Request $request, string $slug, string $date): JsonResponse
     {
         $theme = $this->floatingTheme($slug);
-        DB::table('occasion_dates')->where('slug', $theme['slug'])->where('starts_on', $date)->delete();
+        [$cityId, $viewCity] = $this->dateCity($theme, $request->integer('channel_id') ?: null);
+        DB::table('occasion_dates')->where('slug', $theme['slug'])->where('city_id', $cityId)->where('starts_on', $date)->delete();
         OccasionCalendar::forgetFloating((string) $theme['slug']);
 
-        return response()->json(['data' => $this->dates((string) $theme['slug'])]);
+        return response()->json(['data' => $this->dates((string) $theme['slug'], $viewCity)]);
+    }
+
+    /**
+     * Чей это день: у городского праздника — город канала, без канала с городом его не вписать.
+     *
+     * @param  array<string, mixed>  $theme
+     * @return array{0: int|null, 1: int|null} город записи (пусто — общая) и город канала
+     */
+    private function dateCity(array $theme, ?int $channelId): array
+    {
+        $viewCity = $channelId === null ? null
+            : TelegramChatBroadcast::query()->with('chat')->find($channelId)?->chat?->city_id;
+        if (empty($theme['per_city'])) {
+            return [null, $viewCity];
+        }
+        if ($viewCity === null) {
+            abort(response()->json(['error' => 'День города у каждого города свой: откройте канал города.'], 422));
+        }
+
+        return [$viewCity, $viewCity];
     }
 
     /** @return array<string, mixed> */
@@ -339,13 +365,13 @@ final class AdminOccasionsController extends Controller
     }
 
     /** @return list<array{starts_on: string, ends_on: string|null}> */
-    private function dates(string $slug): array
+    private function dates(string $slug, ?int $cityId): array
     {
         $today = Carbon::now(self::TZ)->toDateString();
 
         return array_values(array_map(
             fn ($d) => ['starts_on' => $d[0], 'ends_on' => $d[1]],
-            array_filter(OccasionCalendar::floating($slug), fn ($d) => ($d[1] ?? $d[0]) >= $today),
+            array_filter(OccasionCalendar::floating($slug, $cityId), fn ($d) => ($d[1] ?? $d[0]) >= $today),
         ));
     }
 
@@ -355,7 +381,7 @@ final class AdminOccasionsController extends Controller
         $broadcast = TelegramChatBroadcast::query()->with('chat.city')->findOrFail($broadcastId);
         $theme = collect(OccasionCalendar::themes())->firstWhere('slug', $slug);
         abort_if($theme === null, 404);
-        $day = BroadcastDigestComposer::occasionDate($theme, Carbon::now(self::TZ));
+        $day = BroadcastDigestComposer::occasionDate($theme, Carbon::now(self::TZ), $broadcast->chat?->city_id);
         if ($day === null) {
             abort(response()->json(['error' => 'У праздника нет даты в этом году.'], 422));
         }
@@ -380,11 +406,13 @@ final class AdminOccasionsController extends Controller
                 ? rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/').'/afisha/'.$citySlug.'/'.$theme['page']
                 : null,
             'floating' => ($theme['occasion'] ?? null) === 'floating',
-            'dates' => ($theme['occasion'] ?? null) === 'floating' ? $this->dates((string) $theme['slug']) : [],
+            // дата городского праздника вписывается для города этого канала
+            'city_in' => ! empty($theme['per_city']) && $cityIn !== null ? 'в '.$cityIn : null,
+            'dates' => ($theme['occasion'] ?? null) === 'floating' ? $this->dates((string) $theme['slug'], $broadcast->chat?->city_id) : [],
         ];
 
-        $day = BroadcastDigestComposer::occasionDate($theme, $now);
-        $window = OccasionCalendar::window($theme, $now);
+        $day = BroadcastDigestComposer::occasionDate($theme, $now, $broadcast->chat?->city_id);
+        $window = OccasionCalendar::window($theme, $now, $broadcast->chat?->city_id);
         if ($day === null || $window === null) {
             return $base + ['state' => 'no_date', 'date' => null, 'item' => null, 'reminder' => null,
                 'found' => null, 'roster' => [], 'more' => []];

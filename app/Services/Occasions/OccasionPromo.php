@@ -54,7 +54,7 @@ final class OccasionPromo
     /** Ближайший праздник для ленты на главной; null — он дальше двух недель или событий у него нет. */
     public function soon(City $city, Carbon $now): ?array
     {
-        $first = $this->near($now)[0] ?? null;
+        $first = $this->near($now, $city)[0] ?? null;
         if ($first === null) {
             return null;
         }
@@ -70,7 +70,7 @@ final class OccasionPromo
         if ($city === null) {
             return null;
         }
-        foreach ($this->near($now) as $o) {
+        foreach ($this->near($now, $city) as $o) {
             $theme = OccasionCalendar::byPage($o['page']);
             if ($theme !== null && $this->page->includes($theme, $city, (int) $event->id, $now)) {
                 return $this->summary($o, $city, $now);
@@ -89,7 +89,7 @@ final class OccasionPromo
         $text = self::norm($query);
         $best = null;
         $bestScore = 0;
-        foreach ($this->page->calendar($now) as $o) {
+        foreach ($this->page->calendar($now, $city) as $o) {
             $theme = OccasionCalendar::byPage($o['page']);
             $score = $theme === null ? 0 : self::score($text, $theme);
             if ($score > $bestScore) {
@@ -127,11 +127,11 @@ final class OccasionPromo
     }
 
     /** Праздники, на которые сайт зовёт сейчас: за две недели до начала и до конца окна. */
-    private function near(Carbon $now): array
+    private function near(Carbon $now, City $city): array
     {
         $now = $now->copy()->setTimezone(self::TZ);
 
-        return array_values(array_filter($this->page->calendar($now), function (array $o) use ($now) {
+        return array_values(array_filter($this->page->calendar($now, $city), function (array $o) use ($now) {
             $start = Carbon::parse($o['badge'], self::TZ);
             $end = Carbon::parse($o['until'], self::TZ)->endOfDay();
 

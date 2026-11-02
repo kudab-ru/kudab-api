@@ -336,6 +336,24 @@ class WebOccasionsTest extends TestCase
     }
 
     #[Test]
+    public function each_city_has_its_own_city_day(): void
+    {
+        DB::insert(
+            'INSERT INTO cities (name, country_code, location, status, slug, created_at, updated_at)
+             VALUES (?, ?, ST_SetSRID(ST_Point(?, ?), 4326), ?, ?, ?, ?)',
+            ['Курск', 'RU', 36.19, 51.73, 'active', 'kursk', now(), now()]
+        );
+        $kursk = (int) DB::table('cities')->where('slug', 'kursk')->value('id');
+        foreach ([[$this->cityId, '2027-09-11'], [$kursk, '2027-09-25']] as [$city, $day]) {
+            DB::table('occasion_dates')->insert(['slug' => 'povod-den-goroda', 'city_id' => $city, 'starts_on' => $day, 'created_at' => now(), 'updated_at' => now()]);
+        }
+
+        $date = fn (string $city) => $this->getJson('/api/web/occasions/den-goroda?city='.$city)->assertOk()->json('data.occasion.date');
+
+        $this->assertSame(['2027-09-11', '2027-09-25'], [$date('voronezh'), $date('kursk')]);
+    }
+
+    #[Test]
     public function out_of_season_the_page_shows_how_the_holiday_went_last_time(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-11-02 12:00', 'Europe/Moscow'));

@@ -29,7 +29,7 @@ final class OccasionsController extends Controller
         $city = $this->city($request);
         $now = Carbon::now('Europe/Moscow');
 
-        $out = ['data' => $this->page->calendar($now), 'soon' => $this->promo->soon($city, $now)];
+        $out = ['data' => $this->page->calendar($now, $city), 'soon' => $this->promo->soon($city, $now)];
         $q = trim((string) $request->query('q', ''));
         if ($q !== '') {
             $out['match'] = $this->promo->match(mb_substr($q, 0, 100), $city, $now);

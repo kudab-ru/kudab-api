@@ -41,15 +41,16 @@ final class OccasionCalendar
     /**
      * Ближайший повод, окно которого ещё не кончилось: день и окно событий в московском времени.
      * `occasion` — «месяц-день» каждый год, список дат «год-месяц-день» или 'floating' — даты вписывают
-     * в календаре админки (таблица occasion_dates). null — дат впереди нет.
+     * в календаре админки (таблица occasion_dates). null — дат впереди нет. Без города у городского
+     * праздника (`per_city`, День города) дат нет вовсе.
      *
      * @param  array<string, mixed>  $theme
      * @return array{day: Carbon, from: Carbon, to: Carbon}|null
      */
-    public static function occurrence(array $theme, Carbon $at): ?array
+    public static function occurrence(array $theme, Carbon $at, ?int $cityId = null): ?array
     {
         $at = $at->copy()->setTimezone(self::TZ);
-        foreach (self::dates($theme, $at) as [$start, $end]) {
+        foreach (self::dates($theme, $at, $cityId) as [$start, $end]) {
             $day = Carbon::parse($start, self::TZ)->startOfDay();
             [$from, $to] = self::span($theme, $day, $end);
             if ($to->gte($at)) {
@@ -66,11 +67,11 @@ final class OccasionCalendar
      * @param  array<string, mixed>  $theme
      * @return array{day: Carbon, from: Carbon, to: Carbon}|null
      */
-    public static function previous(array $theme, Carbon $at): ?array
+    public static function previous(array $theme, Carbon $at, ?int $cityId = null): ?array
     {
         $at = $at->copy()->setTimezone(self::TZ);
         $last = null;
-        foreach (self::dates($theme, $at) as [$start, $end]) {
+        foreach (self::dates($theme, $at, $cityId) as [$start, $end]) {
             $day = Carbon::parse($start, self::TZ)->startOfDay();
             [$from, $to] = self::span($theme, $day, $end);
             if ($to->lt($at)) {
@@ -87,12 +88,12 @@ final class OccasionCalendar
      *
      * @return list<array{0: string, 1: string|null}>
      */
-    private static function dates(array $theme, Carbon $at): array
+    private static function dates(array $theme, Carbon $at, ?int $cityId): array
     {
         $raw = $theme['occasion'];
 
         return match (true) {
-            $raw === 'floating' => self::floating((string) $theme['slug']),
+            $raw === 'floating' => self::floating((string) $theme['slug'], $cityId),
             is_array($raw) => array_map(fn ($d) => [(string) $d, null], $raw),
             default => array_map(
                 fn (int $year) => [sprintf('%d-%s', $year, $raw), null],
@@ -107,27 +108,35 @@ final class OccasionCalendar
      * @param  array<string, mixed>  $theme
      * @return array{0: Carbon, 1: Carbon}|null
      */
-    public static function window(array $theme, Carbon $at): ?array
+    public static function window(array $theme, Carbon $at, ?int $cityId = null): ?array
     {
-        $o = self::occurrence($theme, $at);
+        $o = self::occurrence($theme, $at, $cityId);
 
         return $o === null ? null : [$o['from'], $o['to']];
     }
 
-    /** Даты плавающего повода: [начало, конец или null], по порядку. */
-    public static function floating(string $slug): array
+    /**
+     * Даты плавающего повода для города: его собственные и общие для всех, [начало, конец или null], по порядку.
+     * В кэше даты всех городов разом: правка даты в админке сбрасывает его для всех.
+     */
+    public static function floating(string $slug, ?int $cityId = null): array
     {
-        return Cache::remember('occasion-dates:v1:'.$slug, 300, fn () => DB::table('occasion_dates')
+        $rows = Cache::remember('occasion-dates:v2:'.$slug, 300, fn () => DB::table('occasion_dates')
             ->where('slug', $slug)
             ->orderBy('starts_on')
-            ->get(['starts_on', 'ends_on'])
-            ->map(fn ($r) => [(string) $r->starts_on, $r->ends_on !== null ? (string) $r->ends_on : null])
+            ->get(['city_id', 'starts_on', 'ends_on'])
+            ->map(fn ($r) => [$r->city_id !== null ? (int) $r->city_id : null, (string) $r->starts_on, $r->ends_on !== null ? (string) $r->ends_on : null])
             ->all());
+
+        return array_values(array_map(
+            fn (array $r) => [$r[1], $r[2]],
+            array_filter($rows, fn (array $r) => $r[0] === null || $r[0] === $cityId),
+        ));
     }
 
     public static function forgetFloating(string $slug): void
     {
-        Cache::forget('occasion-dates:v1:'.$slug);
+        Cache::forget('occasion-dates:v2:'.$slug);
     }
 
     /** @return array{0: Carbon, 1: Carbon} */

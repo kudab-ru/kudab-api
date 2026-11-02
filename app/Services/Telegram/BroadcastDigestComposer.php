@@ -222,7 +222,7 @@ final class BroadcastDigestComposer
             'event_ids' => $this->postOrder,
             'total' => $best['total'],
             'venues' => $best['venues'],
-        ] + $this->windowMeta((array) $best['theme'], $publishAt);
+        ] + $this->windowMeta((array) $best['theme'], $publishAt, $cityId);
     }
 
     /**
@@ -351,7 +351,7 @@ final class BroadcastDigestComposer
             'event_ids' => $this->postOrder,
             'total' => $picked['total'],
             'venues' => $picked['venues'],
-        ] + $this->windowMeta((array) $theme, $publishAt);
+        ] + $this->windowMeta((array) $theme, $publishAt, $cityId);
     }
 
     /**
@@ -404,13 +404,13 @@ final class BroadcastDigestComposer
      * @param  array<string, mixed>  $theme
      * @return array{window?: array{from: string, to: string}}
      */
-    private function windowMeta(array $theme, Carbon $publishAt): array
+    private function windowMeta(array $theme, Carbon $publishAt, ?int $cityId = null): array
     {
         if ((int) ($theme['window_from_days'] ?? 0) <= 0 && ! isset($theme['occasion'])) {
             return [];
         }
 
-        [$since, $until] = $this->themeWindow($theme, $publishAt);
+        [$since, $until] = $this->themeWindow($theme, $publishAt, $cityId);
 
         return ['window' => ['from' => $since->toDateString(), 'to' => $until->toDateString()]];
     }
@@ -808,7 +808,7 @@ final class BroadcastDigestComposer
     {
         $theme = $this->themeOf($item);
 
-        return $theme === null ? null : $this->themeWindow($theme, $publishAt);
+        return $theme === null ? null : $this->themeWindow($theme, $publishAt, $item->broadcast?->chat?->city_id);
     }
 
     /** Почему автомат не ставит скрытое для канала событие (`Event::channelHiddenSql`). */
@@ -962,7 +962,7 @@ final class BroadcastDigestComposer
         // Окно у рубрики может быть своё — и по длине, и по виду. Бесплатное
         // объявляют поздно: замер 25.09.2026 — 35 событий в ближайшую неделю и
         // 4 в следующую, поэтому недельное окно для него почти пустое.
-        [$since, $until] = $this->themeWindow((array) $theme, $publishAt);
+        [$since, $until] = $this->themeWindow((array) $theme, $publishAt, $cityId);
         [$hiddenSql, $hiddenBindings] = Event::channelHiddenSql('e');
 
         // условия по одному, с именем правила: по ним `missReason` находит, какое не прошло событие
@@ -2082,7 +2082,7 @@ final class BroadcastDigestComposer
         // Срок в шапке — окно ЭТОЙ рубрики, а не общее, и считается тем же
         // методом, что окно отбора. Пока их было два, шапка «25 сентября –
         // 2 октября» обещала восемь дней там, где отбор смотрел пять.
-        [$since, $to] = $this->themeWindow((array) $theme, $publishAt);
+        [$since, $to] = $this->themeWindow((array) $theme, $publishAt, $broadcast->chat?->city_id);
         // У окна «N дней вперёд» своего низа нет — им служит сам момент выхода.
         $from = $since ?? $publishAt->copy()->setTimezone(self::TZ);
         $forms = (array) ($theme['forms'] ?? []);
@@ -2723,9 +2723,9 @@ final class BroadcastDigestComposer
      *
      * @param  array<string, mixed>  $theme
      */
-    public static function occasionDate(array $theme, Carbon $at): ?Carbon
+    public static function occasionDate(array $theme, Carbon $at, ?int $cityId = null): ?Carbon
     {
-        return OccasionCalendar::occurrence($theme, $at)['day'] ?? null;
+        return OccasionCalendar::occurrence($theme, $at, $cityId)['day'] ?? null;
     }
 
     /**
@@ -2737,7 +2737,7 @@ final class BroadcastDigestComposer
      * @param  array<string, mixed>  $theme
      * @return array{0: Carbon|null, 1: Carbon}
      */
-    private function themeWindow(array $theme, Carbon $publishAt): array
+    private function themeWindow(array $theme, Carbon $publishAt, ?int $cityId = null): array
     {
         $at = $publishAt->copy()->setTimezone(self::TZ);
 
@@ -2756,7 +2756,7 @@ final class BroadcastDigestComposer
 
         if (isset($theme['occasion'])) {
             // даты в списке кончились: окна нет, подборка не соберётся
-            return OccasionCalendar::window($theme, $at) ?? [$at->copy(), $at->copy()];
+            return OccasionCalendar::window($theme, $at, $cityId) ?? [$at->copy(), $at->copy()];
         }
 
         $skip = (int) ($theme['window_from_days'] ?? 0);

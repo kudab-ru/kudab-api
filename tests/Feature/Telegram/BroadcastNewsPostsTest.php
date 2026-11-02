@@ -133,21 +133,32 @@ class BroadcastNewsPostsTest extends TestCase
     }
 
     #[Test]
-    public function a_holiday_date_entered_in_the_admin_is_booked(): void
+    #[DataProvider('floatingHolidays')]
+    public function a_holiday_date_entered_in_the_admin_is_booked(string $slug, bool $perCity): void
     {
-        $this->onlyRubric('povod-noch-muzeev');
+        $this->onlyRubric($slug);
         $this->actingAsSuperadmin();
-        $this->channel();
+        $channel = $this->channel();
 
         app(BroadcastOccasions::class)->run(Carbon::now());
         $this->assertSame(0, $this->items()->count(), 'без вписанной даты поста нет');
 
-        $this->postJson('/api/admin/broadcast/occasions/povod-noch-muzeev/dates', ['starts_on' => '2026-10-22'])->assertOk();
+        $this->postJson('/api/admin/broadcast/occasions/'.$slug.'/dates', ['starts_on' => '2026-10-22', 'channel_id' => $channel->id])->assertOk();
         app(BroadcastOccasions::class)->run(Carbon::now());
 
         $booked = $this->items()->get();
         $this->assertCount(1, $booked);
         $this->assertSame('2026-10-18 12:00', Carbon::parse($booked[0]->publish_at)->setTimezone('Europe/Moscow')->format('Y-m-d H:i'));
+        $this->assertSame($perCity ? $this->cityId : null, DB::table('occasion_dates')->where('slug', $slug)->value('city_id'));
+    }
+
+    /** @return array<string, array{0: string, 1: bool}> */
+    public static function floatingHolidays(): array
+    {
+        return [
+            'общая дата' => ['povod-noch-muzeev', false],
+            'День города — для города канала' => ['povod-den-goroda', true],
+        ];
     }
 
     #[Test]

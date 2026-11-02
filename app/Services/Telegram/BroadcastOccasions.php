@@ -72,7 +72,7 @@ final class BroadcastOccasions
     /** Подборка к празднику: за `lead_days` в `hour`, а если опоздали — как можно скорее, но не позже чем за день. */
     private function bookMain(TelegramChatBroadcast $broadcast, array $theme, Carbon $now, bool $dryRun): bool
     {
-        $day = BroadcastDigestComposer::occasionDate($theme, $now);
+        $day = BroadcastDigestComposer::occasionDate($theme, $now, $broadcast->chat?->city_id);
         if ($day === null) {
             return false;
         }
@@ -143,7 +143,7 @@ final class BroadcastOccasions
         }
         $lead = trim((string) ($theme['reminder'] ?? ''));
         $msk = $now->copy()->setTimezone(self::TZ);
-        $day = BroadcastDigestComposer::occasionDate($theme, $now);
+        $day = BroadcastDigestComposer::occasionDate($theme, $now, $broadcast->chat?->city_id);
         if ($lead === '' || $day === null || ! $msk->isSameDay($day) || $msk->hour >= self::REMIND_UNTIL_HOUR) {
             return false;
         }

@@ -104,8 +104,8 @@ final class OccasionPage
         $now = $now->copy()->setTimezone(self::TZ);
         $this->city = $city;
         $cityIn = CityCase::prepositional($city->slug);
-        $day = BroadcastDigestComposer::occasionDate($theme, $now);
-        $window = OccasionCalendar::window(OccasionCalendar::forPage($theme), $now);
+        $day = BroadcastDigestComposer::occasionDate($theme, $now, (int) $city->id);
+        $window = OccasionCalendar::window(OccasionCalendar::forPage($theme), $now, (int) $city->id);
 
         ['rows' => $rows, 'days' => $days, 'picks' => $picks, 'kinds' => $kinds] = $this->assemble($theme, $city, $now, $window, $day, self::DAY_LIMIT);
 
@@ -154,7 +154,7 @@ final class OccasionPage
      */
     private function past(array $theme, City $city, Carbon $now): ?array
     {
-        $prev = OccasionCalendar::previous(OccasionCalendar::forPage($theme), $now);
+        $prev = OccasionCalendar::previous(OccasionCalendar::forPage($theme), $now, (int) $city->id);
         if ($prev === null) {
             return null;
         }
@@ -347,7 +347,7 @@ final class OccasionPage
      */
     public function includes(array $theme, City $city, int $eventId, Carbon $now): bool
     {
-        $window = OccasionCalendar::window(OccasionCalendar::forPage($theme), $now->copy()->setTimezone(self::TZ));
+        $window = OccasionCalendar::window(OccasionCalendar::forPage($theme), $now->copy()->setTimezone(self::TZ), (int) $city->id);
 
         return $window !== null && $this->eventsQuery($theme, $city, $window)->where('events.id', $eventId)->exists();
     }
@@ -983,7 +983,7 @@ final class OccasionPage
     private function next(array $theme, Carbon $now): array
     {
         return array_slice(array_values(array_filter(
-            $this->calendar($now),
+            $this->calendar($now, $this->city),
             fn ($o) => $o['page'] !== ($theme['page'] ?? null),
         )), 0, 4);
     }
@@ -993,7 +993,7 @@ final class OccasionPage
      *
      * @return list<array{page: string, title: string, emoji: string, date: string, badge: string, until: string, label: string, season: bool, phrase: string}>
      */
-    public function calendar(Carbon $now): array
+    public function calendar(Carbon $now, ?City $city = null): array
     {
         $now = $now->copy()->setTimezone(self::TZ);
         $out = [];
@@ -1001,8 +1001,8 @@ final class OccasionPage
             if (empty($t['page'])) {
                 continue;
             }
-            $day = BroadcastDigestComposer::occasionDate($t, $now);
-            $window = OccasionCalendar::window(OccasionCalendar::forPage($t), $now);
+            $day = BroadcastDigestComposer::occasionDate($t, $now, $city?->id);
+            $window = OccasionCalendar::window(OccasionCalendar::forPage($t), $now, $city?->id);
             if ($day === null || $window === null) {
                 continue;
             }

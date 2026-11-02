@@ -72,7 +72,7 @@ class BroadcastPin
         }
 
         $theme = collect(OccasionCalendar::themes())->first(fn ($t) => ($t['slug'] ?? null) === $slug);
-        $occurrence = $theme === null ? null : OccasionCalendar::occurrence($theme, $now);
+        $occurrence = $theme === null ? null : OccasionCalendar::occurrence($theme, $now, $item->broadcast?->chat?->city_id);
         if ($occurrence === null || $occurrence['from']->gt($now->copy()->addDays((int) config('broadcast_pin.occasion_days', 7)))) {
             return null;
         }

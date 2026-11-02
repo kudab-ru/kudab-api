@@ -199,7 +199,7 @@ final class SliceBuilder
      */
     private function holiday(City $city, Carbon $from, Carbon $to, Carbon $now): ?array
     {
-        foreach ($this->page->calendar($now) as $c) {
+        foreach ($this->page->calendar($now, $city) as $c) {
             if ($c['badge'] > $to->toDateString() || $c['until'] < $from->toDateString()) {
                 continue;
             }
