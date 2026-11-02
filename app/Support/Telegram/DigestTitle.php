@@ -13,6 +13,9 @@ final class DigestTitle
 {
     private const MONTHS = 'январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр';
 
+    /** После них дата — часть названия: «Концерт к 9 мая», «Выставка до 30 ноября». */
+    private const DATE_PREPOSITIONS = ['к', 'ко', 'до', 'на', 'с', 'со', 'по', 'от', 'в', 'во'];
+
     /** Короче — площадку внутри названия не ищем: «Арт» нашёлся бы в «Артель» и «Арт-рок». */
     private const MIN_VENUE = 4;
 
@@ -35,6 +38,13 @@ final class DigestTitle
         // хвост после тире со строчной буквы — пояснение, а не название
         $t = (string) preg_replace('/\s+[—–]\s+\p{Ll}.*$/u', '', $t);
         $t = (string) preg_replace('/\s+\d{1,2}\.\d{1,2}(\.\d{2,4})?$/u', '', $t);
+        // дата словами в конце после слова: «Boulevard Depo в Воронеже 6 ноября 2026»; город срежет `$cityIn` ниже,
+        // дату после «|» и «/» — разбор на части
+        $t = (string) preg_replace_callback(
+            '/(\S*[\p{L}\p{N}»"])\s+\d{1,2}\s+(?:'.self::MONTHS.')\p{L}*(?:\s+\d{4}(?:\s*г(?:ода|\.)?)?)?$/iu',
+            fn (array $m) => in_array(mb_strtolower($m[1]), self::DATE_PREPOSITIONS, true) ? $m[0] : $m[1],
+            $t,
+        );
 
         $parts = preg_split('/\s+(?:\/\/|\/|\||[—–-])\s+/u', $t) ?: [$t];
         $kept = array_values(array_filter($parts, fn (string $p) => ! self::isNoise($p, $venue, $city, $occasionWords)));
@@ -95,7 +105,7 @@ final class DigestTitle
             return true;
         }
         if (preg_match('/^\d{1,2}([.\/]\d{1,2}([.\/]\d{2,4})?)?$/u', $p) === 1
-            || preg_match('/^\d{1,2}\s+(?:'.self::MONTHS.')\p{L}*$/u', $p) === 1) {
+            || preg_match('/^\d{1,2}\s+(?:'.self::MONTHS.')\p{L}*(?:\s+\d{4}(?:\s*г(?:ода|\.)?)?)?$/u', $p) === 1) {
             return true;
         }
         $v = mb_strtolower(trim(str_replace(['«', '»', '"'], '', (string) $venue)));
