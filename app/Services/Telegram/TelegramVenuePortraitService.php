@@ -9,6 +9,7 @@ use App\Models\TelegramChatBroadcast;
 use App\Models\TelegramChatBroadcastItem;
 use App\Models\Venue;
 use App\Support\BroadcastSafety;
+use App\Support\Telegram\VenueAddress;
 use App\Support\Telegram\VenueName;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -380,8 +381,8 @@ class TelegramVenuePortraitService
     {
         $label = VenueName::label($venue->name);
         $name = $this->esc($label);
-        $addr = $this->shortAddress($venue);
-        $addrLink = $addr !== '' ? '📍 <a href="'.$this->mapsUrl($venue).'">'.$this->esc($addr).'</a>' : '';
+        $addr = VenueAddress::short($venue);
+        $addrLink = $addr !== '' ? '📍 <a href="'.VenueAddress::mapsUrl($venue).'">'.$this->esc($addr).'</a>' : '';
 
         if ($addrLink !== '' && (mb_strlen($label) + mb_strlen($addr)) <= self::HEADER_ONE_LINE_MAX) {
             $lines = ['🏛 <b>'.$name.'</b>  ·  '.$addrLink];
@@ -419,38 +420,6 @@ class TelegramVenuePortraitService
     private function esc(string $s): string
     {
         return htmlspecialchars($s, ENT_NOQUOTES, 'UTF-8');
-    }
-
-    /** Короткий адрес: улица+дом; иначе адрес без индекса/области/города, обрезанный. */
-    private function shortAddress(Venue $venue): string
-    {
-        $street = trim((string) ($venue->street ?? ''));
-        $house = trim((string) ($venue->house ?? ''));
-        if ($street !== '') {
-            return $house !== '' ? $street.', '.$house : $street;
-        }
-        $addr = trim((string) ($venue->address ?? ''));
-        if ($addr === '') {
-            return '';
-        }
-        $addr = (string) preg_replace('/^\s*\d{5,6}\s*,\s*/u', '', $addr);          // индекс
-        $addr = (string) preg_replace('/^[^,]*\bобл[^,]*,\s*/ui', '', $addr);        // область
-        $addr = (string) preg_replace('/^\s*г\.?\s+[^,]+,\s*/ui', '', $addr);        // город
-        $addr = trim($addr, ' ,');
-
-        return mb_strlen($addr) > 60 ? mb_substr($addr, 0, 57).'…' : $addr;
-    }
-
-    private function mapsUrl(Venue $venue): string
-    {
-        if ($venue->latitude !== null && $venue->longitude !== null) {
-            $ll = ((string) $venue->longitude).','.((string) $venue->latitude);
-
-            return 'https://yandex.ru/maps/?ll='.$ll.'&z=17&pt='.$ll;
-        }
-        $q = trim((string) ($venue->address ?: $venue->name));
-
-        return 'https://yandex.ru/maps/?text='.rawurlencode($q);
     }
 
     private function nextEvent(int $venueId, Carbon $now): ?Event

@@ -50,6 +50,16 @@ class EventReminderController extends Controller
         return response()->json(['data' => ['status' => $done ? 'cancelled' : 'missing']]);
     }
 
+    public function soon(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'telegram_id' => ['required', 'integer'],
+            'id' => ['required', 'integer'],
+        ]);
+
+        return response()->json(['data' => $this->reminders->addSoon((int) $data['telegram_id'], (int) $data['id'], Carbon::now())]);
+    }
+
     public function due(Request $request): JsonResponse
     {
         $limit = max(1, min(50, (int) $request->input('limit', 20)));

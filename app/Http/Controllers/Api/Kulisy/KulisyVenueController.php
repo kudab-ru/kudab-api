@@ -9,6 +9,7 @@ use App\Models\VenueManager;
 use App\Services\Analytics\AnalyticsUnavailable;
 use App\Services\Analytics\MetrikaClient;
 use App\Services\Kulisy\VenueClaims;
+use App\Support\TicketOffices;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -21,9 +22,6 @@ use Illuminate\Support\Facades\DB;
  */
 class KulisyVenueController extends Controller
 {
-    // кассы, где страница события и есть покупка билета; тот же список в ticketHref.ts сайта
-    private const TICKET_OFFICES = '^https?://([^/]*\\.)?(afisha\\.yandex\\.ru|bezantrakta\\.ru|kassir\\.ru|qtickets\\.events|live\\.mts\\.ru|quicktickets\\.ru)(/|$)';
-
     public function __construct(private readonly VenueClaims $claims) {}
 
     public function claim(Request $request, int $id): JsonResponse
@@ -128,7 +126,7 @@ class KulisyVenueController extends Controller
 
         return $views + [
             'upcoming' => (clone $upcoming)->count(),
-            'with_tickets' => (clone $upcoming)->where(fn ($q) => $q->where('price_url', '!=', '')->orWhere('external_url', '~*', self::TICKET_OFFICES))->count(),
+            'with_tickets' => (clone $upcoming)->where(fn ($q) => $q->where('price_url', '!=', '')->orWhere('external_url', '~*', TicketOffices::PATTERN))->count(),
         ];
     }
 

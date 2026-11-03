@@ -13,7 +13,7 @@ return new class extends Migration
             $table->unsignedBigInteger('telegram_id');
             $table->unsignedBigInteger('chat_id');
             $table->unsignedBigInteger('event_id');
-            // `eve` — накануне начала, `last` — накануне последнего дня идущей выставки
+            // `eve` — накануне начала, `last` — накануне последнего дня идущей выставки, `soon` — за три часа
             $table->string('kind', 8);
             $table->timestampTz('remind_at');
             // начало события, от которого считали `remind_at`: дату сдвинули — время считаем заново
@@ -24,7 +24,7 @@ return new class extends Migration
             $table->string('error', 255)->nullable();
             $table->timestampsTz();
 
-            $table->unique(['telegram_id', 'event_id']);
+            $table->unique(['telegram_id', 'event_id', 'kind']);
             $table->index('remind_at');
         });
     }

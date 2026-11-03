@@ -7,13 +7,16 @@ namespace App\Services\Telegram;
 use App\Models\Event;
 use App\Services\EventChanges;
 use App\Support\EventStart;
+use App\Support\TicketOffices;
+use App\Support\Telegram\VenueAddress;
 use App\Support\Telegram\VenueName;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
- * «Пойду» на сайте и напоминание в боте: накануне вечером, у идущей выставки — накануне последнего дня.
- * Когда напомнить и что написать, решает API; бот забирает созревшие (`due`) и отчитывается (`mark`).
+ * «Пойду» на сайте и напоминание в боте: накануне вечером, у идущей выставки — накануне последнего дня,
+ * по просьбе ещё и за три часа до начала. Когда напомнить и что написать, решает API;
+ * бот забирает созревшие (`due`) и отчитывается (`mark`).
  */
 final class EventReminders
 {
@@ -25,6 +28,9 @@ final class EventReminders
 
     /** Вечер накануне уже прошёл — напоминаем утром в день события. */
     private const MORNING = 10;
+
+    /** Второе напоминание, `soon`: за столько часов до начала. */
+    private const SOON_HOURS = 3;
 
     /** Бот забрал запись и не отчитался: через столько минут она снова уходит в выдачу. */
     private const LEASE_MINUTES = 10;
@@ -58,13 +64,19 @@ final class EventReminders
             return ['status' => $this->isOver($event, $now) ? 'past' : 'soon', 'event' => $card];
         }
 
-        $row = DB::table(self::TABLE)->where('telegram_id', $telegramId)->where('event_id', $eventId)->first();
+        $rows = DB::table(self::TABLE)->where('telegram_id', $telegramId)->where('event_id', $eventId)->get()->keyBy('kind');
+        $row = $rows->get('eve') ?? $rows->get('last');
+        $soonRow = $rows->get('soon');
+        $soonSet = $soonRow !== null && $soonRow->sent_at === null && $soonRow->cancelled_at === null;
+        $soonOffer = ! $soonSet && $this->soonAt($event, $now, $plan['at']) !== null;
+
         if ($row !== null && $row->sent_at === null && $row->cancelled_at === null) {
-            return ['status' => 'already', 'id' => (int) $row->id, 'kind' => $row->kind,
-                'remind_at' => $this->iso(Carbon::parse($row->remind_at)), 'event' => $card];
+            return ['status' => 'already', 'id' => (int) $row->id, 'kind' => $row->kind, 'at_eve' => $plan['eve'],
+                'remind_at' => $this->iso(Carbon::parse($row->remind_at)), 'soon_offer' => $soonOffer, 'soon_set' => $soonSet,
+                'event' => $card];
         }
 
-        $test = (int) config('services.bot.reminder_test_minutes', 0);
+        $test = $this->testMinutes();
         $fields = [
             'chat_id' => $chatId,
             'kind' => $plan['kind'],
@@ -82,17 +94,55 @@ final class EventReminders
             $id = (int) $row->id;
         }
 
-        return ['status' => 'scheduled', 'id' => $id, 'kind' => $plan['kind'],
-            'remind_at' => $this->iso($plan['at']), 'test_minutes' => $test > 0 ? $test : null, 'event' => $card];
+        return ['status' => 'scheduled', 'id' => $id, 'kind' => $plan['kind'], 'at_eve' => $plan['eve'],
+            'remind_at' => $this->iso($plan['at']), 'soon_offer' => $soonOffer, 'soon_set' => $soonSet,
+            'test_minutes' => $test > 0 ? $test : null, 'event' => $card];
     }
 
-    /** «Не напоминать» под ответом бота. false — такой записи у человека нет. */
+    /**
+     * «Ещё и за 3 часа до начала» под ответом бота: второе напоминание к тому же событию.
+     *
+     * @return array{status: string, remind_at?: string}
+     */
+    public function addSoon(int $telegramId, int $id, Carbon $now): array
+    {
+        $now = $now->copy()->utc();
+        $main = DB::table(self::TABLE)->where('id', $id)->where('telegram_id', $telegramId)->first();
+        $event = $main === null ? null : Event::query()->find($main->event_id);
+        if ($event === null) {
+            return ['status' => 'missing'];
+        }
+        $at = $this->soonAt($event, $now, null);
+        if ($at === null) {
+            return ['status' => 'late'];
+        }
+        $test = $this->testMinutes();
+        DB::table(self::TABLE)->updateOrInsert(
+            ['telegram_id' => $telegramId, 'event_id' => $event->id, 'kind' => 'soon'],
+            [
+                'chat_id' => $main->chat_id,
+                'remind_at' => $test > 0 ? $now->copy()->addMinutes(2 * $test) : $at,
+                'event_start' => EventStart::of($event)?->utc(),
+                'taken_at' => null, 'sent_at' => null, 'cancelled_at' => null, 'error' => null,
+                'created_at' => $now, 'updated_at' => $now,
+            ],
+        );
+
+        return ['status' => 'scheduled', 'remind_at' => $this->iso($at)];
+    }
+
+    /** «Не напоминать»: снимает все напоминания человека к этому событию. false — такой записи у него нет. */
     public function cancel(int $telegramId, int $id, Carbon $now): bool
     {
         $now = $now->copy()->utc();
+        $eventId = DB::table(self::TABLE)->where('id', $id)->where('telegram_id', $telegramId)->value('event_id');
+        if ($eventId === null) {
+            return false;
+        }
+        DB::table(self::TABLE)->where('telegram_id', $telegramId)->where('event_id', $eventId)->whereNull('sent_at')
+            ->update(['cancelled_at' => $now, 'updated_at' => $now]);
 
-        return DB::table(self::TABLE)->where('id', $id)->where('telegram_id', $telegramId)->whereNull('sent_at')
-            ->update(['cancelled_at' => $now, 'updated_at' => $now]) > 0;
+        return true;
     }
 
     /**
@@ -153,34 +203,44 @@ final class EventReminders
         }
         $base = ['id' => (int) $row->id, 'chat_id' => (int) $row->chat_id, 'event' => $this->card($event)];
 
-        if ($event->status === EventChanges::MOVED) {
-            return $base + ['kind' => 'moved', 'moved_to' => $this->movedTo($row, $now)];
-        }
         if (in_array($event->status, EventChanges::KINDS, true)) {
-            return $base + ['kind' => (string) $event->status];
+            // о переносе и отмене пишем одно сообщение, второе напоминание того же события молча закрываем
+            if ($row->kind === 'soon') {
+                $this->mark((int) $row->id, false, true, 'событие '.$event->status, $now);
+
+                return null;
+            }
+
+            return $event->status === EventChanges::MOVED
+                ? $base + ['kind' => 'moved', 'moved_to' => $this->movedTo($row, $now)]
+                : $base + ['kind' => (string) $event->status];
         }
 
         // дату сдвинули на том же событии: напоминаем к новой, а не к старой
         $start = EventStart::of($event);
         if ($row->event_start !== null && $start !== null && ! $start->equalTo(Carbon::parse($row->event_start))) {
-            $plan = $this->plan($event, $now);
+            $plan = $row->kind === 'soon' ? $this->soonAt($event, $now, null) : ($this->plan($event, $now)['at'] ?? null);
             if ($plan === null) {
                 $this->mark((int) $row->id, false, true, 'дату сдвинули, напоминать поздно', $now);
 
                 return null;
             }
             DB::table(self::TABLE)->where('id', $row->id)->update([
-                'kind' => $plan['kind'], 'remind_at' => $plan['at'], 'event_start' => $start->copy()->utc(), 'taken_at' => null, 'updated_at' => $now,
+                'remind_at' => $plan, 'event_start' => $start->copy()->utc(), 'taken_at' => null, 'updated_at' => $now,
             ]);
 
             return null;
         }
 
-        $day = $row->kind === 'last' && $event->end_time !== null
-            ? Carbon::parse($event->end_time)->setTimezone(self::TZ)
-            : ($start ?? $now)->copy()->setTimezone(self::TZ);
+        $msk = ($start ?? $now)->copy()->setTimezone(self::TZ);
+        $day = $row->kind === 'last' && $event->end_time !== null ? Carbon::parse($event->end_time)->setTimezone(self::TZ) : $msk;
 
-        return $base + ['kind' => (string) $row->kind, 'day' => $this->dayWord($day, $now)];
+        return $base + [
+            'kind' => (string) $row->kind,
+            'day' => $this->dayWord($day, $now),
+            'time' => $this->hasHour($event) && $row->kind !== 'last' ? $msk->format('H:i') : '',
+            'hours' => $row->kind === 'soon' ? max(1, (int) round($now->diffInMinutes($msk, false) / 60)) : null,
+        ];
     }
 
     /**
@@ -212,7 +272,7 @@ final class EventReminders
      * Когда напомнить: накануне в 18:00; вечер уже прошёл — утром в день события, а событие до полудня —
      * за два часа. Выставка уже идёт — так же к её последнему дню. null — напомнить уже не успеть.
      *
-     * @return array{kind: string, at: Carbon}|null
+     * @return array{kind: string, at: Carbon, eve: bool}|null время в UTC, как всё в таблице; `eve` — напомним накануне
      */
     private function plan(Event $event, Carbon $now): ?array
     {
@@ -232,20 +292,35 @@ final class EventReminders
         return null;
     }
 
-    /** @return array{kind: string, at: Carbon}|null время в UTC, как всё в таблице */
+    /** @return array{kind: string, at: Carbon, eve: bool}|null */
     private function before(Carbon $day, bool $hasHour, string $kind, Carbon $now): ?array
     {
         $soon = $now->copy()->addMinutes(10);
         $eve = $day->copy()->startOfDay()->subDay()->setTime(self::EVENING, 0);
         if ($eve->greaterThan($soon)) {
-            return ['kind' => $kind, 'at' => $eve->utc()];
+            return ['kind' => $kind, 'at' => $eve->utc(), 'eve' => true];
         }
         $at = $day->copy()->startOfDay()->setTime(self::MORNING, 0);
         if ($hasHour && $day->hour < 12) {
             $at = $day->copy()->subHours(2);
         }
 
-        return $at->greaterThan($soon) ? ['kind' => $kind, 'at' => $at->utc()] : null;
+        return $at->greaterThan($soon) ? ['kind' => $kind, 'at' => $at->utc(), 'eve' => false] : null;
+    }
+
+    /** Время второго напоминания за три часа; null — у события нет часа или оно уже ближе, чем `$after`. */
+    private function soonAt(Event $event, Carbon $now, ?Carbon $after): ?Carbon
+    {
+        $start = EventStart::of($event);
+        if ($start === null || ! $this->hasHour($event)) {
+            return null;
+        }
+        $at = $start->copy()->subHours(self::SOON_HOURS)->utc();
+        if (! $at->greaterThan($now->copy()->addMinutes(10)) || ($after !== null && ! $at->greaterThan($after))) {
+            return null;
+        }
+
+        return $at;
     }
 
     /** Событие с часом: у события без часа в базе полночь его дня. */
@@ -266,6 +341,11 @@ final class EventReminders
         return $edge->lessThan($now);
     }
 
+    private function testMinutes(): int
+    {
+        return (int) config('services.bot.reminder_test_minutes', 0);
+    }
+
     /** «завтра», «сегодня» или «7 ноября», если напоминание пришло в другой день (на стенде — через минуту). */
     private function dayWord(Carbon $day, Carbon $now): string
     {
@@ -278,7 +358,7 @@ final class EventReminders
         };
     }
 
-    /** @return array{id: int, title: string, when: string, venue: string, url: string, ticket_url: string} */
+    /** @return array<string, mixed> */
     private function card(Event $event): array
     {
         $start = EventStart::of($event)?->setTimezone(self::TZ);
@@ -290,14 +370,22 @@ final class EventReminders
             }
         }
         $base = rtrim((string) (config('app.url') ?: 'https://kudab.ru'), '/');
+        $venue = $event->venue;
+        // «МТС Live Холл Воронеж (ex. Event Hall)»: прежнее имя в скобках в короткой строке напоминания лишнее
+        $name = trim((string) preg_replace('/\s*\([^)]*\)\s*$/u', '', VenueName::label($venue?->name)));
+        // картинку превью сайт кладёт в кэш на месяц: метка меняется вместе с тем, что на ней нарисовано
+        $stamp = substr(md5(implode('|', [$event->title, $event->start_time, $event->start_date, $event->venue_id, $event->price_min])), 0, 8);
 
         return [
             'id' => (int) $event->id,
             'title' => (string) $event->title,
             'when' => $when,
-            'venue' => VenueName::label($event->venue?->name),
+            'venue' => $name,
+            'address' => $venue !== null ? VenueAddress::short($venue) : '',
+            'route_url' => $venue !== null ? VenueAddress::routeUrl($venue) : '',
+            'photo_url' => $base.'/og/event/'.$event->id.'/preview.jpg?c='.$stamp,
             'url' => $base.'/events/'.$event->id.'?utm_source=tg&utm_medium=reminder',
-            'ticket_url' => (string) ($event->price_url ?? ''),
+            'ticket_url' => TicketOffices::url($event->price_url, $event->external_url),
         ];
     }
 

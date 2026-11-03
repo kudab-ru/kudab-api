@@ -357,6 +357,7 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     // «Пойду» на сайте → напоминание в боте накануне
     Route::post('/reminders', [\App\Http\Controllers\Bot\EventReminderController::class, 'store']);
     Route::post('/reminders/cancel', [\App\Http\Controllers\Bot\EventReminderController::class, 'cancel']);
+    Route::post('/reminders/soon', [\App\Http\Controllers\Bot\EventReminderController::class, 'soon']);
     Route::post('/reminders/due', [\App\Http\Controllers\Bot\EventReminderController::class, 'due']);
     Route::post('/reminders/mark', [\App\Http\Controllers\Bot\EventReminderController::class, 'mark']);
 

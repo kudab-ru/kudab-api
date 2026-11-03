@@ -79,6 +79,20 @@ class BotEventRemindersTest extends TestCase
     }
 
     #[Test]
+    public function the_extra_reminder_comes_three_hours_before_and_one_tap_cancels_both(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-11-03 12:00', 'Europe/Moscow'));
+        $id = $this->remind($this->event('2026-11-07 20:00'))->json('data.id');
+
+        $soon = $this->bot('/api/bot/reminders/soon', ['telegram_id' => 555, 'id' => $id])->json('data');
+        $this->assertSame('2026-11-07 17:00', Carbon::parse($soon['remind_at'])->setTimezone('Europe/Moscow')->format('Y-m-d H:i'));
+
+        $this->bot('/api/bot/reminders/cancel', ['telegram_id' => 555, 'id' => $id]);
+        Carbon::setTestNow(Carbon::parse('2026-11-07 17:30', 'Europe/Moscow'));
+        $this->assertSame([], $this->bot('/api/bot/reminders/due')->json('data'));
+    }
+
+    #[Test]
     public function a_moved_event_is_reminded_on_its_new_date(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-11-03 12:00', 'Europe/Moscow'));
