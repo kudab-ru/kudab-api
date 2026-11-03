@@ -354,6 +354,12 @@ Route::prefix('bot')->middleware('bot.auth')->group(function () {
     Route::get('/role/by-telegram/{telegram_id}', [RoleController::class, 'byTelegram']);
     Route::post('/kulisy/confirm', [\App\Http\Controllers\Bot\KulisyBotController::class, 'confirm'])->middleware('kulisy');
 
+    // «Пойду» на сайте → напоминание в боте накануне
+    Route::post('/reminders', [\App\Http\Controllers\Bot\EventReminderController::class, 'store']);
+    Route::post('/reminders/cancel', [\App\Http\Controllers\Bot\EventReminderController::class, 'cancel']);
+    Route::post('/reminders/due', [\App\Http\Controllers\Bot\EventReminderController::class, 'due']);
+    Route::post('/reminders/mark', [\App\Http\Controllers\Bot\EventReminderController::class, 'mark']);
+
     Route::get('/cities', [CityController::class, 'index']); // список/поиск/near
     Route::get('/cities/{city}', [CityController::class, 'show']);
 

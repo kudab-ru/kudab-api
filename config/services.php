@@ -49,6 +49,9 @@ return [
         // BotRoleService само-провижит его в БД, если записи нет (bootstrap из env).
         'superadmin_telegram_id' => (int) env('BOT_SUPERADMIN_TELEGRAM_ID', 0),
 
+        // Только для стенда: напоминание «Пойду» приходит через столько минут, а не накануне вечером. 0 — как на проде.
+        'reminder_test_minutes' => (int) env('REMINDER_TEST_MINUTES', 0),
+
         // P0.5 approve-in-DM: ревью-гейт автопостинга. Default OFF — автонаполнение
         // кладёт pending (как сейчас); ON — pending_review + превью владельцу в ЛС +
         // авто-пост по таймауту. Включать на проде после деплоя бота с веткой по type.
