@@ -40,13 +40,18 @@ final class VenueAddress
         return 'https://yandex.ru/maps/?text='.rawurlencode($q);
     }
 
-    /** Маршрут до площадки от того места, где человек сейчас; без координат — сама площадка на карте. */
+    /**
+     * Маршрут до площадки от того места, где человек сейчас, всеми способами сразу; без координат — площадка на карте.
+     * Без `ll` и `z` карта открывается на центре города, и площадка за городом уходит за край.
+     */
     public static function routeUrl(object $venue): string
     {
         if ($venue->latitude === null || $venue->longitude === null) {
             return self::mapsUrl($venue);
         }
+        $lat = (string) $venue->latitude;
+        $lon = (string) $venue->longitude;
 
-        return 'https://yandex.ru/maps/?rtext=~'.$venue->latitude.','.$venue->longitude.'&rtt=auto';
+        return 'https://yandex.ru/maps/?rtext=~'.$lat.','.$lon.'&rtt=comparison&ll='.$lon.','.$lat.'&z=15';
     }
 }
