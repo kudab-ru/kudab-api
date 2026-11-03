@@ -989,6 +989,25 @@ final class OccasionPage
     }
 
     /**
+     * Праздники со своей страницей, которых нет в календаре: дату плавающего ещё не вписали в админке.
+     *
+     * @param  list<array{page: string}>  $calendar  ответ calendar
+     * @return list<array{page: string, title: string, emoji: string}>
+     */
+    public static function undated(array $calendar): array
+    {
+        $dated = array_column($calendar, 'page');
+        $out = [];
+        foreach (OccasionCalendar::themes() as $t) {
+            if (! empty($t['page']) && ! in_array($t['page'], $dated, true)) {
+                $out[] = ['page' => (string) $t['page'], 'title' => (string) $t['title'], 'emoji' => (string) ($t['emoji'] ?? '')];
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * Ближайшие поводы с датами по порядку — для «дальше в календаре» и списка страниц.
      *
      * @return list<array{page: string, title: string, emoji: string, date: string, badge: string, until: string, label: string, season: bool, phrase: string}>

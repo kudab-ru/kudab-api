@@ -107,6 +107,12 @@ Schedule::command('analytics:warm --requested-only')
     ->onOneServer()
     ->withoutOverlapping(10);
 
+// Число событий на карточках праздников берётся из собранных страниц: кэш живёт 10 минут, сборка раз в пять.
+Schedule::command('occasions:warm')
+    ->everyFiveMinutes()
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
 // «Что сейчас в афише» в админке; кнопка «Обновить» пересчитывает сразу.
 Schedule::command('afisha:now')
     ->everyThirtyMinutes()

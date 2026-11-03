@@ -23,6 +23,9 @@ final class OccasionPromo
     /** За сколько дней до праздника сайт начинает звать на его страницу. */
     private const SOON_DAYS = 14;
 
+    /** У праздников дальше двух месяцев событий почти нет, а сборка страницы дорогая: число событий не пишем. */
+    private const COUNT_DAYS = 60;
+
     public function __construct(private readonly OccasionPage $page) {}
 
     /** @param  array<string, mixed>  $theme */
@@ -49,6 +52,63 @@ final class OccasionPromo
     private static function pageKey(array $theme, City $city): string
     {
         return 'occasion-page:v3:'.$city->slug.':'.$theme['page'];
+    }
+
+    /**
+     * Сколько событий у праздника уже собрано и до трёх их видов, как в строке под лентой следующего праздника.
+     *
+     * @param  array<string, mixed>  $theme
+     * @return array{total: int, kinds: list<string>}
+     */
+    public function counts(array $theme, City $city): array
+    {
+        $data = $this->pageData($theme, $city);
+
+        return [
+            'total' => (int) $data['occasion']['total'],
+            'kinds' => array_slice(array_column(array_filter($data['kinds'], fn ($k) => $k['key'] !== 'for-kids'), 'label'), 0, 3),
+        ];
+    }
+
+    /**
+     * Календарь для карточек праздников на сайте: у ближайших двух месяцев число событий и их виды.
+     *
+     * @param  list<array<string, mixed>>  $calendar  ответ OccasionPage::calendar
+     * @return list<array<string, mixed>>
+     */
+    public function withCounts(array $calendar, City $city, Carbon $now): array
+    {
+        foreach ($calendar as $i => $o) {
+            $theme = OccasionCalendar::byPage($o['page']);
+            if ($theme !== null && $this->counted($o, $now)) {
+                $calendar[$i] += $this->counts($theme, $city);
+            }
+        }
+
+        return $calendar;
+    }
+
+    /** Заново собирает страницы праздников из withCounts, чтобы главная не ждала сборки. Возвращает, сколько собрано. */
+    public function warm(City $city, Carbon $now): int
+    {
+        $built = 0;
+        foreach ($this->page->calendar($now, $city) as $o) {
+            $theme = OccasionCalendar::byPage($o['page']);
+            if ($theme !== null && $this->counted($o, $now)) {
+                Cache::put(self::pageKey($theme, $city), $this->page->build($theme, $city, Carbon::now()), self::CACHE_SECONDS);
+                $built++;
+            }
+        }
+
+        return $built;
+    }
+
+    /** @param  array<string, mixed>  $o  строка календаря */
+    private function counted(array $o, Carbon $now): bool
+    {
+        $edge = $now->copy()->setTimezone(self::TZ)->startOfDay()->addDays(self::COUNT_DAYS);
+
+        return Carbon::parse($o['badge'], self::TZ)->lte($edge);
     }
 
     /** Ближайший праздник для ленты на главной; null — он дальше двух недель или событий у него нет. */

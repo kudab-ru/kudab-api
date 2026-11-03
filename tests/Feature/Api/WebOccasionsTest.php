@@ -252,6 +252,18 @@ class WebOccasionsTest extends TestCase
     }
 
     #[Test]
+    public function the_calendar_counts_events_of_near_holidays_and_lists_holidays_without_a_date(): void
+    {
+        $this->event('Хэллоуинская вечеринка', '2026-10-31 18:00');
+
+        $out = $this->getJson('/api/web/occasions?city=voronezh')->assertOk()->json();
+
+        $this->assertSame(1, array_column($out['data'], 'total', 'page')['halloween']);
+        $this->assertContains('biblionoch', array_column($out['undated'], 'page'));
+        $this->assertNotContains('halloween', array_column($out['undated'], 'page'));
+    }
+
+    #[Test]
     public function an_event_page_names_the_holiday_whose_program_it_is_in(): void
     {
         $party = $this->event('Хэллоуинская вечеринка', '2026-10-31 18:00');

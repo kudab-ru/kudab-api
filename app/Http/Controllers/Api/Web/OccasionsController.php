@@ -23,16 +23,23 @@ final class OccasionsController extends Controller
         private readonly CityWeather $weather,
     ) {}
 
-    /** Календарь праздников, ближайший для ленты на главной и, если передан `q`, праздник из запроса поиска. */
+    /**
+     * Календарь праздников, ближайший для ленты на главной и, если передан `q`, праздник из запроса поиска.
+     * Без `q` у ближайших ещё число событий и `undated` — праздники, у которых даты пока нет.
+     */
     public function index(Request $request): JsonResponse
     {
         $city = $this->city($request);
         $now = Carbon::now('Europe/Moscow');
 
-        $out = ['data' => $this->page->calendar($now, $city), 'soon' => $this->promo->soon($city, $now)];
+        $calendar = $this->page->calendar($now, $city);
+        $out = ['data' => $calendar, 'soon' => $this->promo->soon($city, $now)];
         $q = trim((string) $request->query('q', ''));
         if ($q !== '') {
             $out['match'] = $this->promo->match(mb_substr($q, 0, 100), $city, $now);
+        } else {
+            $out['data'] = $this->promo->withCounts($calendar, $city, $now);
+            $out['undated'] = OccasionPage::undated($calendar);
         }
 
         return response()->json($out);
@@ -58,11 +65,7 @@ final class OccasionsController extends Controller
         // лента следующего праздника внизу страницы говорит, есть ли у него уже события
         $next = isset($data['next'][0]) ? OccasionCalendar::byPage($data['next'][0]['page']) : null;
         if ($next !== null) {
-            $n = $this->promo->pageData((array) $next, $city);
-            $data['next'][0] += [
-                'total' => $n['occasion']['total'],
-                'kinds' => array_slice(array_column(array_filter($n['kinds'], fn ($k) => $k['key'] !== 'for-kids'), 'label'), 0, 3),
-            ];
+            $data['next'][0] += $this->promo->counts((array) $next, $city);
         }
 
         // прогноз на дни праздника, как у «Выходных»: сайт ставит его у заголовка дня программы
