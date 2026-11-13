@@ -19,8 +19,10 @@ use Illuminate\Support\Facades\DB;
  *   GET /api/web/interests?parent_slug= — отфильтровать только children
  *   GET /api/web/interests?q=           — ILIKE по name
  *
- * Кэш Cache::remember 10 мин по (city, parent_slug, q). Инвалидация при
- * interests:sync (см. SyncInterestsFromCsv).
+ * Кэш по (city, parent_slug, q): 10 минут свежий, потом до часа отдаём старый, а новый
+ * считаем уже после ответа. Подсчёт тяжёлый: если считать его в запросе, при нехватке
+ * процессора все обработчики API встают на пересчёт и сайт отдаёт 504.
+ * Сброс при interests:sync (см. SyncInterestsFromCsv).
  *
  * events_count = сколько ПРЕДСТОЯЩИХ событий темы человек увидит, кликнув по ней.
  * Считается тем же скоупом видимости, что и лента (Event::visibleWeb), — раньше
@@ -38,7 +40,7 @@ class InterestsController extends Controller
         $parentSlug = trim((string) $request->input('parent_slug', '')) ?: null;
         $q          = trim((string) $request->input('q', '')) ?: null;
 
-        $items = Cache::remember(self::cacheKey($cityId, $parentSlug, $q), 600, function () use ($cityId, $parentSlug, $q) {
+        $items = Cache::flexible(self::cacheKey($cityId, $parentSlug, $q), [600, 3600], function () use ($cityId, $parentSlug, $q) {
             return $this->fetch($cityId, $parentSlug, $q);
         });
 
