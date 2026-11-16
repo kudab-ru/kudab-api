@@ -106,4 +106,12 @@ return [
         'host_id' => env('YANDEX_WEBMASTER_HOST_ID', 'https:kudab.ru:443'),
         'token' => env('YANDEX_OAUTH_TOKEN'),
     ],
+
+    // Ключ не секрет: поисковик сверяет его с файлом kudab.ru/<ключ>.txt, тот лежит в public сайта.
+    // Меняешь ключ — переименуй и файл.
+    'indexnow' => [
+        'key' => env('INDEXNOW_KEY', 'cf75a34b5f669d65efd37da85711541b'),
+        'site' => env('INDEXNOW_SITE', 'https://kudab.ru'),
+        'endpoints' => ['https://yandex.com/indexnow', 'https://www.bing.com/indexnow'],
+    ],
 ];

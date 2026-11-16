@@ -125,6 +125,18 @@ Schedule::command('events:access:refresh')
     ->onOneServer()
     ->withoutOverlapping(30);
 
+// Новые события — Яндексу и Bing каждый час; утром ещё и разделы. Ручной переобход Вебмастера даёт 10 адресов в день.
+Schedule::command('seo:indexnow')
+    ->hourlyAt(40)
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
+Schedule::command('seo:indexnow --pages')
+    ->dailyAt('07:10')
+    ->timezone('Europe/Moscow')
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
 // Сеансы выставок в выходной день музея. Ночью идёт раньше разбора серий в парсере (04:14),
 // иначе «ежедневно» на сайте посчиталось бы по закрытым дням.
 Schedule::command('events:hide-closed-days')
