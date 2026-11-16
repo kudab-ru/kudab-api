@@ -26,7 +26,7 @@ final class RinksController extends Controller
         $city = City::query()->where('slug', $slug)->where('status', 'active')->first();
         abort_if($city === null, 404);
 
-        $data = Cache::remember(self::cacheKey($city->slug), self::CACHE_SECONDS,
+        $data = Cache::flexible(self::cacheKey($city->slug), [self::CACHE_SECONDS, 3600],
             fn () => $this->page->build($city, CarbonImmutable::now('Europe/Moscow')));
 
         return response()->json(['data' => $data]);

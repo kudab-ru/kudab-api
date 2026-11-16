@@ -25,6 +25,9 @@ final class WeekendPage
 
     private const CACHE_SECONDS = 300;
 
+    // час отдаём прежнюю копию, пока новая считается после ответа: пересчёт подборки занимает секунды
+    private const STALE_SECONDS = 3600;
+
     private const REL = ['эти выходные', 'следующие выходные', 'через две недели', 'через три недели'];
 
     public function __construct(
@@ -105,9 +108,9 @@ final class WeekendPage
     {
         $sat = $from->isSunday() ? $from->copy()->subDay() : $from->copy();
 
-        return Cache::remember(
+        return Cache::flexible(
             'weekend-page:v5:'.$city->slug.':'.$from->toDateString().':'.$to->toDateString(),
-            self::CACHE_SECONDS,
+            [self::CACHE_SECONDS, self::STALE_SECONDS],
             fn () => ['w' => $sat->toDateString()]
                 + $this->slices->build($this->theme(), $city, $from, $to, $sat, Carbon::now(self::TZ), false),
         );

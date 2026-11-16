@@ -19,6 +19,9 @@ final class FreePage
 
     private const CACHE_SECONDS = 300;
 
+    // см. WeekendPage::STALE_SECONDS
+    private const STALE_SECONDS = 3600;
+
     private const REL = ['эта неделя', 'следующая неделя', 'через две недели'];
 
     /** монеты копилки: до скольких рублей за вход; 0 — только бесплатное */
@@ -69,9 +72,9 @@ final class FreePage
     /** @return array<string, mixed> */
     private function week(City $city, Carbon $from): array
     {
-        return Cache::remember(
+        return Cache::flexible(
             'free-page:v1:'.$city->slug.':'.$from->toDateString(),
-            self::CACHE_SECONDS,
+            [self::CACHE_SECONDS, self::STALE_SECONDS],
             fn () => ['w' => $from->toDateString()] + $this->once($this->slices->build(
                 ['page' => 'besplatno', 'slug' => 'besplatno', 'title' => 'Бесплатно', 'free' => true],
                 $city, $from, $from->copy()->addDays(6)->endOfDay(), null, Carbon::now(self::TZ), true,
@@ -87,9 +90,9 @@ final class FreePage
      */
     private function cheap(City $city, Carbon $from): array
     {
-        return Cache::remember(
+        return Cache::flexible(
             'free-page:cheap:v1:'.$city->slug.':'.$from->toDateString(),
-            self::CACHE_SECONDS,
+            [self::CACHE_SECONDS, self::STALE_SECONDS],
             function () use ($city, $from) {
                 $w = $this->once($this->slices->build(
                     ['page' => 'besplatno', 'slug' => 'besplatno', 'title' => 'Бесплатно', 'budget' => max(self::STEPS)],

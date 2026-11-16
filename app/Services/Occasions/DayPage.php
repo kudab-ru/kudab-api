@@ -22,6 +22,9 @@ final class DayPage
 
     private const CACHE_SECONDS = 300;
 
+    // см. WeekendPage::STALE_SECONDS
+    private const STALE_SECONDS = 3600;
+
     private const REL = ['сегодня', 'завтра'];
 
     public function __construct(
@@ -79,9 +82,9 @@ final class DayPage
     /** @return array<string, mixed> */
     private function day(City $city, Carbon $day, bool $today): array
     {
-        return Cache::remember(
+        return Cache::flexible(
             'day-page:v3:'.$city->slug.':'.$day->toDateString().':'.(int) $today,
-            self::CACHE_SECONDS,
+            [self::CACHE_SECONDS, self::STALE_SECONDS],
             fn () => ['w' => $day->toDateString(), 'weekday' => $day->copy()->locale('ru')->dayName]
                 + $this->slices->build($this->theme(), $city, $day->copy()->startOfDay(), $day->copy()->endOfDay(), $day, Carbon::now(self::TZ), $today),
         );
