@@ -39,6 +39,9 @@ final class GrowthReport
 
     private const ORGANIC = "ym:s:lastsignTrafficSource=='organic'";
 
+    // ChatGPT дописывает эту метку к своим ссылкам, а Метрика без неё считает такие заходы прямыми.
+    private const CHATGPT = "ym:s:UTMSource=='chatgpt.com'";
+
     /**
      * В счётчике 26 целей, но живых из них четыре — остальные дубли и
      * заброшенные. Список держим здесь, а не в настройках: это не конфигурация,
@@ -99,6 +102,7 @@ final class GrowthReport
         $engines = $this->guard('sources', fn () => $this->engineTotals($from, $to), null);
         $allVisits = $this->guard('sources', fn () => $this->totalVisits($from, $to), null);
         $headless = $this->guard('sources', fn () => $this->headless($from, $to), null);
+        $chatgpt = $this->guard('sources', fn () => $this->chatgpt($from, $to), null);
         $index = $this->guard('index', fn () => $this->index(), null);
         $queries = $this->guard('blind', fn () => $this->webmaster->searchQueriesSummary($from, $to), null);
         $goals = $this->guard('goals', fn () => $this->goals($from, $to), null);
@@ -112,7 +116,7 @@ final class GrowthReport
                 'verdict' => $this->verdict($weeks),
                 'search' => $this->search($weeks, $totals),
                 'chain' => $this->chain($cards, $index, $paths),
-                'sources' => $this->sourcesSection($allVisits, $engines, $weekly, $headless),
+                'sources' => $this->sourcesSection($allVisits, $engines, $weekly, $headless, $chatgpt),
                 'landing' => $paths === null ? null : $this->landing($paths),
                 'card_sources' => $this->guard('card_sources', fn () => $this->cardSources($paths), null),
                 'goals' => $goals,
@@ -292,6 +296,36 @@ final class GrowthReport
         }
 
         return $out;
+    }
+
+    private function chatgpt(string $from, string $to): array
+    {
+        $total = $this->metrika->visits([
+            'metrics' => 'ym:s:visits',
+            'filters' => self::CHATGPT,
+            'date1' => $from,
+            'date2' => $to,
+        ]);
+
+        // Недели те же, что у поисковиков в `weeklyOrganic`: двенадцать закрытых, текущая отброшена.
+        $monday = CarbonImmutable::now()->startOfWeek();
+        $res = $this->metrika->byTime([
+            'metrics' => 'ym:s:visits',
+            'filters' => self::CHATGPT,
+            'date1' => $monday->subWeeks(self::WEEKS)->toDateString(),
+            'date2' => 'today',
+            'group' => 'week',
+        ]);
+
+        $values = (array) ($res['totals'][0] ?? []);
+        $weeks = [];
+        foreach ((array) ($res['time_intervals'] ?? []) as $i => $pair) {
+            if ((string) ($pair[1] ?? '') < $monday->toDateString()) {
+                $weeks[] = (int) round((float) ($values[$i] ?? 0));
+            }
+        }
+
+        return ['visits' => (int) round((float) ($total['totals'][0] ?? 0)), 'weeks' => $weeks];
     }
 
     private function totalVisits(string $from, string $to): int
@@ -597,7 +631,7 @@ final class GrowthReport
         ];
     }
 
-    private function sourcesSection(?int $total, ?array $engines, ?array $weekly, ?array $headless): ?array
+    private function sourcesSection(?int $total, ?array $engines, ?array $weekly, ?array $headless, ?array $chatgpt): ?array
     {
         if ($total === null && $engines === null) {
             return null;
@@ -615,6 +649,11 @@ final class GrowthReport
                 'visits' => $visits,
                 'weeks' => $weekly['by_engine'][$key] ?? null,
             ];
+        }
+
+        if ($chatgpt !== null) {
+            $named += $chatgpt['visits'];
+            $rows[] = ['key' => 'chatgpt', 'label' => 'ChatGPT', 'visits' => $chatgpt['visits'], 'weeks' => $chatgpt['weeks']];
         }
 
         usort($rows, static fn ($a, $b) => $b['visits'] <=> $a['visits']);
