@@ -399,6 +399,7 @@ final class OccasionPage
                 isset($theme['budget']) => fn ($q) => $q->whereBetween('events.price_min', [1, (int) $theme['budget']]),
                 default => null,
             },
+            'kids' => ! empty($theme['kids']) ? fn ($q) => $q->webKids() : null,
         ]);
     }
 
@@ -554,7 +555,8 @@ final class OccasionPage
         $skip = array_flip(array_map('intval', (array) ($theme['skip'] ?? [])));
         $ids = match (true) {
             $item !== null => DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->orderBy('position')->pluck('event_id')->map(fn ($v) => (int) $v)->all(),
-            ! empty($theme['site_pick']) => $this->sitePick($events->reject(fn (Event $e) => isset($skip[(int) $e->id])), $limit, $now),
+            ! empty($theme['site_pick']) => $this->sitePick($events->reject(fn (Event $e) => isset($skip[(int) $e->id])
+                || (! empty($theme['kids']) && ! $this->forKids($e, $this->kindOf($e)))), $limit, $now),
             default => $this->autoPick($theme, $city, $day, $events, $now),
         };
         $ids = array_values(array_filter($ids, fn (int $id) => ! isset($skip[$id])));
@@ -685,6 +687,13 @@ final class OccasionPage
         return $ids;
     }
 
+    /** Явно детское: строже правила `kids`, которое пускает и взрослое с меткой 6+, см. Event::scopeWebKids. */
+    private function forKids(Event $e, string $kind): bool
+    {
+        return $kind === 'kids' || ($e->audience ?? null) === 'kids'
+            || preg_match('/(?<![\p{L}])(для детей|детск)/iu', (string) $e->title) === 1;
+    }
+
     /** @return array<string, mixed> */
     private function dto(Event $e, Carbon $now): array
     {
@@ -717,8 +726,7 @@ final class OccasionPage
             'images' => $this->slides($e),
             'interests' => $e->interests->pluck('slug')->values()->all(),
             'kind' => ['key' => $kind, 'label' => self::KIND_LABELS[$kind][0]],
-            'kids' => $kind === 'kids' || ($e->audience ?? null) === 'kids'
-                || preg_match('/(?<![\p{L}])(для детей|детск)/iu', (string) $e->title) === 1,
+            'kids' => $this->forKids($e, $kind),
             'is_past' => $this->isPast($e, $now),
             'score' => $this->scorer->interest($e),
         ];
@@ -936,7 +944,8 @@ final class OccasionPage
 
         // у праздника вопросы «да или нет», у подборки свои — «Куда сходить с ребёнком?», и «Да» там лишнее
         $yes = isset($theme['kids_question']) ? '' : 'Да, ';
-        $kids = array_values(array_filter($live, fn ($r) => $r['kids']));
+        // на детской странице детское всё, вопрос «можно ли с детьми» там лишний
+        $kids = empty($theme['kids']) ? array_values(array_filter($live, fn ($r) => $r['kids'])) : [];
         if ($kids !== [] && count($kids) * 2 > count($live)) {
             $out[] = ['q' => $theme['kids_question'] ?? 'Можно ли с детьми?', 'links' => [], 'a' => count($kids) === count($live)
                 ? $this->capital($yes.'все события для детей.')

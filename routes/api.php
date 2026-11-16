@@ -324,6 +324,7 @@ Route::prefix('web')->middleware(['throttle:web'])->group(function () {
     Route::get('days', [\App\Http\Controllers\Api\Web\DaysController::class, 'show']);
     Route::get('home', [\App\Http\Controllers\Api\Web\HomeController::class, 'show']);
     Route::get('free', [\App\Http\Controllers\Api\Web\FreeController::class, 'show']);
+    Route::get('kids', [\App\Http\Controllers\Api\Web\KidsController::class, 'show']);
     Route::get('rinks', [\App\Http\Controllers\Api\Web\RinksController::class, 'show']);
 
     // Venues (PR4): /map ДО /{id} по той же причине, что у events/map выше.

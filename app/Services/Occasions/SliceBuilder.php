@@ -11,7 +11,7 @@ use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Страница подборки на несколько дней подряд («На выходных», «Сегодня», «Бесплатно»): программа по дням,
+ * Страница подборки на несколько дней подряд («На выходных», «Сегодня», «Бесплатно», «С детьми»): программа по дням,
  * отдельно то, что идёт без часа все эти дни, главное и праздник на эти дни. Строки собираются так же, как
  * у праздника (OccasionPage::assemble); событие на странице стоит один раз, см. withoutPicks.
  */
@@ -45,7 +45,7 @@ final class SliceBuilder
     public function build(array $theme, City $city, Carbon $from, Carbon $to, ?Carbon $anchor, Carbon $now, bool $dropPast): array
     {
         // события праздника не занимают места в «Главном»: туда встаёт карточка праздника, она к ним и ведёт
-        $holiday = $anchor === null ? null : $this->holiday($city, $from, $to, $now);
+        $holiday = $anchor === null ? null : $this->holiday($city, $from, $to, $now, $theme['holidays'] ?? null);
         $part = $this->page->assemble($theme + ['skip' => $holiday['ids'] ?? []], $city, $now, [$from, $to], $anchor, self::DAY_LIMIT);
         $live = fn (array $r) => ! $dropPast || ! $r['is_past'];
         $rows = array_values(array_filter(array_map(fn (array $r) => ['times' => $this->clock($r['times'])] + $r, $part['rows']), $live));
@@ -193,14 +193,17 @@ final class SliceBuilder
     }
 
     /**
-     * Праздник, который выпадает на эти дни и у которого в эти дни есть события.
+     * Праздник, который выпадает на эти дни и у которого в эти дни есть события. `only` — страницы праздников,
+     * которые подходят подборке; null — любой.
      *
+     * @param  list<string>|null  $only
      * @return array{page: string, title: string, count: int, ids: list<int>}|null
      */
-    private function holiday(City $city, Carbon $from, Carbon $to, Carbon $now): ?array
+    private function holiday(City $city, Carbon $from, Carbon $to, Carbon $now, ?array $only): ?array
     {
         foreach ($this->page->calendar($now, $city) as $c) {
-            if ($c['badge'] > $to->toDateString() || $c['until'] < $from->toDateString()) {
+            if ($c['badge'] > $to->toDateString() || $c['until'] < $from->toDateString()
+                || ($only !== null && ! in_array($c['page'], $only, true))) {
                 continue;
             }
             $theme = OccasionCalendar::byPage($c['page']);

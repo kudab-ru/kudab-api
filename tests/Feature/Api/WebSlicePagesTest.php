@@ -240,6 +240,30 @@ class WebSlicePagesTest extends TestCase
         $this->assertSame(['' => 350], $week['piggy']['usual']);
     }
 
+    #[Test]
+    public function the_kids_week_keeps_only_kids_events_and_its_main_only_plainly_kids_ones(): void
+    {
+        $tale = $this->withPhoto($this->event('Сказка «Морозко»', '2026-10-24 11:00'));
+        // 6+ у спектакля пускает его на детскую страницу, но детским он себя не называет
+        $play = $this->withPhoto($this->event('Спектакль «Вишнёвый сад»', '2026-10-24 19:00'));
+        Event::query()->whereKey([$tale, $play])->update(['age_restriction' => 6]);
+        Event::query()->whereKey($tale)->update(['audience' => 'kids']);
+        $this->withTheme($tale, 'theatre');
+        $this->withTheme($play, 'theatre');
+        $this->withPhoto($this->event('Концерт группы Сова', '2026-10-24 20:00'));
+        // музей в пятницу закрыт: выставка идёт не все дни недели подряд
+        foreach (['2026-10-22', '2026-10-24'] as $day) {
+            Event::query()->whereKey($this->event('Выставка детского рисунка', $day.' 00:00'))
+                ->update(['start_time' => null, 'time_precision' => 'date']);
+        }
+
+        $week = $this->getJson('/api/web/kids?city=voronezh')->assertOk()->json('data.current');
+
+        $this->assertSame([$tale], array_column($week['picks'], 'id'));
+        $this->assertSame([$play], array_column(array_merge(...array_column($week['days'], 'events')), 'id'));
+        $this->assertSame([['Выставка детского рисунка', '2026-10-24']], array_map(fn (array $r) => [$r['title'], $r['until']], $week['both']));
+    }
+
     /** тема даёт основной вес оценки интереса: без неё событие до главного не дотягивает */
     private function withTheme(int $eventId, string $slug): void
     {
