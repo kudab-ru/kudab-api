@@ -686,6 +686,7 @@ class WebEventsTest extends TestCase
         };
         $tag('Спектакль «Мастер и Маргарита»', $jazz->id);
         $tag('Стендап-концерт Жени Синякова', $music->id);
+        $tag('Поединок по боксу с Всеволодом Жуковым', $music->id);
         $tag('Миленькие мои', $theatre->id, $jazz->id);
         $tag('Ночные снайперы', $jazz->id);
 
