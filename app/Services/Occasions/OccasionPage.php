@@ -16,6 +16,7 @@ use App\Services\Telegram\Scoring\EventAccess;
 use App\Services\Telegram\Scoring\EventBroadcastScorer;
 use App\Support\CalmCaps;
 use App\Support\CityCase;
+use App\Support\EventKind;
 use App\Support\EventStart;
 use App\Support\Telegram\KindEmoji;
 use App\Support\Telegram\VenueName;
@@ -54,27 +55,6 @@ final class OccasionPage
         7 => 'июля', 8 => 'августа', 9 => 'сентября', 10 => 'октября', 11 => 'ноября', 12 => 'декабря'];
 
     /** Вид по слову в названии сильнее темы: «Готический Halloween» с темой «Городские акции» — маркет. */
-    private const KIND_WORDS = [
-        'market' => ['маркет', 'ярмарк', 'барахолк'],
-        'quiz' => ['квиз', 'quiz'],
-        'party' => ['вечеринк', 'party', 'пати', 'дискотек'],
-        'workshop' => ['мастер-класс', 'мастер класс'],
-        'excursion' => ['экскурси'],
-        'theatre' => ['спектакл'],
-        'concert' => ['концерт'],
-        'exhibition' => ['выставк'],
-        'standup' => ['стендап', 'stand-up'],
-        'lecture' => ['лекци'],
-        'show' => ['шоу'],
-    ];
-
-    private const KIND_BY_INTEREST = [
-        'parties' => 'party', 'quiz-games' => 'quiz', 'music' => 'concert', 'theatre' => 'theatre', 'kids' => 'kids',
-        'exhibitions' => 'exhibition', 'standup' => 'standup', 'education' => 'lecture', 'literature' => 'lecture',
-        'excursions' => 'excursion', 'cinema' => 'cinema', 'circus-show' => 'show', 'festival' => 'festival',
-        'city' => 'city', 'sport' => 'sport', 'markets' => 'market',
-    ];
-
     /** [одно, много] */
     private const KIND_LABELS = [
         'party' => ['вечеринка', 'вечеринки'], 'quiz' => ['квиз', 'квизы'], 'market' => ['маркет', 'маркеты'],
@@ -761,25 +741,9 @@ final class OccasionPage
 
     private function kindOf(Event $e): string
     {
-        $title = mb_strtolower((string) $e->title);
-        foreach (self::KIND_WORDS as $kind => $words) {
-            if (OccasionCalendar::titleNames($title, $words)) {
-                return $kind;
-            }
-        }
-
         $main = $e->interests->first();
-        if ($main !== null) {
-            $root = $this->rootOf((int) $main->id);
-            if (isset(self::KIND_BY_INTEREST[$main->slug])) {
-                return self::KIND_BY_INTEREST[$main->slug];
-            }
-            if ($root !== null && isset(self::KIND_BY_INTEREST[$root])) {
-                return self::KIND_BY_INTEREST[$root];
-            }
-        }
 
-        return 'other';
+        return EventKind::of((string) $e->title, $main?->slug, $main !== null ? $this->rootOf((int) $main->id) : null);
     }
 
     private function rootOf(int $interestId): ?string

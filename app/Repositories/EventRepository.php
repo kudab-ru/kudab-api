@@ -591,6 +591,10 @@ class EventRepository
             }
         }
 
+        if (! empty($filters['kind'])) {
+            $q->webKind((string) $filters['kind']);
+        }
+
         if (! empty($filters['kids'])) {
             $q->webKids();
         }
@@ -1113,6 +1117,10 @@ class EventRepository
             } else {
                 $q->whereRaw('1 = 0');
             }
+        }
+
+        if (! empty($filters['kind'])) {
+            $q->webKind((string) $filters['kind']);
         }
 
         if (! empty($filters['kids'])) {

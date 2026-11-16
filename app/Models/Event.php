@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\EventKind;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
@@ -220,6 +221,14 @@ class Event extends Model
         });
 
         return $q->webFeedContentKind();
+    }
+
+    /** Разделы афиши: «Концерты» без спектаклей и квизов на музыкальную тему, см. `EventKind`. */
+    public function scopeWebKind($q, string $kind)
+    {
+        [$sql, $args] = EventKind::sql();
+
+        return $q->whereRaw("({$sql}) = ?", [...$args, $kind]);
     }
 
     /** Вид события, который годится для сайта. Блоки «что дальше» берут только это правило. */

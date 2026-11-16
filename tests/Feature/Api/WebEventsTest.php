@@ -670,6 +670,30 @@ class WebEventsTest extends TestCase
         $this->assertSame(2, $response->json('meta.total'));
     }
 
+    public function test_section_keeps_only_its_kind_by_title_word_then_main_topic(): void
+    {
+        $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
+        $community = $this->createCommunity($vrn->id, 'Организатор');
+        $music = $this->createInterest('Музыка', 'music');
+        $jazz = $this->createInterest('Джаз', 'jazz', $music->id);
+        $theatre = $this->createInterest('Театр', 'theatre');
+
+        $tag = function (string $title, int ...$interests) use ($vrn, $community): void {
+            $event = $this->createEvent($vrn->id, $community->id, $title, now()->addDay());
+            foreach ($interests as $rank => $id) {
+                DB::table('event_interest')->insert(['event_id' => $event->id, 'interest_id' => $id, 'rank' => $rank]);
+            }
+        };
+        $tag('Спектакль «Мастер и Маргарита»', $jazz->id);
+        $tag('Стендап-концерт Жени Синякова', $music->id);
+        $tag('Миленькие мои', $theatre->id, $jazz->id);
+        $tag('Ночные снайперы', $jazz->id);
+
+        $this->getJson('/api/web/events?city=voronezh&interests[]=music&kind=concert')
+            ->assertOk()
+            ->assertJsonPath('data.*.title', ['Ночные снайперы']);
+    }
+
     public function test_nonexistent_slug_returns_empty_result(): void
     {
         $msk = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);

@@ -11,6 +11,7 @@ use App\Services\EventService;
 use App\Services\EventSurvivor;
 use App\Services\Telegram\Scoring\EventAccess;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use App\Support\EventKind;
 use App\Support\KeyboardLayout;
 use App\Support\SearchLog;
 use Illuminate\Http\JsonResponse;
@@ -71,6 +72,7 @@ class EventsController extends Controller
             // новый — slug. Принимаем оба, но не mixed (см. after-callback).
             // После миграции фронта закрытым PR убрать legacy int-ветку.
             'interests.*'  => ['required', $this->interestItemRule()],
+            'kind'         => ['sometimes', Rule::in(EventKind::all())],
 
             // выбор колеса «Чего хочется?», см. paginateUpcomingWeb
             'prefer'       => ['sometimes','array'],
