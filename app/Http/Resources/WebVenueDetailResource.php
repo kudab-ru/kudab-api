@@ -34,6 +34,7 @@ class WebVenueDetailResource extends JsonResource
             'id'              => (int) $this->id,
             'slug'            => (string) ($this->slug ?? ''),
             'name'            => (string) ($this->name ?? ''),
+            'known_as'        => $this->known_as ?: null,
             'kind'            => $this->kind !== null ? (string) $this->kind : null,
 
             // Подпись типа в единственном числе: сам kind — категория каталога

@@ -592,14 +592,14 @@ class VenuesController extends Controller
     }
 
     /**
-     * Каждое слово запроса ищется без окончания в имени, в латинской записи имени и в улице:
+     * Каждое слово запроса ищется без окончания в имени (и в том, как место называют люди), в латинской записи и в улице:
      * «плехановская» находит места на Плехановской, «popcorn» — «Попкорн Драму». Место, где совпало
      * больше слов, выше. Опечатку ищем только у запроса из одного слова и только в одну-две буквы:
      * похожее по буквам слово тянет чужое, «картинная» нашла бы картинг. Место нужного вида («парк») — первым.
      */
     private function whereNameMatches($query, SearchMatch $match): void
     {
-        $name = 'public.ru_normalize(venues.name)';
+        $name = "public.ru_normalize(concat_ws(' ', venues.name, venues.known_as))";
         [$score, $args] = $this->matchScore($match, $name);
 
         $where = "$score > 0";
@@ -641,7 +641,7 @@ class VenuesController extends Controller
                 $case .= " WHEN $name LIKE ? THEN 2";
                 $args[] = '%'.$stem.'%';
             }
-            $case .= " WHEN public.lat_skeleton(venues.name) ~ ('(^|[^a-z0-9])' || public.lat_skeleton(?)) THEN 3";
+            $case .= " WHEN public.lat_skeleton(concat_ws(' ', venues.name, venues.known_as)) ~ ('(^|[^a-z0-9])' || public.lat_skeleton(?)) THEN 3";
             $args[] = $stem;
             if (! in_array($stem, self::STREET_WORDS, true)) {
                 $case .= " WHEN $street ~ ? THEN 1";

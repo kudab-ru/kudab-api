@@ -39,6 +39,7 @@ class AdminVenuesController extends Controller
 
                 $query->where(function ($w) use ($like, $token, $fuzzy) {
                     $w->whereRaw('public.ru_normalize(v.name) LIKE ?', [$like])
+                        ->orWhereRaw('public.ru_normalize(coalesce(v.known_as, \'\')) LIKE ?', [$like])
                         ->orWhereRaw('public.ru_normalize(coalesce(v.address, \'\')) LIKE ?', [$like]);
 
                     if ($fuzzy) {
@@ -61,7 +62,7 @@ class AdminVenuesController extends Controller
             ->get([
                 'v.id', 'v.name', 'v.slug', 'v.kind', 'v.address', 'v.latitude', 'v.longitude',
                 'v.house_fias_id', 'v.source_meta', 'v.created_at', 'c.name as city_name', 'v.city_id',
-                'v.parent_id', 'v.description', 'v.avatar_url', 'v.closed_weekdays',
+                'v.parent_id', 'v.description', 'v.avatar_url', 'v.closed_weekdays', 'v.known_as',
             ]);
 
         $ids = $venues->pluck('id');
@@ -90,6 +91,7 @@ class AdminVenuesController extends Controller
             return [
                 'id' => (int) $v->id,
                 'name' => $v->name,
+                'known_as' => $v->known_as,
                 'slug' => $v->slug,
                 // Тип каталога: список его не отдавал, поэтому увидеть «у скольких
                 // площадок он пуст» из админки было нельзя — а пуст он у 70 из 125.
@@ -231,6 +233,7 @@ class AdminVenuesController extends Controller
             // дни недели 1–7, когда площадка закрыта: по ним автомат не зовёт туда «сегодня»
             'closed_weekdays' => ['sometimes', 'nullable', 'array', 'max:7'],
             'closed_weekdays.*' => ['integer', 'between:1,7'],
+            'known_as' => ['sometimes', 'nullable', 'string', 'max:120'],
         ]);
         abort_if($data === [], 422, 'Нечего обновлять');
         // Половина координаты — не координата: required_with тут не помогает,
@@ -271,6 +274,10 @@ class AdminVenuesController extends Controller
         if ($lat !== null && $venue->latitude !== null && abs($lat - (float) $venue->latitude) <= 0.000001
             && abs($lon - (float) $venue->longitude) <= 0.000001) {
             $lat = $lon = null;
+        }
+
+        if (array_key_exists('known_as', $data)) {
+            $data['known_as'] = trim((string) $data['known_as']) ?: null;
         }
 
         if (array_key_exists('closed_weekdays', $data)) {

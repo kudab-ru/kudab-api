@@ -71,16 +71,17 @@ class WebVenuesTest extends TestCase
             'латиница' => ['popcorn', 'Попкорн Драма', 'Драмтеатр'],
             'похожее слово в запросе из двух' => ['картинная галерея', 'Галерея «Х.Л.А.М.»', 'Картинг клуб ENERGY'],
             'опечатка в начале слова' => ['консерт', 'Концертный зал', 'Картинг клуб ENERGY'],
+            'как называют люди' => ['вкз', 'Воронежский концертный зал', 'Картинг клуб ENERGY', null, 'ВКЗ'],
         ];
     }
 
     #[DataProvider('nameSearchCases')]
-    public function test_index_finds_the_venue_the_query_means(string $q, string $found, string $other, ?string $street = null): void
+    public function test_index_finds_the_venue_the_query_means(string $q, string $found, string $other, ?string $street = null, ?string $knownAs = null): void
     {
         $vrn = $this->insertCity('Воронеж', 'voronezh', 'active', 39.2003, 51.6608);
         $venue = $this->createVenue($vrn->id, $found, 'found');
         $this->createVenue($vrn->id, $other, 'other');
-        DB::table('venues')->where('id', $venue->id)->update(['street' => $street]);
+        DB::table('venues')->where('id', $venue->id)->update(['street' => $street, 'known_as' => $knownAs]);
 
         $data = $this->getJson('/api/web/venues?city_id='.$vrn->id.'&q='.urlencode($q))->assertOk()->json('data');
 
