@@ -68,7 +68,7 @@ final class KidsPage
     private function week(City $city, Carbon $from): array
     {
         return Cache::flexible(
-            'kids-page:v3:'.$city->slug.':'.$from->toDateString(),
+            'kids-page:v4:'.$city->slug.':'.$from->toDateString(),
             [self::CACHE_SECONDS, self::STALE_SECONDS],
             function () use ($city, $from) {
                 $w = ['w' => $from->toDateString()] + $this->slices->build(
@@ -77,6 +77,9 @@ final class KidsPage
                 // здесь всё детское по правилу `kids`, кнопка «Детям» ничего бы не отбирала
                 $w['kinds'] = array_values(array_filter($w['kinds'], fn (array $k) => $k['key'] !== 'for-kids'));
                 $w['kids'] = $w['total'];
+                // постер строке нужен для «Скоро подходит» в шапке, остальное карточка под мышью приносит сама
+                $w['days'] = array_map(fn (array $d) => ['events' => array_map($this->slim(...), $d['events'])] + $d, $w['days']);
+                $w['both'] = array_map($this->slim(...), $w['both']);
 
                 return $this->lasting($w);
             },
@@ -116,11 +119,20 @@ final class KidsPage
         return $w;
     }
 
+    /**
+     * @param  array<string, mixed>  $row
+     * @return array<string, mixed>
+     */
+    private function slim(array $row): array
+    {
+        return array_diff_key($row, ['images' => true, 'short_description' => true]);
+    }
+
     /** @return array<string, mixed> */
     private function theme(): array
     {
         return ['slug' => 's-detmi', 'page' => 's-detmi', 'title' => 'С детьми', 'kids' => true,
-            'site_pick' => true, 'picks' => self::PICKS + 3, 'slim_rows' => true, 'holidays' => self::HOLIDAYS,
+            'site_pick' => true, 'picks' => self::PICKS + 3, 'holidays' => self::HOLIDAYS,
             'question' => 'Куда сходить с детьми {city}?', 'free_question' => 'Что бесплатно?'];
     }
 }

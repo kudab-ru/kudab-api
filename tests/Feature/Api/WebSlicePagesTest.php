@@ -264,6 +264,8 @@ class WebSlicePagesTest extends TestCase
 
         $this->assertEqualsCanonicalizing([$tale, $puppets], array_column($week['picks'], 'id'));
         $this->assertSame([$play], array_column(array_merge(...array_column($week['days'], 'events')), 'id'));
+        // постер строки нужен блоку «Скоро подходит» в шапке
+        $this->assertNotNull($week['days'][array_key_first(array_filter($week['days'], fn ($d) => $d['events'] !== []))]['events'][0]['poster']);
         $this->assertSame([['Выставка детского рисунка', '2026-10-24']], array_map(fn (array $r) => [$r['title'], $r['until']], $week['both']));
     }
 
