@@ -68,7 +68,7 @@ final class KidsPage
     private function week(City $city, Carbon $from): array
     {
         return Cache::flexible(
-            'kids-page:v2:'.$city->slug.':'.$from->toDateString(),
+            'kids-page:v3:'.$city->slug.':'.$from->toDateString(),
             [self::CACHE_SECONDS, self::STALE_SECONDS],
             function () use ($city, $from) {
                 $w = ['w' => $from->toDateString()] + $this->slices->build(

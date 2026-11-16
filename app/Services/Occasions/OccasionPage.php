@@ -687,11 +687,15 @@ final class OccasionPage
         return $ids;
     }
 
-    /** Явно детское: строже правила `kids`, которое пускает и взрослое с меткой 6+, см. Event::scopeWebKids. */
+    /**
+     * Явно детское: строже правила `kids`, которое пускает и взрослое с меткой 6+, см. Event::scopeWebKids.
+     * Театр кукол играет для детей, даже когда в названии спектакля этого нет.
+     */
     private function forKids(Event $e, string $kind): bool
     {
         return $kind === 'kids' || ($e->audience ?? null) === 'kids'
-            || preg_match('/(?<![\p{L}])(для детей|детск)/iu', (string) $e->title) === 1;
+            || preg_match('/(?<![\p{L}])(для детей|детск)/iu', (string) $e->title) === 1
+            || preg_match('/театр кукол/iu', (string) $e->venue?->name) === 1;
     }
 
     /** @return array<string, mixed> */
