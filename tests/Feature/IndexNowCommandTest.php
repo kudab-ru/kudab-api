@@ -71,6 +71,20 @@ class IndexNowCommandTest extends TestCase
         $this->assertSame([["https://kudab.ru/events/{$id}"], ["https://kudab.ru/events/{$id}"]], $sent);
     }
 
+    #[Test]
+    public function the_stand_sends_nothing(): void
+    {
+        $this->event('2026-11-20 19:00');
+        Http::fake();
+        // так выглядит стенд: не production и база не тестовая
+        config(['app.env' => 'local']);
+        DB::shouldReceive('connection->getDatabaseName')->andReturn('kudab');
+
+        $this->artisan('seo:indexnow --pages')->assertSuccessful();
+
+        Http::assertNothingSent();
+    }
+
     private function event(string $at): int
     {
         $start = Carbon::parse($at, 'Europe/Moscow');

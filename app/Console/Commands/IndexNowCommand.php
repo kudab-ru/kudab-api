@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Console\Commands;
 
 use App\Repositories\EventRepository;
+use App\Support\BroadcastSafety;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -35,6 +36,13 @@ class IndexNowCommand extends Command
 
     public function handle(EventRepository $events): int
     {
+        // На стенде база — копия прода, но номера новых событий свои: в поиск ушли бы чужие адреса.
+        if (! BroadcastSafety::unrestricted()) {
+            $this->info('не прод: адреса не отправляются');
+
+            return self::SUCCESS;
+        }
+
         $site = rtrim((string) config('services.indexnow.site'), '/');
         $page = $events->listWebIdsForSitemap((int) Cache::get(self::CURSOR, 0), self::MAX_URLS, 'upcoming');
         $ids = array_column($page['items'], 'id');
