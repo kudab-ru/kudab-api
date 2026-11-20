@@ -287,6 +287,45 @@ final class OccasionPage
     }
 
     /**
+     * Число событий по дням и основные площадки за весь срок: отдельные запросы без карточек и оценки.
+     *
+     * @param  array<string, mixed>  $theme
+     * @param  array{0: Carbon, 1: Carbon}  $window
+     * @return array{days: array<string, int>, venues: list<array<string, mixed>>}
+     */
+    public function agenda(array $theme, City $city, array $window): array
+    {
+        $query = $this->eventsQuery($theme, $city, $window);
+        $days = (clone $query)
+            ->selectRaw('events.start_date as date, count(*) as total')
+            ->groupBy('events.start_date')
+            ->pluck('total', 'date')
+            ->map(fn ($n) => (int) $n)
+            ->all();
+
+        $venues = (clone $query)
+            ->join('venues', 'venues.id', '=', 'events.venue_id')
+            ->where('venues.status', 'active')
+            ->whereNull('venues.deleted_at')
+            ->select(['venues.id', 'venues.name', 'venues.slug'])
+            ->selectRaw('count(*) as total, min(events.start_date) as next_date')
+            ->groupBy('venues.id', 'venues.name', 'venues.slug')
+            ->orderByDesc('total')
+            ->orderBy('venues.name')
+            ->limit(8)
+            ->get()
+            ->map(fn (Event $v) => [
+                'id' => (int) $v->getAttribute('id'),
+                'name' => VenueName::label((string) $v->getAttribute('name')),
+                'url' => '/venues/'.$v->getAttribute('id').($v->getAttribute('slug') ? '-'.$v->getAttribute('slug') : ''),
+                'total' => (int) $v->getAttribute('total'),
+                'next_date' => substr((string) $v->getAttribute('next_date'), 0, 10),
+            ])->values()->all();
+
+        return ['days' => $days, 'venues' => $venues];
+    }
+
+    /**
      * @param  array<string, mixed>  $theme
      * @param  array{0: Carbon, 1: Carbon}  $window
      * @return Collection<int, Event>
@@ -380,6 +419,7 @@ final class OccasionPage
                 default => null,
             },
             'kids' => ! empty($theme['kids']) ? fn ($q) => $q->webKids() : null,
+            'kind' => isset($theme['kind']) ? fn ($q) => $q->webKind((string) $theme['kind']) : null,
         ]);
     }
 
@@ -527,7 +567,7 @@ final class OccasionPage
     private function picks(array $theme, City $city, Carbon $day, Collection $events, Carbon $now): array
     {
         $byId = $events->keyBy('id');
-        $item = $this->channelItem($theme, $city, $day);
+        $item = ($theme['channel_pick'] ?? true) ? $this->channelItem($theme, $city, $day) : null;
         $meta = (array) ($item?->digest_meta ?? []);
         // страница выходных берёт кандидатов с запасом: главное прошлых выходных она потом пропускает
         $limit = (int) ($theme['picks'] ?? self::PICKS);
@@ -536,7 +576,7 @@ final class OccasionPage
         $ids = match (true) {
             $item !== null => DB::table('telegram.chat_broadcast_item_events')->where('item_id', $item->id)->orderBy('position')->pluck('event_id')->map(fn ($v) => (int) $v)->all(),
             ! empty($theme['site_pick']) => $this->sitePick($events->reject(fn (Event $e) => isset($skip[(int) $e->id])
-                || (! empty($theme['kids']) && ! $this->forKids($e, $this->kindOf($e)))), $limit, $now),
+                || (! empty($theme['kids']) && ! $this->forKids($e, $this->kindOf($e)))), $limit, $now, (int) ($theme['pick_kind_limit'] ?? 2)),
             default => $this->autoPick($theme, $city, $day, $events, $now),
         };
         $ids = array_values(array_filter($ids, fn (int $id) => ! isset($skip[$id])));
@@ -634,7 +674,7 @@ final class OccasionPage
      * @param  Collection<int, Event>  $events
      * @return list<int>
      */
-    private function sitePick(Collection $events, int $limit, Carbon $now): array
+    private function sitePick(Collection $events, int $limit, Carbon $now, int $kindLimit = 2): array
     {
         $stop = array_map('mb_strtolower', (array) config('broadcast_digest.title_stop_list', []));
         $ranked = $events
@@ -653,7 +693,7 @@ final class OccasionPage
             $title = 't'.$this->sameTitle((string) $e->title);
             $place = 'p'.($e->venue_id ?: mb_strtolower((string) $e->address));
             $kind = $this->kindOf($e);
-            if (isset($seen[$series]) || isset($seen[$title]) || isset($seen[$place]) || ($kinds[$kind] ?? 0) >= 2) {
+            if (isset($seen[$series]) || isset($seen[$title]) || isset($seen[$place]) || ($kinds[$kind] ?? 0) >= $kindLimit) {
                 continue;
             }
             $seen[$series] = $seen[$title] = $seen[$place] = true;

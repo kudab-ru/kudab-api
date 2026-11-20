@@ -104,7 +104,7 @@ final class SliceBuilder
             'days' => $days,
             'both' => $both,
             'holiday' => $holiday,
-            'rinks' => $anchor === null ? null : $this->rinks->teaser($city, $from, $to),
+            'rinks' => $anchor !== null && ($theme['rinks'] ?? true) ? $this->rinks->teaser($city, $from, $to) : null,
             // «Коротко» — только у подборки с вопросом в теме, см. OccasionPage::faq
             'faq' => isset($theme['question'])
                 ? $this->page->faq($theme, CityCase::prepositional($city->slug), null, $picks, $rows)

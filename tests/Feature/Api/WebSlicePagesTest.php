@@ -269,6 +269,98 @@ class WebSlicePagesTest extends TestCase
         $this->assertSame([['Выставка детского рисунка', '2026-10-24']], array_map(fn (array $r) => [$r['title'], $r['until']], $week['both']));
     }
 
+    #[Test]
+    public function the_concerts_category_counts_occurrences_and_excludes_other_kinds_and_cancelled_events(): void
+    {
+        $first = $this->event('Концерт первого состава', '2026-10-22 18:00');
+        $second = $this->event('Концерт второго состава', '2026-10-22 20:00');
+        $tomorrow = $this->event('Концерт завтрашнего вечера', '2026-10-23 19:00');
+        $this->event('Спектакль с музыкой', '2026-10-22 19:00');
+        Event::query()->whereKey($this->event('Концерт отменённый', '2026-10-24 19:00'))->update(['status' => 'cancelled']);
+
+        $page = $this->getJson('/api/web/categories/koncerty?city=voronezh')->assertOk()->json('data');
+        $titles = array_column(array_merge(...array_column($page['current']['days'], 'events')), 'title');
+
+        $this->assertSame(3, $page['weeks'][0]['total']);
+        $this->assertSame(2, $page['weeks'][0]['days'][0]['count']);
+        $this->assertSame(3, $page['current']['total']);
+        $this->assertEqualsCanonicalizing([$first, $second, $tomorrow], array_column(array_merge(...array_column($page['current']['days'], 'events')), 'id'));
+        $this->assertNotContains('Спектакль с музыкой', $titles);
+        $this->assertNotContains('Концерт отменённый', $titles);
+    }
+
+    #[Test]
+    public function the_concerts_category_selects_a_week_and_a_later_month_and_links_venues(): void
+    {
+        $this->event('Концерт следующей недели', '2026-10-29 19:00');
+        $far = $this->event('Концерт следующего месяца', '2026-12-10 19:00');
+        $this->event('Концерт в следующем году', '2027-01-15 19:00');
+        $venue = \App\Models\Venue::query()->findOrFail(Event::query()->whereKey($far)->value('venue_id'));
+
+        $first = $this->getJson('/api/web/categories/koncerty?city=voronezh')->assertOk()->json('data');
+        $week = $this->getJson('/api/web/categories/koncerty?city=voronezh&w=2026-10-29')->assertOk()->json('data');
+        $month = $this->getJson('/api/web/categories/koncerty?city=voronezh&month=2026-12')->assertOk()->json('data');
+
+        $this->assertSame(['2026-12', '2027-01'], array_column($first['months'], 'key'));
+        $this->assertSame(['type' => 'week', 'key' => '2026-10-29'], $week['selected']);
+        $this->assertSame(1, $week['current']['total']);
+        $this->assertSame(['type' => 'month', 'key' => '2026-12'], $month['selected']);
+        $this->assertSame(1, $month['current']['total']);
+        $this->assertSame('2026-12', $month['current']['month']);
+        $linked = collect($month['venues'])->firstWhere('id', $venue->id);
+        $this->assertSame(1, $linked['total']);
+        $this->assertSame('2026-12-10', $linked['next_date']);
+        $this->assertSame('/venues/'.$venue->id.'-'.$venue->slug, $linked['url']);
+    }
+
+    #[Test]
+    public function the_concerts_short_block_uses_real_prices_and_upcoming_dates(): void
+    {
+        foreach ([1000, 2000, 3000, 4000] as $i => $price) {
+            $id = $this->event('Концерт классики '.($i + 1), '2026-10-24 '.(19 + $i).':00');
+            Event::query()->whereKey($id)->update(['price_min' => $price]);
+            if ($i === 2) {
+                $this->withTheme($id, 'classical');
+            }
+        }
+        Event::query()->whereKey($this->event('Бесплатный концерт', '2026-10-25 18:00'))
+            ->update(['price_status' => 'free', 'price_min' => null, 'price_max' => null]);
+
+        $short = $this->getJson('/api/web/categories/koncerty?city=voronezh')->assertOk()->json('data.short');
+
+        $this->assertSame(['q1' => 1500, 'q2' => 2500, 'q3' => 3500], $short['prices']);
+        $this->assertSame('Бесплатный концерт', $short['free'][0]['title']);
+        $this->assertSame('2026-10-25', $short['free'][0]['date']);
+        $this->assertSame('2026-10-24', $short['weekend'][0]['date']);
+        $this->assertCount(3, $short['weekend'][0]['events']);
+        $this->assertSame('Концерт классики 3', $short['classical'][0]['title']);
+    }
+
+    #[Test]
+    public function the_concerts_category_returns_an_empty_schedule_for_an_inactive_city(): void
+    {
+        $page = $this->getJson('/api/web/categories/koncerty?city=moskva')->assertOk()->json('data');
+
+        $this->assertSame([0, 0, 0, 0, 0], array_column($page['weeks'], 'total'));
+        $this->assertSame(0, $page['current']['total']);
+        $this->assertSame([], $page['months']);
+        $this->assertSame([], $page['venues']);
+    }
+
+    #[Test]
+    public function the_concerts_main_can_include_five_concerts(): void
+    {
+        for ($i = 1; $i <= 5; $i++) {
+            $id = $this->withPhoto($this->event('Концерт группы '.$i, '2026-10-23 19:00'));
+            $this->withTheme($id, 'music');
+        }
+
+        $picks = $this->getJson('/api/web/categories/koncerty?city=voronezh')->assertOk()->json('data.current.picks');
+
+        $this->assertCount(5, $picks);
+        $this->assertSame([1, 2, 3, 4, 5], array_map(fn (array $p) => (int) mb_substr($p['title'], -1), $picks));
+    }
+
     /** тема даёт основной вес оценки интереса: без неё событие до главного не дотягивает */
     private function withTheme(int $eventId, string $slug): void
     {
