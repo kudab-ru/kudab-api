@@ -39,9 +39,15 @@ docker-compose exec api php artisan migrate --seed
 
 ## Тесты
 
+Запускать из корня инфра-репозитория:
+
 ```bash
-docker-compose exec kudab-api php artisan test
+make test
+make test-filter FILTER=Foo
+make test-fresh
 ```
+
+Эти команды используют отдельную PostgreSQL-базу `kudab_test`. Не запускать `php artisan test` без `--env=testing`: тесты с `RefreshDatabase` пересоздают все таблицы той базы, к которой подключился Laravel.
 
 Покрыты: валидация данных событий, фильтрация и поиск, ранжирование, API-эндпоинты.
 
