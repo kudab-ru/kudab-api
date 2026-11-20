@@ -7,10 +7,12 @@ use App\Http\Requests\Admin\Events\AdminEventsStoreRequest;
 use App\Http\Requests\Admin\Events\AdminEventsUpdateRequest;
 use App\Http\Resources\Admin\EventResource as AdminEventResource;
 use App\Models\Event;
+use App\Services\EventChanges;
 use App\Services\Text\TextLock;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Facades\DB;
 
 class AdminEventsController extends Controller
 {
@@ -252,6 +254,38 @@ class AdminEventsController extends Controller
         }
 
         $event->load($this->eventRelations());
+
+        return response()->json([
+            'data' => (new AdminEventResource($event))->toArray($request),
+        ]);
+    }
+
+    public function cancel(Request $request, int $id): JsonResponse
+    {
+        $event = Event::query()->findOrFail($id);
+
+        if ($event->status !== EventChanges::CANCELLED) {
+            DB::transaction(function () use ($event): void {
+                $now = now();
+                $updated = DB::table('events')
+                    ->where('id', $event->id)
+                    ->whereNot('status', EventChanges::CANCELLED)
+                    ->update(['status' => EventChanges::CANCELLED, 'updated_at' => $now]);
+
+                if ($updated) {
+                    DB::table('event_changes')->insert([
+                        'event_id' => $event->id,
+                        'kind' => EventChanges::CANCELLED,
+                        'new_event_id' => null,
+                        'context_post_id' => null,
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ]);
+                }
+            });
+        }
+
+        $event->refresh()->load($this->eventRelations());
 
         return response()->json([
             'data' => (new AdminEventResource($event))->toArray($request),

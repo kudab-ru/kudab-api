@@ -100,6 +100,7 @@ Route::prefix('admin')
         Route::patch('/events/{id}', [AdminEventsController::class, 'update']);
         Route::delete('/events/{id}', [AdminEventsController::class, 'destroy']);
         Route::post('/events/{id}/restore', [AdminEventsController::class, 'restore']);
+        Route::post('/events/{id}/cancel', [AdminEventsController::class, 'cancel']);
 
         // Рассылка в телеграм. Отдельная группа, а не /api/bot/broadcast/*:
         // те авторизуются общим токеном бота и считают права по telegram_id

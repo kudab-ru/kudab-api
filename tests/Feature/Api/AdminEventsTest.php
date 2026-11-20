@@ -199,6 +199,48 @@ class AdminEventsTest extends TestCase
         ]);
     }
 
+    public function test_admin_cancel_marks_event_and_records_change_once(): void
+    {
+        $this->actingAsAdmin();
+        $city = $this->insertCity('Москва', 'moskva', 'active', 37.6176, 55.7558);
+        $community = Community::create([
+            'name' => 'Организатор Москва',
+            'city_id' => $city->id,
+        ]);
+        $event = new Event();
+        $event->community_id = $community->id;
+        $event->city_id = $city->id;
+        $event->title = 'Отменяемое событие';
+        $event->status = 'active';
+        $event->start_time = now()->addDay();
+        $event->start_date = now()->addDay()->toDateString();
+        $event->save();
+
+        $this->postJson('/api/admin/events/'.$event->id.'/cancel')
+            ->assertOk()
+            ->assertJsonPath('data.id', $event->id)
+            ->assertJsonPath('data.status', 'cancelled');
+        $this->postJson('/api/admin/events/'.$event->id.'/cancel')
+            ->assertOk()
+            ->assertJsonPath('data.status', 'cancelled');
+
+        $this->assertDatabaseHas('events', [
+            'id' => $event->id,
+            'status' => 'cancelled',
+        ]);
+        $this->assertDatabaseHas('event_changes', [
+            'event_id' => $event->id,
+            'kind' => 'cancelled',
+            'new_event_id' => null,
+            'context_post_id' => null,
+            'notified_at' => null,
+        ]);
+        $this->assertSame(1, DB::table('event_changes')->where('event_id', $event->id)->count());
+        $this->getJson('/api/web/events/'.$event->id)
+            ->assertOk()
+            ->assertJsonPath('data.change.kind', 'cancelled');
+    }
+
     private function insertCity(string $name, string $slug, string $status, float $lng, float $lat): City
     {
         $now = now();
