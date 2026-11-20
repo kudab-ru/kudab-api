@@ -148,7 +148,8 @@ return [
          * Жанра у неё нет вовсе, поэтому жанровые отсечки не применяются —
          * как у «Бесплатно», по той же причине.
          */
-        ['slug' => 'na-vyhodnyh', 'title' => 'На выходных', 'headline' => 'На выходных', 'emoji' => '🗓',
+        ['slug' => 'na-vyhodnyh', 'page' => 'na-vyhodnyh', 'page_filters' => ['when' => 'weekend'],
+            'title' => 'На выходных', 'headline' => 'На выходных', 'emoji' => '🗓',
             'forms' => ['событие', 'события', 'событий'],
             'pick' => 'all',
             'window' => 'weekend',

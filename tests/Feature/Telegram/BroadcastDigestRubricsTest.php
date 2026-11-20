@@ -449,6 +449,28 @@ class BroadcastDigestRubricsTest extends TestCase
         $this->assertMatchesRegularExpression('/<\/a><\/b>\n\d{2}:\d{2} · /u', $caption, 'под заголовком дня в строке только час');
     }
 
+    #[Test]
+    public function weekend_footer_leads_to_the_full_page_and_keeps_the_friday_filter(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-17 10:00', 'Europe/Moscow'));
+        $this->onlyRubric('na-vyhodnyh');
+
+        $long = str_repeat('описание события достаточной длины и подробностей. ', 8);
+        foreach ([2, 2, 2, 3, 3] as $i => $day) {
+            $this->event('Выходное '.($i + 1), $day, free: false, priceMin: 500, hour: 12 + $i, description: $long);
+        }
+        $this->event('Спектакль в пятницу', 1, free: false, priceMin: 700, hour: 19, description: $long);
+        $bar = $this->event('Концерт в баре', 1, free: false, priceMin: 800, hour: 21, description: $long);
+        $this->retag($bar, 'music');
+        DB::table('venues')->where('id', DB::table('events')->where('id', $bar)->value('venue_id'))->update(['kind' => 'Клубы и бары']);
+
+        $caption = $this->caption(Carbon::parse('2026-09-17 19:00', 'Europe/Moscow'));
+
+        $this->assertStringContainsString('href="https://kudab.ru/afisha/voronezh/na-vyhodnyh?utm_source=tg&amp;utm_medium=digest', $caption);
+        $this->assertStringContainsString('href="https://kudab.ru/events?date_from=2026-09-18&amp;date_to=2026-09-18&amp;tod=evening&amp;city=voronezh', $caption);
+        $this->assertStringNotContainsString('/events?when=weekend', $caption);
+    }
+
     /**
      * Повторился день недели — печатаем число у ВСЕХ строк.
      *
@@ -1245,9 +1267,10 @@ class BroadcastDigestRubricsTest extends TestCase
 
         $caption = $this->caption(Carbon::parse('2026-09-18 14:00', 'Europe/Moscow'));
 
-        $this->assertMatchesRegularExpression('/href="[^"]*when=weekend/u', $caption);
-        $this->assertDoesNotMatchRegularExpression('/href="[^"]*when=weekend[^"]*date_from=/u', $caption,
-            'даты в такой ссылке лишние — лента считает их сама');
+        $this->assertStringContainsString('/afisha/voronezh/na-vyhodnyh?', $caption);
+        $this->assertStringNotContainsString('/events?when=weekend', $caption);
+        $this->assertDoesNotMatchRegularExpression('/na-vyhodnyh[^"]*date_from=/u', $caption,
+            'даты в такой ссылке лишние — страница считает их сама');
     }
 
     /* ──────────────── бюджет фразы ──────────────── */

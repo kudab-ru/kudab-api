@@ -3131,21 +3131,18 @@ final class BroadcastDigestComposer
         $citySlug = $broadcast->chat?->city?->slug ?? '';
         $utm = (array) config('broadcast_digest.utm', []);
 
-        // Ценовая и временная рубрика ведёт в ленту, а не на страницу сайта: у
-        // страницы /afisha/voronezh/besplatno неделя, у рубрики свои дни.
-        //
-        // Лента умеет ровно эти фильтры: ?free=1, ?price_max=, ?tod=.
-        // Ведём туда — читатель попадает на тот же отбор, что в посте.
-        // Адрес собирается из ТОГО ЖЕ фильтра, по которому посчитано число в
-        // посте. Готовой строки-адреса у рубрики больше нет намеренно: пока
-        // они лежали порознь, число и страница могли разъехаться молча.
+        // Ценовая рубрика остаётся в ленте: у /afisha/voronezh/besplatno неделя,
+        // у рубрики свои дни. Ссылка собирается из фильтра, по которому посчитано число.
+        // Рубрика с `page_filters` идёт на свою страницу только при совпадении выборки:
+        // иначе ссылка вроде «вечер пятницы» должна остаться на своей ленте.
         $query = $linkFilters !== null
             ? http_build_query($linkFilters + ['city' => $citySlug])
             : '';
+        $hasPage = isset($theme['page']) && $citySlug !== ''
+            && (! isset($theme['page_filters']) || $linkFilters === $theme['page_filters']);
 
         $url = match (true) {
-            // у праздника своя страница: программа по дням вместо ленты поиска
-            isset($theme['page']) && $citySlug !== '' => $base.'/afisha/'.$citySlug.'/'.$theme['page'],
+            $hasPage => $base.'/afisha/'.$citySlug.'/'.$theme['page'],
             $query !== '' => $base.'/events?'.$query,
             $citySlug !== '' => $base.'/afisha/'.$citySlug.'/'.$slug,
             default => $base.'/events',
